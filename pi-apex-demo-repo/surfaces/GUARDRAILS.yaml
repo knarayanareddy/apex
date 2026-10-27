@@ -1,0 +1,26 @@
+version: 1
+sandbox:
+  default_mode: workspace-write
+  network_egress: default-deny
+  allowed_domains:
+    - api.github.com
+    - registry.npmjs.org
+    - pypi.org
+  read_only_mounts:
+    - .git/hooks
+    - .git/config
+    - .harness
+    - .pi
+  protected_globs:
+    - ".env*"
+    - "**/*.pem"
+    - "**/*id_rsa*"
+shell_ast_gate:
+  deny_pipe_to_interpreters: ["sh", "bash", "zsh", "python", "python3", "node", "perl", "ruby"]
+  deny_commands: ["nc", "ncat", "socat"]
+limits:
+  max_worker_depth: 1
+  max_parallel_workers: 4
+  tool_output_max_bytes: 8192
+  tool_output_max_lines: 200
+  memory_max_tokens: 800

@@ -1,0 +1,53 @@
+version: "3.1"
+sandbox:
+  default_mode: "workspace-write"
+  unshare_network_by_default: true
+  clear_host_env: true
+  allowed_env_vars:
+    - "PATH"
+    - "HOME"
+    - "TMPDIR"
+    - "LANG"
+    - "TERM"
+  masked_workspace_globs:
+    - ".env"
+    - ".env.*"
+    - ".npmrc"
+    - ".netrc"
+  unmasked_exceptions:
+    - ".env.example"
+  read_only_workspace_subpaths:
+    - ".git/hooks"
+    - ".git/config"
+    - ".harness"
+shell_gate:
+  block_pipe_to_interpreters:
+    - "sh"
+    - "bash"
+    - "zsh"
+    - "dash"
+    - "python"
+    - "python3"
+    - "node"
+    - "perl"
+    - "ruby"
+  block_raw_network_tools:
+    - "nc"
+    - "ncat"
+    - "netcat"
+    - "socat"
+    - "telnet"
+  block_proxy_bypass_flags:
+    - "--noproxy"
+prefix_caps_o200k:
+  system_md: 160
+  tool_guidance_md: 180
+  memory_md: 300
+  root_agents_md: 220
+  direct_tool_schemas: 1240
+  total_max: 2100
+spill:
+  max_inline_bytes: 32768
+  max_inline_lines: 800
+  preview_bytes: 2048
+  cleanup_days: 30

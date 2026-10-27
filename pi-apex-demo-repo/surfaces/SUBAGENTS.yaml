@@ -1,0 +1,11 @@
+version: 1
+profiles:
+  worker:
+    max_depth: 1
+    worktree_isolation: required
+    cow_strategy: reflink-or-hardlink-cache
+    allowed_tools: ["read", "write", "edit", "bash", "codemode"] # delegate_workers intentionally excluded
+  blind_reviewer:
+    fresh_session: true
+    visible_inputs: ["user_spec", "git_diff", "test_report", "lsp_diagnostics"]
+    allowed_tools: ["read"]

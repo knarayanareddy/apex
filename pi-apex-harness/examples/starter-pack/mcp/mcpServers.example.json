@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "local-dev-helper": {
+      "command": "node",
+      "args": ["examples/starter-pack/mcp/local-dev-helper.mjs"]
+    }
+  }
+}

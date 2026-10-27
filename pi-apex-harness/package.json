@@ -1,0 +1,61 @@
+{
+  "name": "pi-apex-harness",
+  "version": "4.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "pi-apex": "./bin/pi-apex"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build:native": "node scripts/build-native.mjs",
+    "typecheck": "tsc --noEmit",
+    "bench": "node --experimental-strip-types src/cli/bench-cli.ts",
+    "test:tier-a": "node --experimental-strip-types test/tier-a-fast/run-tier-a.ts",
+    "test:backpressure": "node --experimental-strip-types test/test-stdout-backpressure.ts",
+    "test:tier-b": "node --experimental-strip-types test/tier-b-integration/run-tier-b.ts",
+    "test:ring1": "node --experimental-strip-types test/ring1/run-ring1-tests.ts",
+    "test:ring2": "node --experimental-strip-types test/ring2/run-ring2-tests.ts",
+    "test:ring3": "node --experimental-strip-types test/ring3/run-ring3-tests.ts",
+    "test:ring4": "node --experimental-strip-types test/ring4/run-ring4-tests.ts",
+    "test:ring5": "node --experimental-strip-types test/ring5/run-ring5-tests.ts",
+    "test:ring6": "node --experimental-strip-types test/ring6/run-ring6-tests.ts",
+    "test:ring7": "node --experimental-strip-types test/ring7/run-ring7-tests.ts",
+    "test:ring8": "node --experimental-strip-types test/ring8/run-ring8-tests.ts",
+    "test:ring9": "node --experimental-strip-types test/ring9/run-ring9-tests.ts",
+    "test:ring10": "node --experimental-strip-types test/ring10/run-ring10-tests.ts",
+    "package:release": "bash scripts/package-release.sh",
+    "test": "npm run build:native && npm run typecheck && npm run test:tier-a && npm run test:tier-b && npm run test:ring1 && npm run test:ring2 && npm run test:ring3 && npm run test:ring4 && npm run test:ring5 && npm run test:ring6 && npm run test:ring7 && npm run test:ring8 && npm run test:ring9 && npm run test:ring10 && npm run test:ring11 && npm run test:ring12 && npm run test:ring13 && npm run test:ring14 && npm run test:starter-pack",
+    "test:ring11": "node --experimental-strip-types test/ring11/run-ring11-tests.ts",
+    "test:ring12": "node --experimental-strip-types test/ring12/run-ring12-tests.ts",
+    "test:ring13": "node --experimental-strip-types test/ring13/run-ring13-tests.ts",
+    "test:ring14": "node --experimental-strip-types test/ring14/run-ring14-tests.ts",
+    "test:starter-pack": "node --experimental-strip-types test/starter-pack/run-starter-pack-tests.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-codemode": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-mcp": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
+    "ipaddr.js": "^2.5.0",
+    "js-tiktoken": "1.0.21",
+    "officeparser": "8.3.0",
+    "pdf-lib": "1.17.1",
+    "tree-sitter-wasms": "0.1.13",
+    "undici": "^8.12.3",
+    "web-tree-sitter": "0.22.6"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.6",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "@earendil-works/pi-coding-agent": {
+      "undici": "^8.12.3"
+    }
+  }
+}

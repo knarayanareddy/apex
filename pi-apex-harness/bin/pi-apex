@@ -1,0 +1,7 @@
+#!/usr/bin/env node
+import { runPiApexCli } from "../src/cli/pi-apex-cli.ts";
+
+const exitCode = await runPiApexCli(process.argv.slice(2));
+if (exitCode !== 0) {
+  process.exitCode = exitCode;
+}

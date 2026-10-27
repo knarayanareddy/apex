@@ -1,0 +1,10 @@
+{
+  "id": "starter-dev-helper",
+  "name": "Starter Development Helpers",
+  "version": "1.0.0",
+  "description": "Deterministic, read-only text metrics and JSON formatting tools for development tasks.",
+  "entry": "index.mjs",
+  "capabilities": {
+    "codemodeTools": ["text_metrics", "format_json"]
+  }
+}

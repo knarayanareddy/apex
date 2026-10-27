@@ -1,0 +1,24 @@
+{
+  "name": "metrics-pipeline",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:e2e": "node --test packages/e2e/specs/ingestion.spec.mjs",
+    "benchmark:burst": "node packages/e2e/benchmark-burst.mjs",
+    "lint": "eslint packages scripts eslint.config.mjs && tsc --noEmit"
+  },
+  "dependencies": {
+    "ioredis": "^6.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.5",
+    "eslint": "^10.13.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.1"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

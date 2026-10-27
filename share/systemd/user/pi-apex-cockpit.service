@@ -1,0 +1,14 @@
+[Unit]
+Description=Pi-Apex Mission-Control Operator Cockpit (Rings 0-8)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/pi-apex-harness
+Environment=PATH=/tmp/node22/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/user/bin/pi-apex --web --host 127.0.0.1 --port 4310
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

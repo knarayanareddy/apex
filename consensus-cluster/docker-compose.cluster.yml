@@ -1,0 +1,48 @@
+x-raft: &raft
+  image: node:22-alpine
+  working_dir: /app
+  command: ["node", "packages/consensus/src/server.ts"]
+  init: true
+  stop_grace_period: 5s
+  networks: [raft]
+  volumes:
+    - .:/app:ro
+
+services:
+  node-1:
+    <<: *raft
+    environment:
+      RAFT_ID: node-1
+      RAFT_URL: http://node-1:19101
+      RAFT_PEERS: http://node-2:19101,http://node-3:19101
+      RAFT_FAULT_INJECTION: ${RAFT_FAULT_INJECTION:-0}
+    ports: ["127.0.0.1:${RAFT_NODE1_PORT:-19201}:19201"]
+    volumes:
+      - .:/app:ro
+      - ${RAFT_DATA_ROOT:-./.raft-data}/node-1:/var/raft
+  node-2:
+    <<: *raft
+    environment:
+      RAFT_ID: node-2
+      RAFT_URL: http://node-2:19101
+      RAFT_PEERS: http://node-1:19101,http://node-3:19101
+      RAFT_FAULT_INJECTION: ${RAFT_FAULT_INJECTION:-0}
+    ports: ["127.0.0.1:${RAFT_NODE2_PORT:-19202}:19201"]
+    volumes:
+      - .:/app:ro
+      - ${RAFT_DATA_ROOT:-./.raft-data}/node-2:/var/raft
+  node-3:
+    <<: *raft
+    environment:
+      RAFT_ID: node-3
+      RAFT_URL: http://node-3:19101
+      RAFT_PEERS: http://node-1:19101,http://node-2:19101
+      RAFT_FAULT_INJECTION: ${RAFT_FAULT_INJECTION:-0}
+    ports: ["127.0.0.1:${RAFT_NODE3_PORT:-19203}:19201"]
+    volumes:
+      - .:/app:ro
+      - ${RAFT_DATA_ROOT:-./.raft-data}/node-3:/var/raft
+
+networks:
+  raft:
+    internal: true

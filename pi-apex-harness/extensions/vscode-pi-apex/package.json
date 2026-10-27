@@ -1,0 +1,97 @@
+{
+  "name": "vscode-pi-apex",
+  "displayName": "Pi-Apex Personal Confined Coding Agent (Rings 0–9)",
+  "description": "Thin VS Code & Cursor RPC extension for Pi-Apex v4.1.0: selection + LSP diagnostics context, /plan, /review, /handoff, autonomous self-healing /pr, swarm orchestration, and embedded Agent Studio.",
+  "version": "4.1.0",
+  "publisher": "pi-apex-personal",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:piApex.askSelection",
+    "onCommand:piApex.togglePlan",
+    "onCommand:piApex.reviewDiff",
+    "onCommand:piApex.handoff",
+    "onCommand:piApex.autonomousPr",
+    "onCommand:piApex.openCockpit"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "piApex.askSelection",
+        "title": "Pi-Apex: Ask Agent About Selection & Diagnostics"
+      },
+      {
+        "command": "piApex.togglePlan",
+        "title": "Pi-Apex: Toggle Plan Mode (/plan)"
+      },
+      {
+        "command": "piApex.reviewDiff",
+        "title": "Pi-Apex: Run BugBot & Codex Three-Dot Review (/review)"
+      },
+      {
+        "command": "piApex.handoff",
+        "title": "Pi-Apex: Handoff Active Selection to Fresh Thread (/handoff)"
+      },
+      {
+        "command": "piApex.autonomousPr",
+        "title": "Pi-Apex: Run Self-Healing Autonomous Issue-to-PR (/pr)"
+      },
+      {
+        "command": "piApex.openCockpit",
+        "title": "Pi-Apex: Open Mission-Control Cockpit Panel"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "piApex.askSelection",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "piApex.togglePlan",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p"
+      },
+      {
+        "command": "piApex.reviewDiff",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r"
+      },
+      {
+        "command": "piApex.autonomousPr",
+        "key": "ctrl+alt+g",
+        "mac": "cmd+alt+g"
+      }
+    ],
+    "configuration": {
+      "title": "Pi-Apex Agent",
+      "properties": {
+        "piApex.binaryPath": {
+          "type": "string",
+          "default": "pi-apex",
+          "description": "Path to the installed pi-apex binary (e.g. ~/.local/bin/pi-apex)."
+        },
+        "piApex.defaultModel": {
+          "type": "string",
+          "default": "apex/auto",
+          "description": "Default model or virtual router (e.g. apex/auto, anthropic/claude-sonnet-4-5, ollama/qwen2.5-coder:14b)."
+        },
+        "piApex.cockpitUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:4310",
+          "description": "Local Mission-Control Cockpit URL for the embedded Webview panel."
+        }
+      }
+    }
+  }
+}

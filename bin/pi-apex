@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PI_APEX_HARNESS="$(cd "${SCRIPT_DIR}/../pi-apex-harness" && pwd)"
+NODE_BIN="$(command -v node || echo "/opt/homebrew/bin/node")"
+exec "${NODE_BIN}" "${PI_APEX_HARNESS}/bin/pi-apex" "$@"

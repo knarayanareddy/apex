@@ -1,0 +1,12 @@
+{
+  "name": "brownfield-enterprise-monorepo",
+  "version": "3.4.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "node packages/e2e-suite/test/reconciliation.spec.mjs"
+  }
+}

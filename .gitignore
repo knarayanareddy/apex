@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Runtime Harness Databases & State
+.harness/
+**/.harness/
+.verification/
+**/.verification/
+.wal/
+**/.wal/
+.raft-data/
+**/.raft-data/
+*.sqlite
+*.db
+
+# Local User Configurations & Cache
+.config/
+**/.config/
+.pi/
+**/.pi/
+
+# Logs & Temporary Files
+*.log
+**/*.log
+*.tmp
+**/*.tmp
+.DS_Store
+**/.DS_Store

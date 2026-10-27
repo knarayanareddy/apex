@@ -1,0 +1,12 @@
+{
+  "id": "release-notes-helper",
+  "name": "Release Notes Helper",
+  "version": "1.0.0",
+  "description": "Formats Keep-a-Changelog sections inside QuickJS Codemode (+0 active schema tokens)",
+  "entry": "index.mjs",
+  "capabilities": {
+    "codemodeTools": ["format_changelog"],
+    "slashCommands": ["changelog"],
+    "gatewayPlatforms": ["matrix"]
+  }
+}
