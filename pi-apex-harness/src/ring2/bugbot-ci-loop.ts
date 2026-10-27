@@ -23,7 +23,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { DurabilityMode, GuardrailsConfig } from "../types.ts";
+import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import type { DurabilityMode, GuardrailsConfig, SandboxMode } from "../types.ts";
 import { createBwrapBashOperations } from "../core/bwrap-sandbox.ts";
 import { evaluateShellCommandGuard } from "../core/monotonic-guard.ts";
 import { readWorkspaceFileSafe } from "../core/safe-path.ts";
@@ -365,7 +366,8 @@ export class BugBotAndCiEngine {
   private readonly db: DatabaseSync;
   private readonly guardrails: GuardrailsConfig;
   private readonly durabilityMode: DurabilityMode;
-  private readonly useBwrap: boolean;
+  private readonly bashOps: BashOperations;
+  private readonly sandboxMode: SandboxMode;
   private readonly artifacts?: TrustArtifactController;
 
   constructor(opts: {
@@ -373,6 +375,9 @@ export class BugBotAndCiEngine {
     db: DatabaseSync;
     guardrails: GuardrailsConfig;
     durabilityMode?: DurabilityMode;
+    bashOps?: BashOperations;
+    sandboxMode?: SandboxMode;
+    allowUnsandboxedDev?: boolean;
     useBwrap?: boolean;
     artifacts?: TrustArtifactController;
   }) {
@@ -380,7 +385,15 @@ export class BugBotAndCiEngine {
     this.db = opts.db;
     this.guardrails = opts.guardrails;
     this.durabilityMode = opts.durabilityMode ?? "crash-safe";
-    this.useBwrap = opts.useBwrap ?? false;
+    this.sandboxMode = opts.sandboxMode ?? "workspace-write";
+    this.bashOps =
+      opts.bashOps ??
+      createBwrapBashOperations({
+        workspaceRoot: this.workspaceRoot,
+        mode: this.sandboxMode,
+        unshareNet: opts.guardrails.sandbox.unshare_network_by_default,
+        allowUnsandboxedDev: opts.allowUnsandboxedDev ?? false
+      });
     this.artifacts = opts.artifacts;
     this.initSchema();
   }
@@ -602,38 +615,21 @@ export class BugBotAndCiEngine {
     let passed = false;
 
     for (let attemptNo = 1; attemptNo <= maxAttempts; attemptNo++) {
+      if (this.sandboxMode === "read-only") {
+        throw new Error("CI_COMMAND_DENIED: [guard: CI execution denied in read-only sandbox mode]");
+      }
+
       let exitCode = 1;
       let stdout = "";
       let stderr = "";
 
-      if (this.useBwrap) {
-        const bashOps = createBwrapBashOperations({
-          workspaceRoot: this.workspaceRoot,
-          mode: "workspace-write",
-          unshareNet: true
-        });
-        const chunks: Buffer[] = [];
-        const res = await bashOps.exec(params.command, this.workspaceRoot, {
-          onData: (d) => chunks.push(d),
-          timeout: 60
-        });
-        exitCode = res.exitCode ?? 1;
-        stdout = Buffer.concat(chunks).toString("utf8");
-      } else {
-        const res = spawnSync("/bin/bash", ["-c", params.command], {
-          cwd: this.workspaceRoot,
-          encoding: "utf8",
-          timeout: 60_000,
-          env: {
-            PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-            HOME: process.env.HOME ?? "/tmp",
-            CI: "true"
-          }
-        });
-        exitCode = res.status ?? 1;
-        stdout = res.stdout ?? "";
-        stderr = res.stderr ?? "";
-      }
+      const chunks: Buffer[] = [];
+      const res = await this.bashOps.exec(params.command, this.workspaceRoot, {
+        onData: (d) => chunks.push(d),
+        timeout: 60
+      });
+      exitCode = res.exitCode ?? 1;
+      stdout = Buffer.concat(chunks).toString("utf8");
 
       const combined = `${stdout}\n${stderr}`;
       const diagnostics = extractCiDiagnostics(combined);

@@ -1,9 +1,11 @@
+import fs from "node:fs";
 import path from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
+  type BashOperations,
   createAgentSession,
   createBashToolDefinition,
   createCodemodeExtension,
@@ -20,7 +22,7 @@ import {
   SettingsManager,
   type ToolDefinition
 } from "@earendil-works/pi-coding-agent";
-import type { ApprovalPolicy, DurabilityMode, GuardrailsConfig, SandboxMode } from "../types.ts";
+import type { ApprovalPolicy, DurabilityMode, GuardrailsConfig, MutabilityClass, SandboxMode } from "../types.ts";
 import { createBwrapBashOperations } from "./bwrap-sandbox.ts";
 import { installSafeNetworkDispatcher } from "../ring10/safe-network.ts";
 import { captureTurnCheckpoint, recoverInterruptedRewinds } from "./git-rewind.ts";
@@ -35,6 +37,7 @@ import { PrivateSpillStore } from "./spill-store.ts";
 import { StateDb } from "./state-db.ts";
 import {
   assertNoUnresolvedOutcomeUnknown,
+  executeThroughWalSpine,
   markWalCallTreeTranscriptAppended,
   reconcileWalOnStartup,
   syncSessionTranscriptDurable
@@ -76,6 +79,8 @@ export interface Ring0HarnessInstance {
   readonly spillStore: PrivateSpillStore;
   readonly prefix: BootPinnedPrefix;
   readonly guardrails: GuardrailsConfig;
+  readonly bashOps: BashOperations;
+  readonly sandboxMode: SandboxMode;
   readonly observedPrefixHashes: string[];
   readonly interceptedToolCalls: Array<{
     toolCallId: string;
@@ -90,6 +95,98 @@ export interface Ring0HarnessInstance {
     dirSynced: boolean;
   }>;
   dispose(): void;
+}
+
+function wrapToolDefinitionWithWal(
+  tool: ToolDefinition<any, any, any>,
+  walContext: {
+    stateDb: StateDb;
+    spillStore: PrivateSpillStore;
+    sessionId: string;
+    sessionManager: SessionManager;
+    workspaceRoot: string;
+  }
+): ToolDefinition<any, any, any> {
+  const originalExecute = tool.execute.bind(tool);
+
+  return {
+    ...tool,
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      let mutabilityClass: MutabilityClass = "OPAQUE_EXTERNAL";
+      let localReversibleSpec: { targetPath: string; expectedAfterBytes: Buffer | string } | undefined = undefined;
+
+      const p = (params ?? {}) as Record<string, any>;
+      if (tool.name === "read") {
+        mutabilityClass = "PURE_READ";
+      } else if (tool.name === "bash") {
+        mutabilityClass = "OPAQUE_EXTERNAL";
+      } else if (tool.name === "write") {
+        mutabilityClass = "LOCAL_REVERSIBLE";
+        const targetPath = path.resolve(walContext.workspaceRoot, String(p.path ?? ""));
+        const content = typeof p.content === "string" ? p.content : "";
+        localReversibleSpec = {
+          targetPath,
+          expectedAfterBytes: Buffer.from(content, "utf8")
+        };
+      } else if (tool.name === "edit") {
+        mutabilityClass = "LOCAL_REVERSIBLE";
+        const targetPath = path.resolve(walContext.workspaceRoot, String(p.path ?? ""));
+        let expectedBytes: Buffer | string = "";
+        try {
+          if (fs.existsSync(targetPath)) {
+            let current = fs.readFileSync(targetPath, "utf8");
+            if (Array.isArray(p.edits)) {
+              for (const e of p.edits) {
+                if (typeof e.oldText === "string" && typeof e.newText === "string") {
+                  current = current.replace(e.oldText, e.newText);
+                }
+              }
+            } else if (typeof p.oldText === "string" && typeof p.newText === "string") {
+              current = current.replace(p.oldText, p.newText);
+            }
+            expectedBytes = Buffer.from(current, "utf8");
+          }
+        } catch {
+          // ignore
+        }
+        localReversibleSpec = {
+          targetPath,
+          expectedAfterBytes: expectedBytes
+        };
+      }
+
+      const leafId = walContext.sessionManager.getLeafId() ?? walContext.sessionId;
+
+      const walRes = await executeThroughWalSpine({
+        stateDb: walContext.stateDb,
+        spillStore: walContext.spillStore,
+        sessionId: walContext.sessionId,
+        leafId,
+        toolCallId,
+        parentToolCallId: null,
+        toolName: tool.name,
+        mutabilityClass,
+        args: params,
+        localReversibleSpec,
+        executeEffect: async () => {
+          const res = await originalExecute(toolCallId, params, signal, onUpdate, ctx);
+          const rawText = (res.content ?? [])
+            .filter((c: any) => c.type === "text")
+            .map((c: any) => c.text)
+            .join("\n");
+          return {
+            rawText,
+            details: res.details
+          };
+        }
+      });
+
+      return {
+        content: [{ type: "text", text: walRes.finalText }],
+        details: walRes.details
+      };
+    }
+  };
 }
 
 /**
@@ -135,23 +232,30 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     caps: guardrails.prefix_caps_o200k
   });
 
+  const sandboxMode = opts.sandboxMode ?? guardrails.sandbox.default_mode;
+  const agentDir = opts.agentDir ?? getAgentDir();
+  const modelRuntime = opts.modelRuntime ?? (await createSharedModelRuntime(agentDir));
+  const sessionManager = opts.sessionManager ?? SessionManager.create(opts.workspaceRoot, path.join(harnessDir, "sessions"));
+  const sessionId = sessionManager.getSessionId();
+
   // 4. Construct confined built-in Operations (Minimal-Rootfs bwrap + Secret-Masked FS + Durable Writes)
   const { readOps, writeOps, editOps } = createConfinedFileOperations({
     workspaceRoot: opts.workspaceRoot,
     cfg: guardrails,
-    durabilityMode
+    durabilityMode,
+    mode: sandboxMode
   });
 
   const bashOps = createBwrapBashOperations({
     workspaceRoot: opts.workspaceRoot,
-    mode: opts.sandboxMode ?? guardrails.sandbox.default_mode,
+    mode: sandboxMode,
     unshareNet: guardrails.sandbox.unshare_network_by_default,
     allowUnsandboxedDev: opts.allowUnsandboxedDev ?? false,
     beforeAction: opts.beforeAction,
     unmaskedSecretExceptions: guardrails.sandbox.unmasked_exceptions
   });
 
-  const confinedBuiltins: ToolDefinition<any, any, any>[] = [
+  const rawBuiltins: ToolDefinition<any, any, any>[] = [
     createReadToolDefinition(opts.workspaceRoot, { operations: readOps }),
     createBashToolDefinition(opts.workspaceRoot, { operations: bashOps, exposeSessionEnvironment: false }),
     createEditToolDefinition(opts.workspaceRoot, { operations: editOps }),
@@ -159,10 +263,17 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     ...(opts.extraTools ?? [])
   ];
 
-  const agentDir = opts.agentDir ?? getAgentDir();
-  const modelRuntime = opts.modelRuntime ?? (await createSharedModelRuntime(agentDir));
-  const sessionManager = opts.sessionManager ?? SessionManager.create(opts.workspaceRoot, path.join(harnessDir, "sessions"));
-  const sessionId = sessionManager.getSessionId();
+  const walContext = {
+    stateDb,
+    spillStore,
+    sessionId,
+    sessionManager,
+    workspaceRoot: opts.workspaceRoot
+  };
+
+  const confinedBuiltins: ToolDefinition<any, any, any>[] = rawBuiltins.map((t) =>
+    wrapToolDefinitionWithWal(t, walContext)
+  );
 
   // 5. Startup Crash & Rewind Reconciliation
   reconcileWalOnStartup(stateDb, spillStore, sessionId);
@@ -228,7 +339,7 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
         } else if (event.toolName === "read" || event.toolName === "write" || event.toolName === "edit") {
           const target = String((event.input as { path?: string }).path ?? "");
           const accessMode = event.toolName === "read" ? "read" : "write";
-          resolveAndValidateWorkspacePath(target, opts.workspaceRoot, accessMode, guardrails);
+          resolveAndValidateWorkspacePath(target, opts.workspaceRoot, accessMode, guardrails, sandboxMode);
         }
 
         if (!event.parentToolCallId) {
@@ -374,6 +485,8 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     spillStore,
     prefix,
     guardrails,
+    bashOps,
+    sandboxMode,
     observedPrefixHashes,
     interceptedToolCalls,
     transcriptSyncReceipts,

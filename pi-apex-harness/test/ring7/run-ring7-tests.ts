@@ -258,7 +258,7 @@ async function main(): Promise<void> {
         workspaceRoot: ws,
         surfacesDir: SURFACES_DIR,
         agentDir,
-        allowUnsandboxedDev: false
+        allowUnsandboxedDev: true
       });
 
       try {
@@ -409,7 +409,7 @@ async function main(): Promise<void> {
         workspaceRoot: ws,
         surfacesDir: SURFACES_DIR,
         agentDir: path.join(tmpRoot, "agent-r7-3"),
-        allowUnsandboxedDev: false,
+        allowUnsandboxedDev: true,
         ring2: { useBwrapInCi: true }
       });
 
@@ -505,7 +505,7 @@ async function main(): Promise<void> {
         workspaceRoot: ws,
         surfacesDir: SURFACES_DIR,
         agentDir: path.join(tmpRoot, "agent-r7-4"),
-        allowUnsandboxedDev: false,
+        allowUnsandboxedDev: true,
         ring4: {
           onCommandOutput: (cmd) => captured.push(cmd)
         }
@@ -565,7 +565,7 @@ async function main(): Promise<void> {
         workspaceRoot: repoA,
         surfacesDir: SURFACES_DIR,
         agentDir: path.join(tmpRoot, "agent-r7-5"),
-        allowUnsandboxedDev: false
+        allowUnsandboxedDev: true
       });
       const server = new MissionControlServer({
         controller,

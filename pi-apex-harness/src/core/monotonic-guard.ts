@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { EditOperations, ReadOperations, WriteOperations } from "@earendil-works/pi-coding-agent";
-import type { ApprovalPolicy, DurabilityMode, GuardrailsConfig } from "../types.ts";
+import type { ApprovalPolicy, DurabilityMode, GuardrailsConfig, SandboxMode } from "../types.ts";
 import {
   assertNoSymlinkAncestorsAndContain,
   isSecretBasename,
@@ -27,8 +27,12 @@ export function resolveAndValidateWorkspacePath(
   candidatePath: string,
   workspaceRoot: string,
   mode: "read" | "write",
-  cfg: GuardrailsConfig
+  cfg: GuardrailsConfig,
+  sandboxMode?: SandboxMode
 ): string {
+  if (sandboxMode === "read-only" && mode === "write") {
+    throw new GuardDeniedError(`[guard: write access denied in read-only sandbox mode: ${candidatePath}]`);
+  }
   let info;
   try {
     info = assertNoSymlinkAncestorsAndContain(workspaceRoot, candidatePath);
@@ -156,6 +160,7 @@ export function createConfinedFileOperations(params: {
   workspaceRoot: string;
   cfg: GuardrailsConfig;
   durabilityMode: DurabilityMode;
+  mode?: SandboxMode;
   beforeAction?: (tool: string, summary: string) => Promise<void>;
 }): {
   readOps: ReadOperations;
@@ -178,14 +183,17 @@ export function createConfinedFileOperations(params: {
       }
     },
     access: async (absPath) => {
-      const safe = resolveAndValidateWorkspacePath(absPath, params.workspaceRoot, "read", params.cfg);
+      const safe = resolveAndValidateWorkspacePath(absPath, params.workspaceRoot, "read", params.cfg, params.mode);
       fs.accessSync(safe, fs.constants.R_OK);
     }
   };
 
   const writeOps: WriteOperations = {
     writeFile: async (absPath, content) => {
-      const safe = resolveAndValidateWorkspacePath(absPath, params.workspaceRoot, "write", params.cfg);
+      if (params.mode === "read-only") {
+        throw new GuardDeniedError("EACCES: permission denied, workspace is in read-only sandbox mode (writeFile blocked)");
+      }
+      const safe = resolveAndValidateWorkspacePath(absPath, params.workspaceRoot, "write", params.cfg, params.mode);
       try {
         writeFileDurable(safe, content, params.durabilityMode, {
           workspaceRoot: params.workspaceRoot
@@ -198,8 +206,11 @@ export function createConfinedFileOperations(params: {
       }
     },
     mkdir: async (dir) => {
+      if (params.mode === "read-only") {
+        throw new GuardDeniedError("EACCES: permission denied, workspace is in read-only sandbox mode (mkdir blocked)");
+      }
       await params.beforeAction?.("write", `mkdir ${path.relative(params.workspaceRoot, dir)}`);
-      const safe = resolveAndValidateWorkspacePath(dir, params.workspaceRoot, "write", params.cfg);
+      const safe = resolveAndValidateWorkspacePath(dir, params.workspaceRoot, "write", params.cfg, params.mode);
       try {
         mkdirSafeWithinWorkspace(fs.realpathSync(params.workspaceRoot), safe);
       } catch (err) {
@@ -215,7 +226,7 @@ export function createConfinedFileOperations(params: {
     readFile: readOps.readFile,
     writeFile: writeOps.writeFile,
     access: async (absPath) => {
-      const safe = resolveAndValidateWorkspacePath(absPath, params.workspaceRoot, "write", params.cfg);
+      const safe = resolveAndValidateWorkspacePath(absPath, params.workspaceRoot, "write", params.cfg, params.mode);
       fs.accessSync(safe, fs.constants.R_OK | fs.constants.W_OK);
     }
   };

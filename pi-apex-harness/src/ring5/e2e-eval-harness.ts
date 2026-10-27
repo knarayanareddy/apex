@@ -134,6 +134,7 @@ export async function runMultiRingEvalSuite(params: {
     let e1SchemaTokens = 0;
     try {
       const h = ctrl1.getCurrentHarness();
+      h.interactionController.setMode("turbo");
       e1SchemaTokens = countO200kTokens(
         JSON.stringify(
           h.session.agent.state.tools.map((t) => ({
@@ -361,6 +362,7 @@ export async function runMultiRingEvalSuite(params: {
 
     try {
       const h = ctrl2.getCurrentHarness();
+      h.interactionController.setMode("turbo");
 
       // 1. Ring 0 `.env` secret read fence + Ring 2 compound-shell Plan Mode bypass block
       faux2.setResponses([

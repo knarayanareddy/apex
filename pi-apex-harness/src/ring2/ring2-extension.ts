@@ -646,7 +646,8 @@ export async function createRing2Harness(
     db: ring1.stateDb.db,
     guardrails,
     durabilityMode: opts.durabilityMode ?? "crash-safe",
-    useBwrap: opts.ring2?.useBwrapInCi ?? false,
+    bashOps: ring1.bashOps,
+    sandboxMode: opts.sandboxMode ?? "workspace-write",
     artifacts: trustArtifacts
   });
 

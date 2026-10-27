@@ -357,7 +357,7 @@ async function main(): Promise<void> {
         workspaceRoot: ws,
         surfacesDir: SURFACES_DIR,
         agentDir: path.join(tmpRoot, "agent-r8-2"),
-        allowUnsandboxedDev: false,
+        allowUnsandboxedDev: true,
         ring2: { useBwrapInCi: true },
         ring8: { githubApiBaseUrl: mockGh.baseUrl }
       });

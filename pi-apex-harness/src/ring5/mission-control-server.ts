@@ -15,6 +15,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -121,6 +122,23 @@ async function readJsonBody(req: http.IncomingMessage, maxBytes = 262_144): Prom
   return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
 }
 
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, "utf8");
+  const bufB = Buffer.from(b, "utf8");
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function parseCookies(header?: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const part of header.split(";")) {
+    const [k, ...v] = part.trim().split("=");
+    if (k) out[k] = decodeURIComponent(v.join("="));
+  }
+  return out;
+}
+
 export interface MissionControlServerOptions {
   controller: Ring4RuntimeController;
   workspaceRoot: string;
@@ -128,6 +146,9 @@ export interface MissionControlServerOptions {
   expectedGuardrailsSha256?: string;
   host?: string;
   port?: number;
+  authToken?: string;
+  allowedHosts?: string[];
+  requireAuth?: boolean;
 }
 
 export class MissionControlServer {
@@ -137,6 +158,9 @@ export class MissionControlServer {
   private readonly expectedGuardrailsSha256?: string;
   private readonly host: string;
   private readonly requestedPort: number;
+  private readonly authToken: string;
+  private readonly requireAuth: boolean;
+  private readonly allowedHosts: Set<string>;
   private readonly sseClients = new Set<http.ServerResponse>();
   private unsubscribeSession?: () => void;
   private unsubscribeHarnessSwitch?: () => void;
@@ -157,8 +181,70 @@ export class MissionControlServer {
     this.guardrailsPath = opts.guardrailsPath;
     this.expectedGuardrailsSha256 = opts.expectedGuardrailsSha256;
     this.controller.getCurrentHarness().interactionController.setObserver((event) => this.broadcastSse({ type: event.type, approval: event.approval }));
-    this.host = opts.host ?? "0.0.0.0";
+    this.host = opts.host ?? "127.0.0.1";
+    if (this.host !== "127.0.0.1" && this.host !== "localhost" && this.host !== "::1") {
+      console.warn(`[APEX_COCKPIT_WARNING] MissionControlServer bound to non-loopback host '${this.host}'. Ensure TLS and network firewalling in production.`);
+    }
     this.requestedPort = opts.port ?? 4310;
+    this.authToken = opts.authToken ?? crypto.randomBytes(32).toString("hex");
+    this.requireAuth = opts.requireAuth ?? (opts.authToken !== undefined);
+    this.allowedHosts = new Set([
+      "127.0.0.1",
+      "localhost",
+      "::1",
+      this.host.toLowerCase(),
+      ...(opts.allowedHosts?.map((h) => h.toLowerCase()) ?? [])
+    ]);
+  }
+
+  get token(): string {
+    return this.authToken;
+  }
+
+  private _isAllowedHost(hostHeader?: string): boolean {
+    if (!hostHeader) return true;
+    const hostname = hostHeader.split(":")[0].toLowerCase();
+    if (this.allowedHosts.has(hostname)) return true;
+    if (hostname.endsWith(".e2b.app")) return true;
+    return false;
+  }
+
+  private _isAllowedOrigin(originHeader?: string): boolean {
+    if (!originHeader) return false;
+    try {
+      const u = new URL(originHeader);
+      const hostname = u.hostname.toLowerCase();
+      if (this.allowedHosts.has(hostname)) return true;
+      if (hostname.endsWith(".e2b.app")) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  private _validateAuth(req: http.IncomingMessage): boolean {
+    if (!this.requireAuth) return true;
+
+    // 1. Authorization: Bearer <token>
+    const authHeader = req.headers["authorization"];
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const candidate = authHeader.slice("Bearer ".length).trim();
+      if (candidate && timingSafeEqualStr(candidate, this.authToken)) {
+        return true;
+      }
+    }
+
+    // 2. Cookie: apex_session=<token>
+    const cookieHeader = req.headers["cookie"];
+    if (cookieHeader) {
+      const cookies = parseCookies(cookieHeader);
+      const sessionVal = cookies["apex_session"];
+      if (sessionVal && timingSafeEqualStr(sessionVal, this.authToken)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   get port(): number {
@@ -190,15 +276,20 @@ export class MissionControlServer {
     }
   }
 
-  private _sendJson(res: http.ServerResponse, status: number, body: unknown): void {
+  private _sendJson(res: http.ServerResponse, status: number, body: unknown, req?: http.IncomingMessage): void {
     const safePayload = scrubSecretsInfallible(JSON.stringify(body));
-    res.writeHead(status, {
+    const headers: Record<string, string> = {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type"
-    });
+      "X-Content-Type-Options": "nosniff"
+    };
+    if (req?.headers.origin && this._isAllowedOrigin(req.headers.origin)) {
+      headers["Access-Control-Allow-Origin"] = req.headers.origin;
+      headers["Access-Control-Allow-Credentials"] = "true";
+      headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
+      headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
+    }
+    res.writeHead(status, headers);
     res.end(safePayload);
   }
 
@@ -308,12 +399,23 @@ export class MissionControlServer {
 
     this.server = http.createServer(async (req, res) => {
       try {
+        if (!this._isAllowedHost(req.headers["host"])) {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid Host header (DNS rebinding protection)" }));
+          return;
+        }
+
         if (req.method === "OPTIONS") {
-          res.writeHead(204, {
-            "Access-Control-Allow-Origin": "*",
+          const origin = req.headers.origin;
+          const headers: Record<string, string> = {
             "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
-          });
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Allow-Credentials": "true"
+          };
+          if (origin && this._isAllowedOrigin(origin)) {
+            headers["Access-Control-Allow-Origin"] = origin;
+          }
+          res.writeHead(204, headers);
           res.end();
           return;
         }
@@ -321,8 +423,26 @@ export class MissionControlServer {
         const parsedUrl = new URL(req.url ?? "/", "http://pi-apex.local");
         const pathname = parsedUrl.pathname;
 
-        // 1. Self-contained Operator Cockpit HTML
+        // 1. Self-contained Operator Cockpit HTML (with ?token= handshake)
         if (req.method === "GET" && (pathname === "/" || pathname === "/index.html")) {
+          const tokenParam = parsedUrl.searchParams.get("token");
+          if (tokenParam && timingSafeEqualStr(tokenParam, this.authToken)) {
+            res.writeHead(302, {
+              "Set-Cookie": `apex_session=${this.authToken}; HttpOnly; SameSite=Strict; Path=/`,
+              Location: pathname === "/index.html" ? "/index.html" : "/"
+            });
+            res.end();
+            return;
+          }
+
+          if (this.requireAuth && !this._validateAuth(req)) {
+            res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+            res.end(
+              "<!DOCTYPE html><html><body><h1>401 Unauthorized</h1><p>Mission Control Cockpit requires authentication. Connect with ?token=&lt;token&gt; or Authorization: Bearer.</p></body></html>"
+            );
+            return;
+          }
+
           const html = renderMissionControlHtml();
           res.writeHead(200, {
             "Content-Type": "text/html; charset=utf-8",
@@ -332,14 +452,29 @@ export class MissionControlServer {
           return;
         }
 
+        // Protected routes gate: reject all unauthenticated requests with 401
+        if (this.requireAuth && !this._validateAuth(req)) {
+          this._sendJson(
+            res,
+            401,
+            { error: "Unauthorized: valid Bearer token or apex_session cookie required" },
+            req
+          );
+          return;
+        }
+
         // 2. Live SSE event stream
         if (req.method === "GET" && pathname === "/api/events") {
-          res.writeHead(200, {
+          const sseHeaders: Record<string, string> = {
             "Content-Type": "text/event-stream; charset=utf-8",
             "Cache-Control": "no-cache, no-transform",
-            Connection: "keep-alive",
-            "Access-Control-Allow-Origin": "*"
-          });
+            Connection: "keep-alive"
+          };
+          if (req.headers.origin && this._isAllowedOrigin(req.headers.origin)) {
+            sseHeaders["Access-Control-Allow-Origin"] = req.headers.origin;
+            sseHeaders["Access-Control-Allow-Credentials"] = "true";
+          }
+          res.writeHead(200, sseHeaders);
           res.write(
             `data: ${JSON.stringify({
               type: "connected",

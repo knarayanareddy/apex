@@ -40,10 +40,14 @@ export interface BwrapSandboxConfig {
 
 let cachedBwrapProbe: { ok: boolean; reason?: string } | null = null;
 
+export function resetBwrapProbeCacheForTesting(): void {
+  cachedBwrapProbe = null;
+}
+
 export function probeBwrapFunctional(): { ok: boolean; reason?: string } {
   if (cachedBwrapProbe) return cachedBwrapProbe;
   if (process.platform === "darwin") {
-    cachedBwrapProbe = { ok: true, reason: "darwin-process-gate" };
+    cachedBwrapProbe = { ok: false, reason: "bubblewrap is not supported on macOS darwin" };
     return cachedBwrapProbe;
   }
   try {
@@ -343,15 +347,13 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
         argv = ["-c", command];
       } else {
         const probe = probeBwrapFunctional();
-        if (probe.ok && probe.reason === "darwin-process-gate") {
-          bin = "/bin/bash";
-          argv = ["-c", command];
-        } else if (!probe.ok) {
+        if (!probe.ok) {
           if (!cfg.allowUnsandboxedDev) {
             throw new SandboxUnavailableError(
-              `SANDBOX_UNAVAILABLE: bubblewrap confinement failed (${probe.reason ?? "unknown"}). Refusing unconfined execution.`
+              `SANDBOX_UNAVAILABLE: bubblewrap confinement failed (${probe.reason ?? "unknown"}). Refusing unconfined execution without explicit allowUnsandboxedDev: true.`
             );
           }
+          console.warn(`[APEX_CONFINEMENT_WARNING] Running unconfined development bash on ${process.platform}. Kernel namespaces disabled.`);
           bin = "/bin/bash";
           argv = ["-c", command];
         } else {
