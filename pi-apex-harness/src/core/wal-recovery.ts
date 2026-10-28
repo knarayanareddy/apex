@@ -454,21 +454,39 @@ function finalizeCommittedRawRow<T = unknown>(
   spillStore: PrivateSpillStore,
   row: WalIntentRow
 ): NormalizedWalResult<T> {
-  const rawReceipt = row.raw_receipt_json
-    ? (JSON.parse(row.raw_receipt_json) as {
-        rawText?: string;
-        content?: WalContentBlock[];
-        details?: T;
-        isError?: boolean;
-      })
-    : { rawText: "" };
+  let rawReceipt: SupportedReceipt;
+  if (row.raw_receipt_json) {
+    const decode = decodeCommittedReceipt(row.raw_receipt_json);
+    if (!decode.ok) {
+      const diagnostic = `[WAL_RECEIPT_INVALID: raw_receipt_json corrupt: ${decode.reason}]`;
+      const errorResult: NormalizedWalResult<T> = {
+        finalText: diagnostic,
+        content: [{ type: "text", text: diagnostic }],
+        details: { error: decode.reason, code: decode.code } as unknown as T,
+        isError: true,
+        spilled: false,
+        spillFallbackUsed: false
+      };
+      stateDb.db
+        .prepare(
+          `UPDATE wal_intents
+           SET status = 'EFFECT_COMMITTED', result_json = ?, updated_at_ms = ?
+           WHERE idempotency_key = ?`
+        )
+        .run(JSON.stringify(errorResult), Date.now(), row.idempotency_key);
+      return errorResult;
+    }
+    rawReceipt = decode.receipt;
+  } else {
+    rawReceipt = { rawText: "" };
+  }
 
   const normalized = normalizeWalToolResult<T>({
     sessionId: row.session_id,
     spillStore,
-    rawText: rawReceipt.rawText,
-    content: rawReceipt.content,
-    details: rawReceipt.details,
+    rawText: typeof rawReceipt.finalText === "string" ? rawReceipt.finalText : rawReceipt.rawText,
+    content: Array.isArray(rawReceipt.content) ? rawReceipt.content : undefined,
+    details: rawReceipt.details as T,
     isError: rawReceipt.isError
   });
 
@@ -522,6 +540,25 @@ export interface ExecuteWalResult<T> {
   spillFallbackUsed: boolean;
 }
 
+export interface SupportedReceipt {
+  finalText?: string;
+  rawText?: string;
+  content?: WalContentBlock[];
+  details?: unknown;
+  isError?: boolean;
+  spilled?: boolean;
+  spillFallbackUsed?: boolean;
+  normalizedVersion?: number;
+}
+
+export type ReceiptDecodeResult =
+  | { ok: true; receipt: SupportedReceipt }
+  | {
+      ok: false;
+      code: "WAL_RECEIPT_INVALID";
+      reason: string;
+    };
+
 export interface EnsureNormalizedCommittedResultParams<T = unknown> {
   receipt: unknown;
   spillStore: PrivateSpillStore;
@@ -531,6 +568,162 @@ export interface EnsureNormalizedCommittedResultParams<T = unknown> {
 export interface EnsureNormalizedCommittedResultOutcome<T = unknown> {
   result: NormalizedWalResult<T>;
   changed: boolean;
+  invalid?: boolean;
+  reason?: string;
+}
+
+/**
+ * Decodes a raw receipt (JSON string or object) into a SupportedReceipt.
+ * Distinguishes:
+ *  - Valid modern receipt (has finalText and/or content)
+ *  - Supported legacy receipt (has rawText, details, isError)
+ *  - Legitimate empty result (finalText: "", rawText: "", or empty content array)
+ *  - Malformed JSON (syntax error)
+ *  - Unsupported top-level type or receipt shape (null, array, primitive, object lacking receipt fields)
+ */
+export function decodeCommittedReceipt(raw: unknown): ReceiptDecodeResult {
+  if (raw === null || raw === undefined) {
+    return {
+      ok: false,
+      code: "WAL_RECEIPT_INVALID",
+      reason: "RECEIPT_NULL_OR_UNDEFINED: receipt payload is null or undefined"
+    };
+  }
+
+  let parsed: unknown;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      return {
+        ok: false,
+        code: "WAL_RECEIPT_INVALID",
+        reason: "RECEIPT_EMPTY_STRING: raw receipt is an empty string"
+      };
+    }
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (err: any) {
+      return {
+        ok: false,
+        code: "WAL_RECEIPT_INVALID",
+        reason: `JSON_SYNTAX_ERROR: ${err?.message ?? "malformed JSON"}`
+      };
+    }
+  } else if (typeof raw === "object") {
+    parsed = raw;
+  } else {
+    return {
+      ok: false,
+      code: "WAL_RECEIPT_INVALID",
+      reason: `UNSUPPORTED_TOP_LEVEL_TYPE: receipt cannot be of type ${typeof raw}`
+    };
+  }
+
+  if (parsed === null || typeof parsed !== "object") {
+    return {
+      ok: false,
+      code: "WAL_RECEIPT_INVALID",
+      reason: "NON_OBJECT_RECEIPT: parsed receipt is not a valid JSON object"
+    };
+  }
+
+  if (Array.isArray(parsed)) {
+    return {
+      ok: false,
+      code: "WAL_RECEIPT_INVALID",
+      reason: "ARRAY_RECEIPT_NOT_SUPPORTED: receipt cannot be an array"
+    };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+
+  // Validate field types if present
+  if (obj["finalText"] !== undefined && typeof obj["finalText"] !== "string") {
+    return {
+      ok: false,
+      code: "WAL_RECEIPT_INVALID",
+      reason: "INVALID_FIELD_TYPE: finalText must be a string"
+    };
+  }
+  if (obj["rawText"] !== undefined && typeof obj["rawText"] !== "string") {
+    return {
+      ok: false,
+      code: "WAL_RECEIPT_INVALID",
+      reason: "INVALID_FIELD_TYPE: rawText must be a string"
+    };
+  }
+  if (obj["content"] !== undefined && !Array.isArray(obj["content"])) {
+    return {
+      ok: false,
+      code: "WAL_RECEIPT_INVALID",
+      reason: "INVALID_FIELD_TYPE: content must be an array"
+    };
+  }
+  if (obj["isError"] !== undefined && typeof obj["isError"] !== "boolean") {
+    return {
+      ok: false,
+      code: "WAL_RECEIPT_INVALID",
+      reason: "INVALID_FIELD_TYPE: isError must be a boolean"
+    };
+  }
+  if (obj["spilled"] !== undefined && typeof obj["spilled"] !== "boolean") {
+    return {
+      ok: false,
+      code: "WAL_RECEIPT_INVALID",
+      reason: "INVALID_FIELD_TYPE: spilled must be a boolean"
+    };
+  }
+  if (obj["spillFallbackUsed"] !== undefined && typeof obj["spillFallbackUsed"] !== "boolean") {
+    return {
+      ok: false,
+      code: "WAL_RECEIPT_INVALID",
+      reason: "INVALID_FIELD_TYPE: spillFallbackUsed must be a boolean"
+    };
+  }
+
+  // Must have at least one recognized supported receipt field:
+  // (finalText, rawText, content, details, isError, or spilled)
+  const hasRecognizedField =
+    obj["finalText"] !== undefined ||
+    obj["rawText"] !== undefined ||
+    obj["content"] !== undefined ||
+    obj["details"] !== undefined ||
+    obj["isError"] !== undefined ||
+    obj["spilled"] !== undefined;
+
+  if (!hasRecognizedField) {
+    return {
+      ok: false,
+      code: "WAL_RECEIPT_INVALID",
+      reason: "MISSING_REQUIRED_FIELDS: object lacks recognized receipt fields (finalText, rawText, content, details, isError)"
+    };
+  }
+
+  // Check content elements if present
+  if (Array.isArray(obj["content"])) {
+    for (let i = 0; i < obj["content"].length; i++) {
+      const block = obj["content"][i];
+      if (!block || typeof block !== "object") {
+        return {
+          ok: false,
+          code: "WAL_RECEIPT_INVALID",
+          reason: `MALFORMED_CONTENT_BLOCK: block at index ${i} is not an object`
+        };
+      }
+      if (typeof (block as any).type !== "string") {
+        return {
+          ok: false,
+          code: "WAL_RECEIPT_INVALID",
+          reason: `MALFORMED_CONTENT_BLOCK: block at index ${i} lacks string type`
+        };
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    receipt: obj as SupportedReceipt
+  };
 }
 
 /**
@@ -623,18 +816,25 @@ export function ensureNormalizedCommittedResult<T = unknown>(
 ): EnsureNormalizedCommittedResultOutcome<T> {
   const { receipt, spillStore, sessionId } = params;
 
-  let cached: any;
-  if (typeof receipt === "string") {
-    try {
-      cached = JSON.parse(receipt);
-    } catch {
-      cached = {};
-    }
-  } else if (receipt && typeof receipt === "object") {
-    cached = receipt;
-  } else {
-    cached = {};
+  const decodeRes = decodeCommittedReceipt(receipt);
+  if (!decodeRes.ok) {
+    const diagnosticMessage = `[WAL_RECEIPT_INVALID: ${decodeRes.reason}]`;
+    return {
+      result: {
+        finalText: diagnosticMessage,
+        content: [{ type: "text", text: diagnosticMessage }],
+        details: { error: decodeRes.reason, code: decodeRes.code } as unknown as T,
+        isError: true,
+        spilled: false,
+        spillFallbackUsed: false
+      },
+      changed: false,
+      invalid: true,
+      reason: decodeRes.reason
+    };
   }
+
+  const cached = decodeRes.receipt;
 
   // If already compliant with delivery policy, return unchanged
   if (isReceiptDeliveryCompliant(cached, spillStore)) {
@@ -1080,6 +1280,7 @@ export interface StartupReconcileSummary {
   promotedLocalReversible: string[];
   abortedClean: string[];
   outcomeUnknown: WalIntentRow[];
+  corruptReceipts: WalIntentRow[];
 }
 
 /**
@@ -1108,7 +1309,8 @@ export function reconcileWalOnStartup(
     replayedCommitted: [],
     promotedLocalReversible: [],
     abortedClean: [],
-    outcomeUnknown: []
+    outcomeUnknown: [],
+    corruptReceipts: []
   };
 
   const orphanedMutatingChildrenByParent = new Map<string, WalIntentRow[]>();
@@ -1148,14 +1350,49 @@ export function reconcileWalOnStartup(
         committedRow = stateDb.getWalRow(row.idempotency_key)!;
       }
 
+      let receiptIsInvalid = false;
       if (committedRow.status === "EFFECT_COMMITTED" && committedRow.result_json) {
         try {
-          const { result, changed } = ensureNormalizedCommittedResult({
+          const outcome = ensureNormalizedCommittedResult({
             receipt: committedRow.result_json,
             spillStore,
             sessionId: committedRow.session_id
           });
-          if (changed) {
+          const { result, changed, invalid } = outcome;
+          if (invalid) {
+            let recoveredFromRaw = false;
+            if (committedRow.raw_receipt_json) {
+              const rawDecode = decodeCommittedReceipt(committedRow.raw_receipt_json);
+              if (rawDecode.ok) {
+                const rawReceipt = rawDecode.receipt;
+                const normalized = normalizeWalToolResult({
+                  sessionId: committedRow.session_id,
+                  spillStore,
+                  rawText: typeof rawReceipt.finalText === "string" ? rawReceipt.finalText : rawReceipt.rawText,
+                  content: Array.isArray(rawReceipt.content) ? rawReceipt.content : undefined,
+                  details: rawReceipt.details,
+                  isError: rawReceipt.isError
+                });
+                const updatedJson = JSON.stringify({
+                  ...normalized,
+                  normalizedVersion: 2
+                });
+                stateDb.db
+                  .prepare(`UPDATE wal_intents SET result_json = ?, updated_at_ms = ? WHERE idempotency_key = ?`)
+                  .run(updatedJson, now, committedRow.idempotency_key);
+                committedRow = stateDb.getWalRow(committedRow.idempotency_key)!;
+                recoveredFromRaw = true;
+              }
+            }
+
+            if (!recoveredFromRaw) {
+              receiptIsInvalid = true;
+              summary.corruptReceipts.push(committedRow);
+              console.warn(
+                `[WAL_RECOVERY_DIAGNOSTIC] Invalid committed WAL receipt in idempotency_key ${committedRow.idempotency_key}: ${outcome.reason}`
+              );
+            }
+          } else if (changed) {
             const updatedJson = JSON.stringify({
               ...result,
               normalizedVersion: 2
@@ -1168,6 +1405,11 @@ export function reconcileWalOnStartup(
         } catch {
           // Keep intact if parse fails
         }
+      }
+
+      if (receiptIsInvalid) {
+        // Do NOT silently present this receipt as healthy replayedCommitted!
+        continue;
       }
 
       if (!committedRow.parent_tool_call_id) {

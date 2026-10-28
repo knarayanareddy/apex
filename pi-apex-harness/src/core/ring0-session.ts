@@ -334,7 +334,12 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
   );
 
   // 5. Startup Crash & Rewind Reconciliation
-  reconcileWalOnStartup(stateDb, spillStore, sessionId);
+  const startupSummary = reconcileWalOnStartup(stateDb, spillStore, sessionId);
+  if (startupSummary.corruptReceipts.length > 0) {
+    console.warn(
+      `[Ring0 Startup Warning] Detected ${startupSummary.corruptReceipts.length} corrupted committed WAL receipt(s) for session ${sessionId}. Stored corrupt bytes quarantined; effects not re-run.`
+    );
+  }
   try {
     recoverInterruptedRewinds({
       stateDb,
