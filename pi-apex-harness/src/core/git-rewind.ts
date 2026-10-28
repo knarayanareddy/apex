@@ -210,13 +210,13 @@ export function scanWorkspaceFileHashes(
   return scanWorkspaceEntryStates(workspaceRoot, validatedScan).fileHashes;
 }
 
-interface GitTreeEntry {
+export interface GitTreeEntry {
   gitMode: string;
   objType: string;
   oid: string;
 }
 
-function readGitTreeManifest(workspaceRoot: string, gitTreeOid: string): Record<string, GitTreeEntry> {
+export function readGitTreeManifest(workspaceRoot: string, gitTreeOid: string): Record<string, GitTreeEntry> {
   const out = execFileSync("git", ["ls-tree", "-r", "-z", gitTreeOid], {
     cwd: workspaceRoot,
     maxBuffer: 64 * 1024 * 1024
@@ -270,7 +270,15 @@ export function snapshotWorkingTreeToGit(
 
   const dynamicExcludes = secretScan.allMaskedPaths
     .map((abs) => path.relative(realWs, abs).replace(/\\/g, "/"))
-    .filter((rel) => rel.length > 0 && !rel.startsWith(".."))
+    .filter((rel) => {
+      if (!rel || rel.startsWith("..")) return false;
+      try {
+        execFileSync("git", ["check-ignore", "-q", rel], { cwd: realWs, stdio: "ignore" });
+        return false; // already ignored by gitignore
+      } catch {
+        return true; // not ignored, so explicitly exclude from git add
+      }
+    })
     .map((rel) => `:(exclude)${rel}`);
 
   const specialExcludes = Object.entries(entryStates)
@@ -294,11 +302,79 @@ export function snapshotWorkingTreeToGit(
       ],
       { cwd: realWs, env, stdio: "ignore" }
     );
+
+    const initialTreeOid = execFileSync("git", ["write-tree"], { cwd: realWs, env, encoding: "utf8" }).trim();
+    const initialManifest = readGitTreeManifest(realWs, initialTreeOid);
+
+    // D2 Fix: For each non-secret regular file on disk, if git add -A skipped it (e.g. .gitignore)
+    // OR if Git clean filters / CRLF normalization altered the stored bytes,
+    // stage its exact raw disk bytes into shadowIdx using `hash-object -w --no-filters` and `update-index`.
+    for (const [relPath, state] of Object.entries(entryStates)) {
+      if (state.kind !== "file") continue;
+      const absPath = path.join(realWs, relPath);
+      try {
+        const lst = fs.lstatSync(absPath);
+        if (secretScan.secretInodeKeys.has(`${lst.dev}:${lst.ino}`)) continue;
+      } catch {
+        continue;
+      }
+
+      const existingEntry = initialManifest[relPath];
+      let needsRawCapture = !existingEntry || existingEntry.objType !== "blob";
+
+      if (!needsRawCapture) {
+        try {
+          const catOut = execFileSync("git", ["cat-file", "blob", existingEntry.oid], {
+            cwd: realWs,
+            env,
+            maxBuffer: 64 * 1024 * 1024
+          });
+          const catSha = computeBytesSha256(catOut);
+          if (catSha !== state.hash) {
+            needsRawCapture = true; // Git clean filter or CRLF altered it!
+          }
+        } catch {
+          needsRawCapture = true;
+        }
+      }
+
+      if (needsRawCapture) {
+        try {
+          const blobOid = execFileSync("git", ["hash-object", "-w", "--no-filters", absPath], {
+            cwd: realWs,
+            env,
+            encoding: "utf8"
+          }).trim();
+          const modeOctal = (state.mode !== null && (state.mode & 0o111) !== 0) ? "100755" : "100644";
+          execFileSync(
+            "git",
+            ["update-index", "--add", "--cacheinfo", `${modeOctal},${blobOid},${relPath}`],
+            { cwd: realWs, env, stdio: "ignore" }
+          );
+        } catch {
+          // unable to hash
+        }
+      }
+    }
+
     const gitTreeOid = execFileSync("git", ["write-tree"], {
       cwd: realWs,
       env,
       encoding: "utf8"
     }).trim();
+
+    // Verify invariant: No checkpoint lists a file without verified restoration material!
+    const verifiedManifest = readGitTreeManifest(realWs, gitTreeOid);
+    for (const relPath of Object.keys(entryStates)) {
+      if (entryStates[relPath].kind === "file") {
+        if (!verifiedManifest[relPath] || verifiedManifest[relPath].objType !== "blob") {
+          // Exclude unsupported file consistently from metadata
+          delete entryStates[relPath];
+          delete fileHashes[relPath];
+        }
+      }
+    }
+
     return { gitTreeOid, fileHashes, entryStates, directories };
   } finally {
     try {
@@ -838,15 +914,19 @@ function executePendingRewindOps(params: {
     try {
       switch (op.op_kind) {
         case "UNLINK_FILE": {
-          unlinkSafeBeneathWorkspace({ workspaceRoot: realWs, relPath: op.rel_path });
+          unlinkSafeBeneathWorkspace({
+            workspaceRoot: realWs,
+            relPath: op.rel_path,
+            syncParentDir: durabilityMode === "power-loss-safe"
+          });
           break;
         }
         case "RMDIR_EMPTY": {
-          rmdirEmptyBeneathWorkspace(realWs, op.rel_path);
+          rmdirEmptyBeneathWorkspace(realWs, op.rel_path, durabilityMode === "power-loss-safe");
           break;
         }
         case "ENSURE_DIR": {
-          mkdirSingleBeneathWorkspace(realWs, op.rel_path);
+          mkdirSingleBeneathWorkspace(realWs, op.rel_path, durabilityMode === "power-loss-safe");
           break;
         }
         case "WRITE_BLOB": {
@@ -926,7 +1006,7 @@ function anchorPiSessionLeafDurable(
 export interface RewindExecutionOptions {
   stateDb: StateDb;
   workspaceRoot: string;
-  sessionManager: SessionManager;
+  sessionManager?: SessionManager;
   sessionId: string;
   fromLeafId: string;
   toLeafId: string;
@@ -1098,7 +1178,9 @@ export function rewindChatAndDiskToLeaf(opts: RewindExecutionOptions): {
     }
 
     lock.assertHeld();
-    const anchorLeafId = anchorPiSessionLeafDurable(opts.sessionManager, txId, opts.toLeafId, durabilityMode);
+    const anchorLeafId = opts.sessionManager
+      ? anchorPiSessionLeafDurable(opts.sessionManager, txId, opts.toLeafId, durabilityMode)
+      : opts.toLeafId;
 
     opts.stateDb.db
       .prepare(`UPDATE rewind_journal SET phase = 'COMPLETED', updated_at_ms = ? WHERE tx_id = ?`)
@@ -1117,7 +1199,7 @@ export function rewindChatAndDiskToLeaf(opts: RewindExecutionOptions): {
 export function recoverInterruptedRewinds(params: {
   stateDb: StateDb;
   workspaceRoot: string;
-  sessionManager: SessionManager;
+  sessionManager?: SessionManager;
   sessionId: string;
   durabilityMode?: DurabilityMode;
 }): Array<{ txId: string; recoveredAnchorLeafId: string }> {
@@ -1154,7 +1236,9 @@ export function recoverInterruptedRewinds(params: {
       }
 
       lock.assertHeld();
-      const anchorId = anchorPiSessionLeafDurable(params.sessionManager, row.tx_id, row.to_leaf_id, durabilityMode);
+      const anchorId = params.sessionManager
+        ? anchorPiSessionLeafDurable(params.sessionManager, row.tx_id, row.to_leaf_id, durabilityMode)
+        : row.to_leaf_id;
       params.stateDb.db
         .prepare(`UPDATE rewind_journal SET phase = 'COMPLETED', updated_at_ms = ? WHERE tx_id = ?`)
         .run(Date.now(), row.tx_id);

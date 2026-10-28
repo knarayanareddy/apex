@@ -128,7 +128,7 @@ export function buildBootPinnedPrefix(params: {
         if (t.name === "codemode") {
           desc = desc.replace(
             /Read \S+?\/docs\/codemode\.md first\./,
-            "Read /home/user/pi-apex-harness/node_modules/@earendil-works/pi-coding-agent/docs/codemode.md first."
+            "Read docs/codemode.md first."
           );
         }
         return {

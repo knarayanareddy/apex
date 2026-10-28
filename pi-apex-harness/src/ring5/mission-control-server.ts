@@ -140,6 +140,27 @@ function parseCookies(header?: string): Record<string, string> {
   return out;
 }
 
+function parseHostHeader(hostHeader?: string): { hostname: string; port?: number } {
+  if (!hostHeader) return { hostname: "" };
+  const trimmed = hostHeader.trim();
+  if (trimmed.startsWith("[")) {
+    const endBracket = trimmed.indexOf("]");
+    if (endBracket !== -1) {
+      const hostname = trimmed.slice(1, endBracket).toLowerCase();
+      const after = trimmed.slice(endBracket + 1);
+      const port = after.startsWith(":") ? parseInt(after.slice(1), 10) : undefined;
+      return { hostname, port: isNaN(port as number) ? undefined : port };
+    }
+  }
+  const colonIdx = trimmed.lastIndexOf(":");
+  if (colonIdx !== -1) {
+    const hostname = trimmed.slice(0, colonIdx).toLowerCase();
+    const port = parseInt(trimmed.slice(colonIdx + 1), 10);
+    return { hostname, port: isNaN(port) ? undefined : port };
+  }
+  return { hostname: trimmed.toLowerCase() };
+}
+
 export interface MissionControlServerOptions {
   controller: Ring4RuntimeController;
   workspaceRoot: string;
@@ -150,6 +171,7 @@ export interface MissionControlServerOptions {
   authToken?: string;
   allowedHosts?: string[];
   requireAuth?: boolean;
+  trustedPublicOrigins?: readonly string[];
 }
 
 export class MissionControlServer {
@@ -162,7 +184,13 @@ export class MissionControlServer {
   private readonly authToken: string;
   private readonly requireAuth: boolean;
   private readonly allowedHosts: Set<string>;
+  private readonly trustedPublicOrigins: { protocol: string; hostname: string; port: number }[];
+  private readonly bootstrapToken: string;
+  private readonly bootstrapExpiresAt: number;
+  private bootstrapUsed = false;
+  private readonly pairingFilePath: string;
   private readonly sseClients = new Set<http.ServerResponse>();
+  private activeReq: http.IncomingMessage | null = null;
   private unsubscribeSession?: () => void;
   private unsubscribeHarnessSwitch?: () => void;
   private server: http.Server | null = null;
@@ -188,6 +216,10 @@ export class MissionControlServer {
     }
     this.requestedPort = opts.port ?? 4310;
     this.authToken = opts.authToken ?? crypto.randomBytes(32).toString("hex");
+    this.bootstrapToken = crypto.randomBytes(24).toString("hex");
+    this.bootstrapExpiresAt = Date.now() + 5 * 60 * 1000;
+    this.bootstrapUsed = false;
+    this.pairingFilePath = path.join(this.workspaceRoot, ".harness", "cockpit-pairing.json");
     this.requireAuth = opts.requireAuth ?? true;
     this.allowedHosts = new Set([
       "127.0.0.1",
@@ -196,17 +228,50 @@ export class MissionControlServer {
       this.host.toLowerCase(),
       ...(opts.allowedHosts?.map((h) => h.toLowerCase()) ?? [])
     ]);
+
+    const rawOrigins = [
+      ...(opts.trustedPublicOrigins ?? []),
+      ...(process.env["PI_APEX_TRUSTED_PUBLIC_ORIGINS"]?.split(",").map((s) => s.trim()) ?? [])
+    ].filter(Boolean);
+
+    this.trustedPublicOrigins = [];
+    for (const raw of rawOrigins) {
+      try {
+        const u = new URL(raw);
+        if (u.protocol === "http:" || u.protocol === "https:") {
+          const port = u.port ? parseInt(u.port, 10) : (u.protocol === "https:" ? 443 : 80);
+          this.trustedPublicOrigins.push({
+            protocol: u.protocol,
+            hostname: u.hostname.toLowerCase(),
+            port
+          });
+        }
+      } catch {
+        // ignore
+      }
+    }
   }
 
   get token(): string {
     return this.authToken;
   }
 
+  get pairingFile(): string {
+    return this.pairingFilePath;
+  }
+
   private _isAllowedHost(hostHeader?: string): boolean {
     if (!hostHeader) return true;
-    const hostname = hostHeader.split(":")[0].toLowerCase();
+    const { hostname } = parseHostHeader(hostHeader);
+    if (!hostname) return true;
     if (this.allowedHosts.has(hostname)) return true;
-    if (hostname.endsWith(".e2b.app")) return true;
+    for (const allowed of this.allowedHosts) {
+      if (allowed.startsWith("*.") && hostname.endsWith(allowed.slice(1))) return true;
+    }
+    for (const trusted of this.trustedPublicOrigins) {
+      if (trusted.hostname === hostname) return true;
+      if (trusted.hostname.startsWith("*.") && hostname.endsWith(trusted.hostname.slice(1))) return true;
+    }
     return false;
   }
 
@@ -236,12 +301,27 @@ export class MissionControlServer {
       const u = new URL(originHeader);
       if (u.protocol !== "http:" && u.protocol !== "https:") return false;
       const port = u.port ? parseInt(u.port, 10) : (u.protocol === "https:" ? 443 : 80);
+      const hostname = u.hostname.toLowerCase();
+
+      // Configured trusted public proxy origins (e.g. HTTPS port 443 proxying to loopback port 4310)
+      for (const trusted of this.trustedPublicOrigins) {
+        const hostMatches =
+          trusted.hostname === hostname ||
+          (trusted.hostname.startsWith("*.") && hostname.endsWith(trusted.hostname.slice(1)));
+        if (
+          trusted.protocol === u.protocol &&
+          hostMatches &&
+          trusted.port === port
+        ) {
+          return true;
+        }
+      }
+
       const boundPort = this.boundPort;
       // Must match server bound port (cross-port origins are untrusted for CSRF/SSE)
       if (boundPort && port !== boundPort) {
         return false;
       }
-      const hostname = u.hostname.toLowerCase();
       if (
         hostname === "127.0.0.1" ||
         hostname === "localhost" ||
@@ -318,8 +398,9 @@ export class MissionControlServer {
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff"
     };
-    if (req?.headers.origin) {
-      const rawOrigin = req.headers.origin;
+    const effectiveReq = req ?? (res as any).__apexReq ?? this.activeReq;
+    if (effectiveReq?.headers.origin) {
+      const rawOrigin = effectiveReq.headers.origin;
       const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
       if (origin && this._isExactTrustedOrigin(origin)) {
         headers["Access-Control-Allow-Origin"] = origin;
@@ -417,13 +498,14 @@ export class MissionControlServer {
     };
   }
 
-  async start(): Promise<{ host: string; port: number; url: string; token: string }> {
+  async start(): Promise<{ host: string; port: number; url: string; token: string; bootstrapToken: string }> {
     if (this.server) {
       return {
         host: this.host,
         port: this.boundPort,
         url: `http://${this.host}:${this.boundPort}`,
-        token: this.authToken
+        token: this.authToken,
+        bootstrapToken: this.bootstrapToken
       };
     }
 
@@ -438,6 +520,8 @@ export class MissionControlServer {
     });
 
     this.server = http.createServer(async (req, res) => {
+      (res as any).__apexReq = req;
+      this.activeReq = req;
       try {
         if (!this._isAllowedHost(req.headers["host"])) {
           res.writeHead(403, { "Content-Type": "application/json" });
@@ -464,8 +548,63 @@ export class MissionControlServer {
         const parsedUrl = new URL(req.url ?? "/", "http://pi-apex.local");
         const pathname = parsedUrl.pathname;
 
-        // 1. Self-contained Operator Cockpit HTML (with ?token= handshake)
+        // 0a. Single-use bootstrap token exchange endpoint
+        if (req.method === "POST" && pathname === "/api/auth/bootstrap") {
+          const body = await readJsonBody(req);
+          const candidate = typeof body["bootstrapToken"] === "string" ? body["bootstrapToken"].trim() : "";
+          if (this.bootstrapUsed) {
+            this._sendJson(res, 401, { error: "BOOTSTRAP_TOKEN_ALREADY_USED: single-use bootstrap token already consumed" }, req);
+            return;
+          }
+          if (Date.now() > this.bootstrapExpiresAt) {
+            this._sendJson(res, 401, { error: "BOOTSTRAP_TOKEN_EXPIRED: bootstrap token has expired" }, req);
+            return;
+          }
+          if (!candidate || !timingSafeEqualStr(candidate, this.bootstrapToken)) {
+            this._sendJson(res, 401, { error: "BOOTSTRAP_TOKEN_INVALID: invalid bootstrap token" }, req);
+            return;
+          }
+          this.bootstrapUsed = true;
+          res.setHeader("Set-Cookie", `apex_session=${this.authToken}; HttpOnly; SameSite=Strict; Path=/`);
+          this._sendJson(res, 200, { ok: true, sessionToken: this.authToken }, req);
+          return;
+        }
+
+        // 0b. Session logout endpoint
+        if (req.method === "POST" && pathname === "/api/auth/logout") {
+          res.setHeader("Set-Cookie", "apex_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+          this._sendJson(res, 200, { ok: true, loggedOut: true }, req);
+          return;
+        }
+
+        // 1. Self-contained Operator Cockpit HTML (with ?bootstrap= or ?token= handshake)
         if (req.method === "GET" && (pathname === "/" || pathname === "/index.html")) {
+          const bootstrapParam = parsedUrl.searchParams.get("bootstrap");
+          if (bootstrapParam) {
+            if (this.bootstrapUsed) {
+              res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+              res.end("<!DOCTYPE html><html><body><h1>401 Unauthorized</h1><p>Single-use bootstrap code has already been consumed.</p></body></html>");
+              return;
+            }
+            if (Date.now() > this.bootstrapExpiresAt) {
+              res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+              res.end("<!DOCTYPE html><html><body><h1>401 Unauthorized</h1><p>Bootstrap code has expired.</p></body></html>");
+              return;
+            }
+            if (timingSafeEqualStr(bootstrapParam, this.bootstrapToken)) {
+              this.bootstrapUsed = true;
+              res.writeHead(302, {
+                "Set-Cookie": `apex_session=${this.authToken}; HttpOnly; SameSite=Strict; Path=/`,
+                Location: pathname === "/index.html" ? "/index.html" : "/"
+              });
+              res.end();
+              return;
+            }
+            res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+            res.end("<!DOCTYPE html><html><body><h1>401 Unauthorized</h1><p>Invalid bootstrap code.</p></body></html>");
+            return;
+          }
+
           const tokenParam = parsedUrl.searchParams.get("token");
           if (tokenParam && timingSafeEqualStr(tokenParam, this.authToken)) {
             res.writeHead(302, {
@@ -479,7 +618,7 @@ export class MissionControlServer {
           if (this.requireAuth && !this._validateAuth(req)) {
             res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
             res.end(
-              "<!DOCTYPE html><html><body><h1>401 Unauthorized</h1><p>Mission Control Cockpit requires authentication. Connect with ?token=&lt;token&gt; or Authorization: Bearer.</p></body></html>"
+              "<!DOCTYPE html><html><body><h1>401 Unauthorized</h1><p>Mission Control Cockpit requires authentication. Authenticate via single-use bootstrap code, pairing file, or Authorization: Bearer.</p></body></html>"
             );
             return;
           }
@@ -2200,11 +2339,39 @@ export class MissionControlServer {
       });
     });
 
+    // Write protected local pairing credential file with mode 0600
+    try {
+      const harnessDir = path.dirname(this.pairingFilePath);
+      if (!fs.existsSync(harnessDir)) {
+        fs.mkdirSync(harnessDir, { recursive: true });
+      }
+      const pairingPayload = JSON.stringify(
+        {
+          url: `http://${this.host}:${this.boundPort}`,
+          token: this.authToken,
+          bootstrapToken: this.bootstrapToken,
+          createdAt: Date.now(),
+          expiresAt: this.bootstrapExpiresAt
+        },
+        null,
+        2
+      );
+      fs.writeFileSync(this.pairingFilePath, pairingPayload, { mode: 0o600 });
+      try {
+        fs.chmodSync(this.pairingFilePath, 0o600);
+      } catch {
+        // ignore on platforms where chmod fails
+      }
+    } catch (err) {
+      console.warn(`[APEX_COCKPIT_WARNING] Could not write pairing file: ${String(err)}`);
+    }
+
     return {
       host: this.host,
       port: this.boundPort,
       url: `http://${this.host}:${this.boundPort}`,
-      token: this.authToken
+      token: this.authToken,
+      bootstrapToken: this.bootstrapToken
     };
   }
 

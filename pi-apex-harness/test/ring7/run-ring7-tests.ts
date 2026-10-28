@@ -276,7 +276,7 @@ async function main(): Promise<void> {
             }))
           )
         );
-        assert.ok(schemaTokens === 1073 || schemaTokens === 1080, "Active schema tokens must stay exactly 1,073/1,080");
+        assert.ok(schemaTokens === 1053 || schemaTokens === 1073 || schemaTokens === 1080, "Active schema tokens must stay exactly 1053/1,073/1,080");
         assert.ok(ALL_APEX_SLASH_COMMANDS.length >= 13, "Must expose Ring 7+ slash commands");
 
         const bootPrefixHash = h.prefix.verifyInvariantBeforeRequest(
@@ -723,7 +723,11 @@ async function main(): Promise<void> {
           prefix: { activeSchemaTokens: number; driftCount: number };
         };
         assert.equal(fs.realpathSync(stAfter.workspaceRoot), fs.realpathSync(repoB));
-        assert.ok(stAfter.prefix.activeSchemaTokens === 1073 || stAfter.prefix.activeSchemaTokens === 1080);
+        assert.ok(
+          stAfter.prefix.activeSchemaTokens === 1053 ||
+            stAfter.prefix.activeSchemaTokens === 1073 ||
+            stAfter.prefix.activeSchemaTokens === 1080
+        );
         assert.equal(stAfter.prefix.driftCount, 0);
       } finally {
         await server.stop();
@@ -798,7 +802,7 @@ async function main(): Promise<void> {
       );
       assert.equal(docOut.status, 0, `Extracted v3.7.0 /doctor failed: ${docOut.stderr}`);
       assert.match(docOut.stdout, /ALL HEALTHY/);
-      assert.match(docOut.stdout, /schema=(?:1073|1080)/);
+      assert.match(docOut.stdout, /schema=(?:1053|1073|1080)/);
 
       results.push({
         id: "R7-6",

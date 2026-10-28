@@ -6,8 +6,10 @@ import type { SandboxMode } from "../types.ts";
 import {
   auditGitHistoryForSecretPaths,
   DEFAULT_UNMASKED_SECRET_EXCEPTIONS,
+  findWorkspaceGitRoots,
   scanWorkspaceSecretsAndHardlinks
 } from "./safe-path.ts";
+import { recordProcessIdentity, terminateProcessTree } from "./process-tree.ts";
 
 export class SandboxUnavailableError extends Error {
   constructor(message: string) {
@@ -162,6 +164,10 @@ export function resolveGitRepositoryLayout(workspaceRoot: string): ResolvedGitLa
         const resolvedAlt = path.resolve(primaryObjects, trimmed);
         if (fs.existsSync(resolvedAlt)) {
           objectsSet.add(fs.realpathSync(resolvedAlt));
+        } else {
+          throw new SandboxUnavailableError(
+            `Cannot isolate unresolvable Git alternate object store '${trimmed}' referenced in '${altFile}'`
+          );
         }
       }
     }
@@ -199,6 +205,22 @@ export function resolveGitRepositoryLayout(workspaceRoot: string): ResolvedGitLa
     indexFiles,
     readOnlyControlPaths: Array.from(roSet)
   };
+}
+
+/**
+ * Resolves Git repository layouts across ALL discovered Git repositories (root, submodules,
+ * nested repositories, linked worktrees) beneath `workspaceRoot`.
+ */
+export function resolveAllWorkspaceGitLayouts(workspaceRoot: string): ResolvedGitLayout[] {
+  const roots = findWorkspaceGitRoots(workspaceRoot);
+  const layouts: ResolvedGitLayout[] = [];
+  for (const root of roots) {
+    const layout = resolveGitRepositoryLayout(root);
+    if (layout.isGitRepo) {
+      layouts.push(layout);
+    }
+  }
+  return layouts;
 }
 
 export function collectMaskedSecretFiles(
@@ -260,55 +282,58 @@ export function buildMinimalBwrapArgv(
     }
   }
 
-  const gitLayout = resolveGitRepositoryLayout(ws);
+  const allGitLayouts = resolveAllWorkspaceGitLayouts(ws);
   const gitIsoMode = cfg.isolateGitObjectsMode ?? "always";
 
-  // Linked worktree external metadata mounts (commonDir & gitDir live outside `<ws>`)
-  if (gitLayout.isLinkedWorktree && gitLayout.commonDir && gitLayout.gitDir) {
-    args.push("--ro-bind", gitLayout.commonDir, gitLayout.commonDir);
-    if (mode === "workspace-write") {
-      args.push("--bind", gitLayout.gitDir, gitLayout.gitDir);
-      if (gitIsoMode === "expose-unsafe") {
+  for (const gitLayout of allGitLayouts) {
+    // Linked worktree external metadata mounts (commonDir & gitDir live outside `<ws>`)
+    if (gitLayout.isLinkedWorktree && gitLayout.commonDir && gitLayout.gitDir) {
+      args.push("--ro-bind", gitLayout.commonDir, gitLayout.commonDir);
+      if (mode === "workspace-write") {
+        args.push("--bind", gitLayout.gitDir, gitLayout.gitDir);
+        if (gitIsoMode === "expose-unsafe") {
+          for (const objDir of gitLayout.objectsDirs) {
+            args.push("--bind", objDir, objDir);
+          }
+        }
+      }
+    }
+
+    for (const roControl of gitLayout.readOnlyControlPaths) {
+      args.push("--ro-bind", roControl, roControl);
+    }
+
+    // Isolate Git object & reflog directories (`--tmpfs`) — safe default `"always"` covers reachable,
+    // reflog-only, AND unreachable/dangling secret blobs across standard repos, nested repos, and linked worktrees!
+    if (gitLayout.isGitRepo && gitIsoMode !== "expose-unsafe") {
+      const shouldIsolate =
+        gitIsoMode === "always"
+          ? { isolateObjects: true, maskIndex: false }
+          : (() => {
+              const audit = auditGitHistoryForSecretPaths(ws, cfg.unmaskedSecretExceptions);
+              return { isolateObjects: audit.hasHistoricalSecrets, maskIndex: audit.hasStagedSecrets };
+            })();
+
+      if (shouldIsolate.isolateObjects) {
         for (const objDir of gitLayout.objectsDirs) {
-          args.push("--bind", objDir, objDir);
+          args.push("--tmpfs", objDir);
+        }
+        for (const logDir of gitLayout.logsDirs) {
+          args.push("--tmpfs", logDir);
+        }
+      }
+      if (shouldIsolate.maskIndex) {
+        for (const idxFile of gitLayout.indexFiles) {
+          args.push("--ro-bind", "/dev/null", idxFile);
         }
       }
     }
   }
 
-  // Protect control-plane subpaths (`hooks`, `config`, `.harness`) strictly Read-Only
+  // Protect control-plane subpaths (`.harness`) strictly Read-Only
   const absHarness = path.join(ws, ".harness");
   if (fs.existsSync(absHarness)) {
     args.push("--ro-bind", absHarness, absHarness);
-  }
-  for (const roControl of gitLayout.readOnlyControlPaths) {
-    args.push("--ro-bind", roControl, roControl);
-  }
-
-  // Isolate Git object & reflog directories (`--tmpfs`) — safe default `"always"` covers reachable,
-  // reflog-only, AND unreachable/dangling secret blobs across standard repos and linked worktrees!
-  if (gitLayout.isGitRepo && gitIsoMode !== "expose-unsafe") {
-    const shouldIsolate =
-      gitIsoMode === "always"
-        ? { isolateObjects: true, maskIndex: false }
-        : (() => {
-            const audit = auditGitHistoryForSecretPaths(ws, cfg.unmaskedSecretExceptions);
-            return { isolateObjects: audit.hasHistoricalSecrets, maskIndex: audit.hasStagedSecrets };
-          })();
-
-    if (shouldIsolate.isolateObjects) {
-      for (const objDir of gitLayout.objectsDirs) {
-        args.push("--tmpfs", objDir);
-      }
-      for (const logDir of gitLayout.logsDirs) {
-        args.push("--tmpfs", logDir);
-      }
-    }
-    if (shouldIsolate.maskIndex) {
-      for (const idxFile of gitLayout.indexFiles) {
-        args.push("--ro-bind", "/dev/null", idxFile);
-      }
-    }
   }
 
   // Mask workspace secret files & hardlink aliases recursively
@@ -393,21 +418,59 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
           stdio: ["ignore", "pipe", "pipe"]
         });
 
+        const procIdentity = recordProcessIdentity(child.pid ?? -1);
         let timedOut = false;
         let timer: NodeJS.Timeout | undefined;
+        let settleTimeout: NodeJS.Timeout | undefined;
+        let settled = false;
+
+        const terminateDescendantsAndStreams = () => {
+          if (child.pid) {
+            terminateProcessTree(child.pid, procIdentity);
+          }
+          try {
+            child.stdout.destroy();
+          } catch {
+            // ignore
+          }
+          try {
+            child.stderr.destroy();
+          } catch {
+            // ignore
+          }
+        };
+
+        const settleOnce = (result: { exitCode: number | null }) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (settleTimeout) clearTimeout(settleTimeout);
+          options.signal?.removeEventListener("abort", onAbort);
+          resolve(result);
+        };
+
         if (options.timeout && options.timeout > 0) {
           timer = setTimeout(() => {
             timedOut = true;
-            child.kill("SIGKILL");
+            terminateDescendantsAndStreams();
+            settleTimeout = setTimeout(() => {
+              options.onData(Buffer.from("\n[sandbox: command timed out]\n", "utf8"));
+              settleOnce({ exitCode: 124 });
+            }, 250);
+            settleTimeout.unref();
           }, options.timeout * 1000);
         }
 
         const onAbort = () => {
-          child.kill("SIGKILL");
+          terminateDescendantsAndStreams();
+          settleTimeout = setTimeout(() => {
+            settleOnce({ exitCode: 137 });
+          }, 250);
+          settleTimeout.unref();
         };
         if (options.signal) {
           if (options.signal.aborted) {
-            child.kill("SIGKILL");
+            onAbort();
           } else {
             options.signal.addEventListener("abort", onAbort, { once: true });
           }
@@ -430,13 +493,17 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
           // Hard kill ceiling: if runaway command exceeds 128MB, kill process immediately
           if (totalBytesSeen > MAX_KILL_BYTES) {
             killTriggered = true;
-            child.kill("SIGKILL");
+            terminateDescendantsAndStreams();
             options.onData(
               Buffer.from(
                 `\n[TRUNCATED: Process killed after exceeding ${Math.round(MAX_KILL_BYTES / (1024 * 1024))}MB output cap. totalBytes=${totalBytesSeen}]\n`,
                 "utf8"
               )
             );
+            settleTimeout = setTimeout(() => {
+              settleOnce({ exitCode: 137 });
+            }, 250);
+            settleTimeout.unref();
             return;
           }
 
@@ -470,12 +537,12 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
         child.stderr.on("data", handleChunk);
         child.on("error", (err) => {
           if (timer) clearTimeout(timer);
+          if (settleTimeout) clearTimeout(settleTimeout);
           options.signal?.removeEventListener("abort", onAbort);
           reject(err);
         });
         child.on("close", (code, signal) => {
-          if (timer) clearTimeout(timer);
-          options.signal?.removeEventListener("abort", onAbort);
+          if (settled) return;
           if (inlineCutoffReached && tailRing.length > 0) {
             const combinedTail = Buffer.concat(tailRing);
             const tailSlice = combinedTail.subarray(Math.max(0, combinedTail.length - MAX_TAIL_PREVIEW_BYTES));
@@ -488,14 +555,14 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
           }
           if (timedOut) {
             options.onData(Buffer.from("\n[sandbox: command timed out]\n", "utf8"));
-            resolve({ exitCode: 124 });
+            settleOnce({ exitCode: 124 });
             return;
           }
           if (signal) {
-            resolve({ exitCode: 128 + 9 });
+            settleOnce({ exitCode: 128 + 9 });
             return;
           }
-          resolve({ exitCode: code });
+          settleOnce({ exitCode: code });
         });
       });
     }

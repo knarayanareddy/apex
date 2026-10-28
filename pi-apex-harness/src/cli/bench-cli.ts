@@ -30,12 +30,17 @@ async function main(): Promise<void> {
   let suitePath: string | undefined;
   let modelSpec: string | undefined;
 
+  let customTasks: SweBenchTaskDefinition[] | undefined;
+  let allowUnsandboxedDev = false;
+
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--json") {
       jsonOut = true;
     } else if (a === "--no-ab") {
       compareAb = false;
+    } else if (a === "--allow-unsandboxed-dev" || a === "--no-bwrap") {
+      allowUnsandboxedDev = true;
     } else if (a === "--cwd" && args[i + 1]) {
       persistCwd = path.resolve(args[++i]!);
     } else if (a === "--suite" && args[i + 1]) {
@@ -44,8 +49,6 @@ async function main(): Promise<void> {
       modelSpec = args[++i]!;
     }
   }
-
-  let customTasks: SweBenchTaskDefinition[] | undefined;
   if (suitePath) {
     customTasks = JSON.parse(fs.readFileSync(suitePath, "utf8")) as SweBenchTaskDefinition[];
   }
@@ -77,13 +80,27 @@ async function main(): Promise<void> {
     tasks: customTasks,
     compareExperienceAb: compareAb,
     customModelRuntime,
-    customModel
+    customModel,
+    useBwrapInCi: !allowUnsandboxedDev && process.platform === "linux"
   });
 
   if (jsonOut) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } else {
     process.stdout.write(`${report.markdownReport}\n`);
+  }
+
+  // F1 Fix: Verification failure must be fatal (propagate nonzero exit)
+  const anyTaskFailed =
+    report.baseline.resolvedTasks < report.baseline.totalTasks ||
+    (report.evolved !== undefined && report.evolved.resolvedTasks < report.evolved.totalTasks);
+
+  if (anyTaskFailed) {
+    const failedBase = report.baseline.totalTasks - report.baseline.resolvedTasks;
+    process.stderr.write(
+      `\n[pi-apex bench] BENCHMARK_VERIFICATION_FAILED: ${failedBase} task(s) failed post-run verification.\n`
+    );
+    process.exit(2);
   }
 }
 

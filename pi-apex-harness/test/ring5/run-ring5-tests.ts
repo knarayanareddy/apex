@@ -120,6 +120,8 @@ async function main(): Promise<void> {
         workspaceRoot: ws,
         host: "0.0.0.0",
         port: 0,
+        allowedHosts: ["*.e2b.app"],
+        trustedPublicOrigins: ["https://*.e2b.app"],
         requireAuth: false
       });
       const listenInfo = await server.start();
@@ -190,7 +192,8 @@ async function main(): Promise<void> {
         });
         assert.equal(statusRes.status, 200);
         assert.ok(
-          statusRes.data.prefix.activeSchemaTokens === 1073 ||
+          statusRes.data.prefix.activeSchemaTokens === 1053 ||
+            statusRes.data.prefix.activeSchemaTokens === 1073 ||
             statusRes.data.prefix.activeSchemaTokens === 1080
         );
         assert.equal(statusRes.data.prefix.driftCount, 0);
@@ -205,7 +208,8 @@ async function main(): Promise<void> {
         assert.equal(docRes.status, 200);
         assert.equal(docRes.data.details.healthy, true, "All 9 /doctor checks must pass");
         assert.ok(
-          docRes.data.details.activeSchemaTokens === 1073 ||
+          docRes.data.details.activeSchemaTokens === 1053 ||
+            docRes.data.details.activeSchemaTokens === 1073 ||
             docRes.data.details.activeSchemaTokens === 1080
         );
         assert.match(docRes.data.markdown, /ALL HEALTHY/);
@@ -459,7 +463,11 @@ async function main(): Promise<void> {
     const e2e1 = evalReport.scenarios.find((s) => s.id === "E2E-1")!;
     assert.ok(e2e1 && e2e1.passed);
     assert.equal(e2e1.stagesVerified.length, 6);
-    assert.ok(e2e1.activeSchemaTokens === 1073 || e2e1.activeSchemaTokens === 1080);
+    assert.ok(
+      e2e1.activeSchemaTokens === 1053 ||
+        e2e1.activeSchemaTokens === 1073 ||
+        e2e1.activeSchemaTokens === 1080
+    );
     assert.equal(e2e1.prefixHashDriftCount, 0);
     results.push({
       id: "R5-4",
@@ -510,7 +518,8 @@ async function main(): Promise<void> {
               });
               if (
                 st.status === 200 &&
-                (st.data.prefix.activeSchemaTokens === 1073 ||
+                (st.data.prefix.activeSchemaTokens === 1053 ||
+                  st.data.prefix.activeSchemaTokens === 1073 ||
                   st.data.prefix.activeSchemaTokens === 1080) &&
                 Array.isArray(st.data.artifacts) &&
                 st.data.artifacts.length >= 1 &&
@@ -556,7 +565,7 @@ async function main(): Promise<void> {
       );
       assert.equal(docRun.status, 0, `Installed pi-apex /doctor failed: ${docRun.stderr}`);
       assert.match(docRun.stdout, /ALL HEALTHY/);
-      assert.match(docRun.stdout, /schema=(?:1073|1080)/);
+      assert.match(docRun.stdout, /schema=(?:1053|1073|1080)/);
 
       results.push({
         id: "R5-6",

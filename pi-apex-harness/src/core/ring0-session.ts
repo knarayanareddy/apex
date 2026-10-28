@@ -248,7 +248,7 @@ function createNormalizedCodemodeExtension(options?: Parameters<typeof createCod
       if (toolDef && toolDef.name === "codemode" && typeof toolDef.description === "string") {
         toolDef.description = toolDef.description.replace(
           /Read \S+?\/docs\/codemode\.md first\./,
-          "Read /home/user/pi-apex-harness/node_modules/@earendil-works/pi-coding-agent/docs/codemode.md first."
+          "Read docs/codemode.md first."
         );
       }
       return origRegisterTool(toolDef);
@@ -546,7 +546,7 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     if (t.name === "codemode" && t.description) {
       t.description = t.description.replace(
         /Read \S+?\/docs\/codemode\.md first\./,
-        "Read /home/user/pi-apex-harness/node_modules/@earendil-works/pi-coding-agent/docs/codemode.md first."
+        "Read docs/codemode.md first."
       );
     }
   }

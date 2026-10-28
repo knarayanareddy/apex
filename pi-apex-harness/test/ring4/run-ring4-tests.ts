@@ -503,7 +503,7 @@ async function runRing4Suite(): Promise<void> {
       `bin/pi-apex -p "/doctor" failed: ${printRun.stderr}\n${printRun.stdout}`
     );
     assert.match(printRun.stdout, /# Pi-Apex Doctor Self-Audit — ALL HEALTHY/);
-    assert.match(printRun.stdout, /schema=(?:1073|1080)/);
+    assert.match(printRun.stdout, /schema=(?:1053|1073|1080)/);
 
     // 2. Structured NDJSON `--mode json -p "/quarantine list"`
     const jsonRun = spawnSync(

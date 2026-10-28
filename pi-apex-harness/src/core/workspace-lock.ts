@@ -53,16 +53,28 @@ export function readProcStartTimeTicks(pid: number): string | null {
 }
 
 /**
- * Reviewer #4 Issue #4 Fix:
- * Kernel-owned exclusive lock via `flock(lockFd, LOCK_EX | LOCK_NB)` on a permanent, never-unlinked
- * `.harness/workspace.lock` inode opened beneath `<workspaceRoot>` via `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`.
+ * Reviewer #4 Issue #4 Fix & Programme D4 Concurrency Contract:
  *
- * Properties:
- * 1. Zero `.reclaim` directory mutex — no secondary mutex can ever become stale on crash!
- * 2. Instantaneous `0ms` recovery on `SIGKILL` (`kill -9`): the Linux kernel closes `lockFd` in `do_exit()`
- *    and releases the open-file-description `flock` immediately.
- * 3. Blocks BOTH cross-process contenders AND second `open()` descriptors inside the same process!
- * 4. Because `.harness/workspace.lock` is never unlinked, every opener locks the exact same inode.
+ * SUPPORTED CONCURRENCY MODEL: Quiescent Workspace Precondition backed by Cooperative Locking.
+ *
+ * 1. Cooperative Serialization:
+ *    Cooperative harness processes and tools synchronize via kernel-owned exclusive lock
+ *    `flock(lockFd, LOCK_EX | LOCK_NB)` on the permanent `.harness/workspace.lock` inode.
+ *    Instantaneous 0ms recovery on SIGKILL; zero stale secondary mutex files; prevents concurrent
+ *    runs between cooperating harness workers.
+ *
+ * 2. Quiescent Workspace Precondition & Non-Cooperative Limitations:
+ *    Advisory kernel `flock` DOES NOT and CANNOT intercept arbitrary uncooperative external editors
+ *    (e.g. Vim, VS Code, or host background scripts mutating files directly) on POSIX filesystems.
+ *    POSIX filesystems do not support atomic multi-file tree compare-and-swap without kernel snapshotting.
+ *
+ * 3. Pre-Mutation Conflict Detection:
+ *    Before executing any descriptor-pinned mutation (`unlinkat`, `mkdirat`, `renameat`), the rewind
+ *    spine inspects the live path state (`liveNow === expBefore`). If a concurrent external modification
+ *    diverged the disk state from the expected baseline, rewind strictly rejects the operation with
+ *    `RewindConflictError` to preserve modified data rather than blindly clobbering it.
+ *    Concurrent non-cooperative mutations occurring between inspection and syscall execution violate
+ *    the quiescent workspace requirement and cannot be atomically resolved by userland POSIX primitives.
  */
 export function acquireWorkspaceLock(workspaceRoot: string): WorkspaceLockHandle {
   const bridge = getLinuxFsBridge();

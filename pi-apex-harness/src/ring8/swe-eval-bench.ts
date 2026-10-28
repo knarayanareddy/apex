@@ -494,7 +494,7 @@ export async function runPersonalSweBenchmarkSuite(opts: {
 }): Promise<SweBenchmarkReport> {
   const tasks = opts.tasks ?? BUILTIN_SWE_BENCHMARK_CORPUS;
   const compareAb = opts.compareExperienceAb ?? true;
-  const useBwrap = opts.useBwrapInCi ?? true;
+  const useBwrap = opts.useBwrapInCi ?? (process.platform === "linux");
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-apex-swe-bench-"));
   const benchId = `bench_${new Date().toISOString().replace(/[:.]/g, "-")}_${crypto.randomUUID().slice(0, 6)}`;
 

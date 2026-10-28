@@ -34,11 +34,64 @@ const ADDON_PATH = path.join(NATIVE_DIR, "linux_fs_bridge.node");
 
 let cachedBridge: LinuxFsBridge | null = null;
 
+export function checkAddonBinaryCompatibility(addonPath: string): {
+  compatible: boolean;
+  format: "elf" | "macho" | "unknown";
+  reason?: string;
+} {
+  try {
+    const fd = fs.openSync(addonPath, "r");
+    const buf = Buffer.alloc(4);
+    fs.readSync(fd, buf, 0, 4, 0);
+    fs.closeSync(fd);
+
+    const isElf = buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46; // \x7fELF
+    const isMachO =
+      (buf[0] === 0xcf && buf[1] === 0xfa && buf[2] === 0xed && buf[3] === 0xfe) || // 64-bit little endian
+      (buf[0] === 0xfe && buf[1] === 0xed && buf[2] === 0xfa && buf[3] === 0xcf) || // 64-bit big endian
+      (buf[0] === 0xce && buf[1] === 0xfa && buf[2] === 0xed && buf[3] === 0xfe) || // 32-bit little endian
+      (buf[0] === 0xfe && buf[1] === 0xed && buf[2] === 0xfa && buf[3] === 0xce);   // 32-bit big endian
+
+    const detectedFormat = isElf ? "elf" : isMachO ? "macho" : "unknown";
+
+    if (process.platform === "linux") {
+      if (!isElf) {
+        return {
+          compatible: false,
+          format: detectedFormat,
+          reason: `Native addon '${addonPath}' is a ${detectedFormat.toUpperCase()} binary (not Linux ELF). Incompatible platform binary detected.`
+        };
+      }
+    } else if (process.platform === "darwin") {
+      if (!isMachO) {
+        return {
+          compatible: false,
+          format: detectedFormat,
+          reason: `Native addon '${addonPath}' is a ${detectedFormat.toUpperCase()} binary (not macOS Mach-O). Incompatible platform binary detected.`
+        };
+      }
+    }
+    return { compatible: true, format: detectedFormat };
+  } catch (err) {
+    return { compatible: false, format: "unknown", reason: String(err) };
+  }
+}
+
 function ensureNativeBridgeCompiled(): void {
   if (fs.existsSync(ADDON_PATH)) {
-    const srcMtime = fs.statSync(C_SRC_PATH).mtimeMs;
-    const binMtime = fs.statSync(ADDON_PATH).mtimeMs;
-    if (binMtime >= srcMtime) return;
+    const compat = checkAddonBinaryCompatibility(ADDON_PATH);
+    if (!compat.compatible) {
+      console.warn(`[APEX_NATIVE_LOADER] ${compat.reason}. Recompiling for current host...`);
+      try {
+        fs.unlinkSync(ADDON_PATH);
+      } catch {
+        // ignore
+      }
+    } else {
+      const srcMtime = fs.statSync(C_SRC_PATH).mtimeMs;
+      const binMtime = fs.statSync(ADDON_PATH).mtimeMs;
+      if (binMtime >= srcMtime) return;
+    }
   }
   const includeCandidates = [
     "/usr/include/node",
@@ -82,7 +135,13 @@ function ensureNativeBridgeCompiled(): void {
         "-o",
         ADDON_PATH
       ];
-  execFileSync(compiler, flags, { stdio: "pipe" });
+  try {
+    execFileSync(compiler, flags, { stdio: "pipe" });
+  } catch (err: any) {
+    throw new Error(
+      `NATIVE_COMPILATION_FAILED: Failed to build native addon for ${process.platform} using ${compiler}: ${err.message}. Run 'npm run build:native'.`
+    );
+  }
 }
 
 export function getLinuxFsBridge(): LinuxFsBridge {

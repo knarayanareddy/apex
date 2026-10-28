@@ -56,6 +56,7 @@ export interface PiApexCliParsed {
   webMode: boolean;
   webHost: string;
   webPort: number;
+  trustedOrigins: string[];
   seedDemo: boolean;
   mockFauxResponse?: string;
   piArgs: Args;
@@ -77,6 +78,7 @@ export function parsePiApexCliArgs(
   let webMode = false;
   let webHost = "127.0.0.1";
   let webPort = 4310;
+  const trustedOrigins: string[] = [];
   let seedDemo = false;
   let mockFauxResponse: string | undefined = process.env["PI_APEX_MOCK_RESPONSE"];
 
@@ -143,6 +145,10 @@ export function parsePiApexCliArgs(
       webPort = Number.parseInt(rawArgv[++i]!, 10);
     } else if (arg.startsWith("--port=")) {
       webPort = Number.parseInt(arg.slice("--port=".length), 10);
+    } else if (arg === "--trusted-origin" && i + 1 < rawArgv.length) {
+      trustedOrigins.push(rawArgv[++i]!);
+    } else if (arg.startsWith("--trusted-origin=")) {
+      trustedOrigins.push(arg.slice("--trusted-origin=".length));
     } else if (arg === "--seed-demo") {
       seedDemo = true;
     } else if (arg === "--mock-response" && i + 1 < rawArgv.length) {
@@ -176,6 +182,7 @@ export function parsePiApexCliArgs(
     webMode,
     webHost,
     webPort,
+    trustedOrigins,
     seedDemo,
     mockFauxResponse,
     piArgs
@@ -494,11 +501,14 @@ export async function runPiApexCli(
       controller,
       workspaceRoot: parsed.cwd,
       host: parsed.webHost ?? "127.0.0.1",
-      port: parsed.webPort
+      port: parsed.webPort,
+      trustedPublicOrigins: parsed.trustedOrigins
     });
     const info = await server.start();
     process.stdout.write(
-      `pi-apex v${PI_APEX_VERSION} Mission-Control Cockpit listening on ${info.url}/?token=${info.token} (workspace: ${parsed.cwd})\n`
+      `pi-apex v${PI_APEX_VERSION} Mission-Control Cockpit listening on ${info.url} (workspace: ${parsed.cwd})\n` +
+      `Authentication: protected pairing credentials written to .harness/cockpit-pairing.json (mode 0600).\n` +
+      `To authenticate browser session, exchange bootstrap code: ${info.bootstrapToken} (expires in 5m)\n`
     );
     hostOpts?.onWebServerListening?.(info);
 

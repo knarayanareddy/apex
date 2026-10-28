@@ -274,7 +274,7 @@ export class ChromiumCdpSession {
     }
     this.chromiumPath = resolvedBin;
     this.workspaceRoot = opts.workspaceRoot;
-    this.connectTimeoutMs = opts.connectTimeoutMs ?? 12_000;
+    this.connectTimeoutMs = opts.connectTimeoutMs ?? 30_000;
   }
 
   public get pid(): number | undefined {

@@ -125,6 +125,37 @@ export class PrivateSpillStore {
     }
   }
 
+  /**
+   * Spills full ordered structured content blocks (text before, between, and after images)
+   * to a private `0600` JSON file within the session-scoped directory (Programme F3).
+   */
+  spillStructuredContent(
+    sessionId: string,
+    content: unknown[]
+  ): { spilled: boolean; spillPath: string | null; error?: string } {
+    if (this.simulateWriteFailure) {
+      return { spilled: false, spillPath: null, error: "ENOSPC" };
+    }
+    try {
+      const sessionHash = crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 12);
+      const sessionDir = path.join(this.rootDir, `session-${sessionHash}`);
+      fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+
+      const rand = crypto.randomBytes(12).toString("hex");
+      const spillFile = path.join(sessionDir, `structured-${Date.now()}-${rand}.json`);
+      const fd = fs.openSync(spillFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600);
+      try {
+        const json = scrubSecretsInfallible(JSON.stringify(content, null, 2));
+        fs.writeFileSync(fd, json, "utf8");
+      } finally {
+        fs.closeSync(fd);
+      }
+      return { spilled: true, spillPath: spillFile };
+    } catch (err: any) {
+      return { spilled: false, spillPath: null, error: err.code ?? err.message };
+    }
+  }
+
   sweepExpiredSync(nowMs: number = Date.now()): number {
     if (this.cleanupDays <= 0 || !fs.existsSync(this.rootDir)) return 0;
     const cutoffMs = nowMs - this.cleanupDays * 86_400_000;

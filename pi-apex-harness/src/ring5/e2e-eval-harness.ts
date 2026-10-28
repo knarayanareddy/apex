@@ -145,8 +145,8 @@ export async function runMultiRingEvalSuite(params: {
         )
       );
       assert.ok(
-        e1SchemaTokens === 1073 || e1SchemaTokens === 1080,
-        "E2E-1 active schema must equal 1073/1080 o200k tokens"
+        e1SchemaTokens === 1053 || e1SchemaTokens === 1073 || e1SchemaTokens === 1080,
+        "E2E-1 active schema must equal 1053/1073/1080 o200k tokens"
       );
 
       // Stage 1 (Ring 1): Read file in Plan Mode -> triggers `.mdc` scoped rule tail + WASM Merkle AST `repo_map`
@@ -458,7 +458,7 @@ export async function runMultiRingEvalSuite(params: {
         passed: true,
         elapsedMs: Number((performance.now() - e2Start).toFixed(2)),
         stagesVerified: e2Stages,
-        activeSchemaTokens: 1073,
+        activeSchemaTokens: 1053,
         prefixHashDriftCount: e2Drift
       });
     } finally {

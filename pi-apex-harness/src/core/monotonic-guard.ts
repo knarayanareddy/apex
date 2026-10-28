@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { EditOperations, ReadOperations, WriteOperations } from "@earendil-works/pi-coding-agent";
+import { getDocsPath, type EditOperations, type ReadOperations, type WriteOperations } from "@earendil-works/pi-coding-agent";
 import type { ApprovalPolicy, DurabilityMode, GuardrailsConfig, SandboxMode } from "../types.ts";
 import {
   assertNoSymlinkAncestorsAndContain,
@@ -172,8 +172,54 @@ export function createConfinedFileOperations(params: {
   writeOps: WriteOperations;
   editOps: EditOperations;
 } {
+  const isCodemodeDocLogicalResource = (candidate: string): boolean => {
+    try {
+      const resolved = path.resolve(params.workspaceRoot, candidate);
+      const targetDoc = path.resolve(params.workspaceRoot, "docs/codemode.md");
+      if (resolved === targetDoc) return true;
+      const rel = path.relative(params.workspaceRoot, resolved);
+      if (rel === "docs/codemode.md" || candidate === "docs/codemode.md" || candidate === "codemode.md") {
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+    return false;
+  };
+
+  const getBundledCodemodeDocPath = (): string | null => {
+    try {
+      const docsDir = getDocsPath();
+      if (docsDir) {
+        const p = path.join(docsDir, "codemode.md");
+        if (fs.existsSync(p)) return p;
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  };
+
   const readOps: ReadOperations = {
     readFile: async (absPath) => {
+      if (isCodemodeDocLogicalResource(absPath)) {
+        const wsDoc = path.resolve(params.workspaceRoot, "docs/codemode.md");
+        if (fs.existsSync(wsDoc)) {
+          try {
+            return readWorkspaceFileSafe({
+              workspaceRoot: params.workspaceRoot,
+              candidatePath: wsDoc,
+              unmaskedExceptions: params.cfg.sandbox.unmasked_exceptions
+            });
+          } catch {
+            // fall through to bundled if error
+          }
+        }
+        const bundled = getBundledCodemodeDocPath();
+        if (bundled) {
+          return fs.readFileSync(bundled);
+        }
+      }
       try {
         return readWorkspaceFileSafe({
           workspaceRoot: params.workspaceRoot,
@@ -188,6 +234,18 @@ export function createConfinedFileOperations(params: {
       }
     },
     access: async (absPath) => {
+      if (isCodemodeDocLogicalResource(absPath)) {
+        const wsDoc = path.resolve(params.workspaceRoot, "docs/codemode.md");
+        if (fs.existsSync(wsDoc)) {
+          fs.accessSync(wsDoc, fs.constants.R_OK);
+          return;
+        }
+        const bundled = getBundledCodemodeDocPath();
+        if (bundled) {
+          fs.accessSync(bundled, fs.constants.R_OK);
+          return;
+        }
+      }
       const safe = resolveAndValidateWorkspacePath(absPath, params.workspaceRoot, "read", params.cfg, params.mode);
       fs.accessSync(safe, fs.constants.R_OK);
     }

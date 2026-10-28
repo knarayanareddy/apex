@@ -35,6 +35,7 @@ import {
   GuardDeniedError,
   resolveAndValidateWorkspacePath
 } from "../core/monotonic-guard.ts";
+import { recordProcessIdentity, terminateProcessTree, type ProcessIdentity } from "../core/process-tree.ts";
 
 // ============================================================================
 // Upstream Constants (`anomalyco/opencode/src/pty.ts` + `hermes-agent/process_registry.py`)
@@ -69,6 +70,7 @@ export interface PtyLeaseInfo {
 interface ActivePtySession {
   info: PtyLeaseInfo;
   proc: ChildProcess;
+  procIdentity: ProcessIdentity;
   buffer: string;
   leaseTimer: ReturnType<typeof setTimeout>;
   watchPatterns: RegExp[];
@@ -214,11 +216,13 @@ export class PtyLeaseManager {
       watchHitsDelivered: 0
     };
 
+    const procIdentity = recordProcessIdentity(proc.pid ?? -1);
+
     const leaseTimer = setTimeout(() => {
       const current = this.sessions.get(id);
       if (current && current.info.status === "running") {
         current.info.status = "lease_expired";
-        this.killProcessGroup(current.proc);
+        this.killProcessGroup(current.proc, current.procIdentity);
         this.recordExitOrder(id);
       }
     }, leaseMs);
@@ -227,6 +231,7 @@ export class PtyLeaseManager {
     const session: ActivePtySession = {
       info,
       proc,
+      procIdentity,
       buffer: "",
       leaseTimer,
       watchPatterns: compiledWatches,
@@ -344,7 +349,7 @@ export class PtyLeaseManager {
     if (!session) throw new Error(`PTY_NOT_FOUND: ${id}`);
     clearTimeout(session.leaseTimer);
     if (session.info.status === "running") {
-      this.killProcessGroup(session.proc);
+      this.killProcessGroup(session.proc, session.procIdentity);
       session.info.status = "exited";
     }
     const snap = { ...session.info };
@@ -364,32 +369,17 @@ export class PtyLeaseManager {
     for (const session of this.sessions.values()) {
       clearTimeout(session.leaseTimer);
       if (session.info.status === "running") {
-        this.killProcessGroup(session.proc);
+        this.killProcessGroup(session.proc, session.procIdentity);
       }
     }
     this.sessions.clear();
     this.exitOrder.length = 0;
   }
 
-  private killProcessGroup(proc: ChildProcess): void {
+  private killProcessGroup(proc: ChildProcess, procIdentity?: ProcessIdentity): void {
     const pid = proc.pid;
     if (pid && pid > 0) {
-      try {
-        process.kill(-pid, "SIGTERM");
-      } catch {
-        try {
-          proc.kill("SIGTERM");
-        } catch {
-          // Process already exited
-        }
-      }
-      setTimeout(() => {
-        try {
-          process.kill(-pid, "SIGKILL");
-        } catch {
-          // Already reaped
-        }
-      }, 200).unref();
+      terminateProcessTree(pid, procIdentity);
     }
   }
 

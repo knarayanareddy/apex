@@ -374,7 +374,7 @@ export function renderMissionControlHtml(): string {
     <details class="system-status">
       <summary aria-label="Show system status">Status <span class="status-dot" aria-hidden="true">●</span></summary>
       <div class="badges">
-        <span class="badge ok" id="schemaBadge">Schema: 1073 o200k</span>
+        <span class="badge ok" id="schemaBadge">Schema: 1053 o200k</span>
         <span class="badge accent" id="prefixBadge">Prefix: -- / 2100</span>
         <span class="badge ok" id="guardrailsBadge">GUARDRAILS Pin: Verified</span>
         <span class="badge accent" id="modelCacheBadge">Model: -- | Cache: 0%</span>

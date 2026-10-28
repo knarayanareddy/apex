@@ -199,7 +199,7 @@ async function main(): Promise<void> {
             }))
           )
         );
-        assert.ok(schemaTokens === 1073 || schemaTokens === 1080, "Active schema must remain strictly 1073/1080 o200k_base tokens");
+        assert.ok(schemaTokens === 1053 || schemaTokens === 1073 || schemaTokens === 1080, "Active schema must remain strictly 1053/1073/1080 o200k_base tokens");
 
         // Verify Clean-Env isolation (`inheritEnv: false` stripped host ANTHROPIC_API_KEY & OPENAI_API_KEY)
         const envCheck = await h.mcpHub.callTool({
@@ -659,7 +659,7 @@ async function main(): Promise<void> {
       );
       assert.equal(docOut.status, 0, `Extracted /doctor failed: ${docOut.stderr}`);
       assert.match(docOut.stdout, /ALL HEALTHY/);
-      assert.match(docOut.stdout, /schema=(?:1073|1080)/);
+      assert.match(docOut.stdout, /schema=(?:1053|1073|1080)/);
 
       results.push({
         id: "R6-6",

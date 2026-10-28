@@ -405,24 +405,54 @@ export function normalizeWalToolResult<T = unknown>(params: {
 
   if (rawContent && rawContent.length > 0) {
     if (textIsBounded) {
+      // Programme F3: Preserve full ordered structured content in successful private spill storage
+      const structSpill = spillStore.spillStructuredContent(sessionId, rawContent);
       let primaryTextSet = false;
+      let primaryDeliveryText: string | undefined;
       finalContent = [];
+      let blockIdx = 0;
       for (const block of rawContent) {
+        blockIdx++;
         if (block.type === "image") {
           finalContent.push(block);
         } else if (block.type === "text") {
+          const rawBlockText = typeof (block as any).text === "string" ? (block as any).text : "";
+          const blockByteLen = Buffer.byteLength(rawBlockText, "utf8");
           if (!primaryTextSet) {
             primaryTextSet = true;
-            finalContent.push({ ...block, text: spillOut.text });
+            let deliveryText = spillOut.text;
+            if (structSpill.spilled && structSpill.spillPath) {
+              deliveryText += `\n[FULL STRUCTURED CONTENT PRESERVED: ${structSpill.spillPath}]`;
+            }
+            primaryDeliveryText = deliveryText;
+            finalContent.push({ ...block, text: deliveryText });
+          } else {
+            // Secondary text blocks in an oversized result carry explicit omission placeholders with metadata
+            const omissionNotice = structSpill.spilled && structSpill.spillPath
+              ? `[TEXT BLOCK ${blockIdx} OMITTED INLINE: ${blockByteLen} bytes; full block preserved in ${structSpill.spillPath}]`
+              : `[TEXT BLOCK ${blockIdx} TRUNCATED INLINE: spill unavailable (${structSpill.error ?? "ENOSPC"}); total ${blockByteLen} bytes]`;
+            finalContent.push({ type: "text", text: omissionNotice });
           }
-          // Secondary text blocks in an oversized result are omitted to respect aggregate delivered budget
         } else {
           finalContent.push(block);
         }
       }
       if (!primaryTextSet && spillOut.text) {
+        primaryDeliveryText = spillOut.text;
         finalContent.unshift({ type: "text", text: spillOut.text });
       }
+      const combinedText = finalContent
+        .filter((b): b is TextContent => b.type === "text" && typeof (b as any).text === "string")
+        .map((b) => (b as any).text)
+        .join("\n");
+      return {
+        finalText: combinedText || (primaryDeliveryText ?? spillOut.text),
+        content: finalContent,
+        details,
+        isError,
+        spilled: spillOut.spilled,
+        spillFallbackUsed: spillOut.spillFallbackUsed
+      };
     } else {
       finalContent = rawContent.map((block) => {
         if (block.type === "text" && typeof (block as any).text === "string") {
@@ -455,31 +485,47 @@ function finalizeCommittedRawRow<T = unknown>(
   row: WalIntentRow
 ): NormalizedWalResult<T> {
   let rawReceipt: SupportedReceipt;
-  if (row.raw_receipt_json) {
-    const decode = decodeCommittedReceipt(row.raw_receipt_json);
-    if (!decode.ok) {
-      const diagnostic = `[WAL_RECEIPT_INVALID: raw_receipt_json corrupt: ${decode.reason}]`;
-      const errorResult: NormalizedWalResult<T> = {
-        finalText: diagnostic,
-        content: [{ type: "text", text: diagnostic }],
-        details: { error: decode.reason, code: decode.code } as unknown as T,
-        isError: true,
-        spilled: false,
-        spillFallbackUsed: false
-      };
-      stateDb.db
-        .prepare(
-          `UPDATE wal_intents
-           SET status = 'EFFECT_COMMITTED', result_json = ?, updated_at_ms = ?
-           WHERE idempotency_key = ?`
-        )
-        .run(JSON.stringify(errorResult), Date.now(), row.idempotency_key);
-      return errorResult;
-    }
-    rawReceipt = decode.receipt;
-  } else {
-    rawReceipt = { rawText: "" };
+  if (!row.raw_receipt_json || typeof row.raw_receipt_json !== "string" || !row.raw_receipt_json.trim()) {
+    const diagnostic = `[WAL_RECEIPT_INVALID: raw_receipt_json missing or empty]`;
+    const errorResult: NormalizedWalResult<T> = {
+      finalText: diagnostic,
+      content: [{ type: "text", text: diagnostic }],
+      details: { error: "RECEIPT_MISSING_OR_EMPTY", code: "WAL_RECEIPT_INVALID" } as unknown as T,
+      isError: true,
+      spilled: false,
+      spillFallbackUsed: false
+    };
+    stateDb.db
+      .prepare(
+        `UPDATE wal_intents
+         SET status = 'EFFECT_COMMITTED', result_json = ?, updated_at_ms = ?
+         WHERE idempotency_key = ?`
+      )
+      .run(JSON.stringify(errorResult), Date.now(), row.idempotency_key);
+    return errorResult;
   }
+
+  const decode = decodeCommittedReceipt(row.raw_receipt_json);
+  if (!decode.ok) {
+    const diagnostic = `[WAL_RECEIPT_INVALID: raw_receipt_json corrupt: ${decode.reason}]`;
+    const errorResult: NormalizedWalResult<T> = {
+      finalText: diagnostic,
+      content: [{ type: "text", text: diagnostic }],
+      details: { error: decode.reason, code: decode.code } as unknown as T,
+      isError: true,
+      spilled: false,
+      spillFallbackUsed: false
+    };
+    stateDb.db
+      .prepare(
+        `UPDATE wal_intents
+         SET status = 'EFFECT_COMMITTED', result_json = ?, updated_at_ms = ?
+         WHERE idempotency_key = ?`
+      )
+      .run(JSON.stringify(errorResult), Date.now(), row.idempotency_key);
+    return errorResult;
+  }
+  rawReceipt = decode.receipt;
 
   const normalized = normalizeWalToolResult<T>({
     sessionId: row.session_id,
@@ -603,10 +649,12 @@ export function decodeCommittedReceipt(raw: unknown): ReceiptDecodeResult {
     try {
       parsed = JSON.parse(trimmed);
     } catch (err: any) {
+      const posMatch = typeof err?.message === "string" ? err.message.match(/position\s+(\d+)/i) : null;
+      const posSuffix = posMatch ? ` (at position ${posMatch[1]})` : "";
       return {
         ok: false,
         code: "WAL_RECEIPT_INVALID",
-        reason: `JSON_SYNTAX_ERROR: ${err?.message ?? "malformed JSON"}`
+        reason: `JSON_SYNTAX_ERROR${posSuffix}`
       };
     }
   } else if (typeof raw === "object") {
@@ -710,11 +758,40 @@ export function decodeCommittedReceipt(raw: unknown): ReceiptDecodeResult {
           reason: `MALFORMED_CONTENT_BLOCK: block at index ${i} is not an object`
         };
       }
-      if (typeof (block as any).type !== "string") {
+      const blockObj = block as Record<string, unknown>;
+      if (typeof blockObj["type"] !== "string") {
         return {
           ok: false,
           code: "WAL_RECEIPT_INVALID",
           reason: `MALFORMED_CONTENT_BLOCK: block at index ${i} lacks string type`
+        };
+      }
+      if (blockObj["type"] === "text") {
+        if (typeof blockObj["text"] !== "string") {
+          return {
+            ok: false,
+            code: "WAL_RECEIPT_INVALID",
+            reason: `MALFORMED_CONTENT_BLOCK: text block at index ${i} requires string text`
+          };
+        }
+      } else if (blockObj["type"] === "image") {
+        if (
+          typeof blockObj["data"] !== "string" ||
+          !blockObj["data"] ||
+          typeof blockObj["mimeType"] !== "string" ||
+          !blockObj["mimeType"]
+        ) {
+          return {
+            ok: false,
+            code: "WAL_RECEIPT_INVALID",
+            reason: `MALFORMED_CONTENT_BLOCK: image block at index ${i} requires non-empty data and mimeType strings`
+          };
+        }
+      } else {
+        return {
+          ok: false,
+          code: "WAL_RECEIPT_INVALID",
+          reason: `UNSUPPORTED_CONTENT_BLOCK_TYPE: block at index ${i} has unsupported type '${String(blockObj["type"])}'`
         };
       }
     }
@@ -770,35 +847,41 @@ export function isReceiptDeliveryCompliant(
 
   // Case 2 & 3: Spilled or fallback notice
   if (cached.spilled === true || cached.spillFallbackUsed === true) {
-    // Must have exactly one primary text block delivering the notice
-    if (textBlocks.length !== 1) return false;
-    const noticeText = textBlocks[0].text;
+    if (textBlocks.length === 0) return false;
+    const primaryNotice = textBlocks[0].text;
 
-    if (typeof cached.finalText !== "string" || noticeText !== cached.finalText) {
+    if (typeof cached.finalText !== "string") {
       return false;
     }
 
-    const noticeBytes = Buffer.byteLength(noticeText, "utf8");
+    const noticeBytes = Buffer.byteLength(cached.finalText, "utf8");
     if (noticeBytes > maxNoticeBytes) {
       return false;
     }
 
     if (cached.spilled === true) {
       if (
-        !noticeText.startsWith("[OUTPUT SPILLED TO DISK:") ||
-        !noticeText.includes("--- HEAD ---") ||
-        !noticeText.includes("--- TAIL ---")
+        !cached.finalText.startsWith("[OUTPUT SPILLED TO DISK:") ||
+        !cached.finalText.includes("--- HEAD ---") ||
+        !cached.finalText.includes("--- TAIL ---")
       ) {
         return false;
       }
     } else {
       if (
-        !noticeText.startsWith("[OUTPUT TRUNCATED INLINE (") ||
-        !noticeText.includes("--- HEAD ---") ||
-        !noticeText.includes("--- TAIL ---")
+        !cached.finalText.startsWith("[OUTPUT TRUNCATED INLINE (") ||
+        !cached.finalText.includes("--- HEAD ---") ||
+        !cached.finalText.includes("--- TAIL ---")
       ) {
         return false;
       }
+    }
+
+    // Secondary text blocks in structured results must be bounded omission notices
+    for (let i = 1; i < textBlocks.length; i++) {
+      const secBytes = Buffer.byteLength(textBlocks[i].text, "utf8");
+      if (secBytes > maxNoticeBytes) return false;
+      if (!textBlocks[i].text.startsWith("[TEXT BLOCK ")) return false;
     }
 
     return true;
@@ -952,13 +1035,39 @@ export async function executeThroughWalSpine<T = unknown>(
         return { idempotencyKey, fromCache: true, ...finalized };
       }
 
-      const { result, changed } = ensureNormalizedCommittedResult<T>({
+      let { result, changed, invalid } = ensureNormalizedCommittedResult<T>({
         receipt: existing.result_json,
         spillStore,
         sessionId: existing.session_id
       });
 
-      if (changed) {
+      if (invalid && existing.raw_receipt_json) {
+        const rawDecode = decodeCommittedReceipt(existing.raw_receipt_json);
+        if (rawDecode.ok) {
+          const rawReceipt = rawDecode.receipt;
+          const normalized = normalizeWalToolResult<T>({
+            sessionId: existing.session_id,
+            spillStore,
+            rawText: typeof rawReceipt.finalText === "string" ? rawReceipt.finalText : rawReceipt.rawText,
+            content: Array.isArray(rawReceipt.content) ? rawReceipt.content : undefined,
+            details: rawReceipt.details as T,
+            isError: rawReceipt.isError
+          });
+          const updatedResultJson = JSON.stringify({
+            ...normalized,
+            normalizedVersion: 2
+          });
+          stateDb.db
+            .prepare(
+              `UPDATE wal_intents
+               SET result_json = ?, updated_at_ms = ?
+               WHERE idempotency_key = ?`
+            )
+            .run(updatedResultJson, Date.now(), idempotencyKey);
+          result = normalized;
+          changed = false;
+        }
+      } else if (changed) {
         const updatedResultJson = JSON.stringify({
           ...result,
           normalizedVersion: 2
@@ -1351,7 +1460,7 @@ export function reconcileWalOnStartup(
       }
 
       let receiptIsInvalid = false;
-      if (committedRow.status === "EFFECT_COMMITTED" && committedRow.result_json) {
+      if (committedRow.status === "EFFECT_COMMITTED") {
         try {
           const outcome = ensureNormalizedCommittedResult({
             receipt: committedRow.result_json,
@@ -1403,7 +1512,11 @@ export function reconcileWalOnStartup(
             committedRow = stateDb.getWalRow(committedRow.idempotency_key)!;
           }
         } catch {
-          // Keep intact if parse fails
+          receiptIsInvalid = true;
+          summary.corruptReceipts.push(committedRow);
+          console.warn(
+            `[WAL_RECOVERY_DIAGNOSTIC] Error normalizing committed WAL receipt in idempotency_key ${committedRow.idempotency_key}`
+          );
         }
       }
 

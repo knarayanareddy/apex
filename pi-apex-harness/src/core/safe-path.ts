@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { extractNativeErrnoCode, getLinuxFsBridge } from "./linux-fs-bridge.ts";
@@ -279,57 +280,102 @@ export function scanWorkspaceSecretsAndHardlinks(
 }
 
 /**
- * Reviewer #4 Issue #2 Fix:
- * Scans Git index and commit history (`git ls-files` + `git log --all --name-only`) for any
- * tracked or historical secret-named blob (e.g., a `.env` or `service/.env` committed in the past
- * whose plaintext remains inside `.git/objects`).
+ * Recursively locates all Git repositories (root, submodules, nested repositories, linked worktrees)
+ * beneath `workspaceRoot`.
+ */
+export function findWorkspaceGitRoots(workspaceRoot: string): string[] {
+  let realWs: string;
+  try {
+    realWs = fs.realpathSync(workspaceRoot);
+  } catch {
+    return [];
+  }
+  const gitRoots: string[] = [];
+  if (fs.existsSync(path.join(realWs, ".git"))) {
+    gitRoots.push(realWs);
+  }
+  const maxDepth = 6;
+  const walk = (dir: string, depth: number) => {
+    if (depth > maxDepth) return;
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory()) {
+          if (entry.name === ".git" || entry.name === ".harness" || entry.name === "node_modules" || entry.name === ".venv") {
+            continue;
+          }
+          const sub = path.join(dir, entry.name);
+          if (fs.existsSync(path.join(sub, ".git"))) {
+            gitRoots.push(sub);
+          }
+          walk(sub, depth + 1);
+        }
+      }
+    } catch {
+      // non-fatal
+    }
+  };
+  walk(realWs, 1);
+  return gitRoots;
+}
+
+/**
+ * Reviewer #4 Issue #2 Fix & Programme D1:
+ * Scans Git index and commit history (`git ls-files` + `git log --all --name-only`) across ALL
+ * root and nested repositories/submodules/worktrees for any tracked or historical secret-named blob
+ * (e.g. a `.env` or `service/.env` committed in the past whose plaintext remains inside `.git/objects`).
  */
 export function auditGitHistoryForSecretPaths(
   workspaceRoot: string,
   unmaskedExceptions: readonly string[] = DEFAULT_UNMASKED_SECRET_EXCEPTIONS
 ): { hasHistoricalSecrets: boolean; hasStagedSecrets: boolean; matchedPaths: string[] } {
-  const dotGit = path.join(workspaceRoot, ".git");
-  if (!fs.existsSync(dotGit)) {
+  const gitRoots = findWorkspaceGitRoots(workspaceRoot);
+  if (gitRoots.length === 0) {
     return { hasHistoricalSecrets: false, hasStagedSecrets: false, matchedPaths: [] };
   }
 
   const matched = new Set<string>();
   let hasStaged = false;
 
-  try {
-    const cachedOut = execFileSync("git", ["ls-files", "-z"], {
-      cwd: workspaceRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      maxBuffer: 16 * 1024 * 1024
-    });
-    for (const p of cachedOut.split("\0")) {
-      if (!p) continue;
-      if (isSecretBasename(path.posix.basename(p), unmaskedExceptions)) {
-        matched.add(p);
-        hasStaged = true;
+  for (const root of gitRoots) {
+    try {
+      const cachedOut = execFileSync("git", ["ls-files", "-z"], {
+        cwd: root,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        maxBuffer: 16 * 1024 * 1024
+      });
+      for (const p of cachedOut.split("\0")) {
+        if (!p) continue;
+        if (isSecretBasename(path.posix.basename(p), unmaskedExceptions)) {
+          const relToWs = path.relative(workspaceRoot, path.resolve(root, p)).replace(/\\/g, "/");
+          matched.add(relToWs);
+          hasStaged = true;
+        }
       }
+    } catch {
+      // non-fatal
     }
-  } catch {
-    // non-fatal
-  }
 
-  try {
-    const logOut = execFileSync("git", ["log", "--all", "--pretty=format:", "--name-only", "-z"], {
-      cwd: workspaceRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      maxBuffer: 32 * 1024 * 1024
-    });
-    for (const p of logOut.split("\0")) {
-      const clean = p.replace(/^\n+/, "");
-      if (!clean) continue;
-      if (isSecretBasename(path.posix.basename(clean), unmaskedExceptions)) {
-        matched.add(clean);
+    try {
+      const logOut = execFileSync("git", ["log", "--all", "--pretty=format:", "--name-only", "-z"], {
+        cwd: root,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        maxBuffer: 32 * 1024 * 1024
+      });
+      for (const p of logOut.split("\0")) {
+        const clean = p.replace(/^\n+/, "");
+        if (!clean) continue;
+        if (isSecretBasename(path.posix.basename(clean), unmaskedExceptions)) {
+          const relToWs = path.relative(workspaceRoot, path.resolve(root, clean)).replace(/\\/g, "/");
+          matched.add(relToWs);
+        }
       }
+    } catch {
+      // empty repo without commits yet
     }
-  } catch {
-    // empty repo without commits yet
   }
 
   return {
@@ -611,6 +657,7 @@ export function unlinkSafeBeneathWorkspace(params: {
   workspaceRoot: string;
   relPath: string;
   allowSymlinkLeaf?: boolean;
+  syncParentDir?: boolean;
   /** Test-only race-injection hook executed AFTER opening `parentDirFd` and BEFORE `unlinkatSingle`! */
   testRaceHookBeforeUnlink?: () => void;
 }): boolean {
@@ -649,6 +696,13 @@ export function unlinkSafeBeneathWorkspace(params: {
       // Confirm open `parentDirFd` itself was not moved outside `realWs` before executing `unlinkat`
       verifyOpenFdContainedInWorkspace(parentInfo.parentDirFd, realWs);
       bridge.unlinkatSingle(parentInfo.parentDirFd, parentInfo.leafName, false);
+      if (params.syncParentDir) {
+        try {
+          fs.fsyncSync(parentInfo.parentDirFd);
+        } catch {
+          // ignore if fsync not supported on filesystem
+        }
+      }
       return true;
     } finally {
       if (parentInfo.ownsFd) fs.closeSync(parentInfo.parentDirFd);
@@ -662,7 +716,7 @@ export function unlinkSafeBeneathWorkspace(params: {
  * Distinct descriptor-relative single-directory creation (`mkdirat(parentDirFd, leafName, 0755)`).
  * Used by `rewind_ops` (`ENSURE_DIR`).
  */
-export function mkdirSingleBeneathWorkspace(workspaceRoot: string, relDirPath: string): void {
+export function mkdirSingleBeneathWorkspace(workspaceRoot: string, relDirPath: string, syncParentDir = false): void {
   const bridge = getLinuxFsBridge();
   const { realWs, relPath } = normalizeLexicalWorkspaceRelPath(workspaceRoot, relDirPath);
   if (!relPath) return;
@@ -679,6 +733,13 @@ export function mkdirSingleBeneathWorkspace(workspaceRoot: string, relDirPath: s
       verifyOpenFdContainedInWorkspace(pInfo.parentDirFd, realWs);
       try {
         bridge.mkdiratSingle(pInfo.parentDirFd, pInfo.leafName, 0o755);
+        if (syncParentDir) {
+          try {
+            fs.fsyncSync(pInfo.parentDirFd);
+          } catch {
+            // ignore if fsync not supported
+          }
+        }
       } catch (err) {
         const code = extractNativeErrnoCode(err);
         if (code === "EEXIST") {
@@ -701,7 +762,7 @@ export function mkdirSingleBeneathWorkspace(workspaceRoot: string, relDirPath: s
  * Distinct descriptor-relative empty-directory removal (`unlinkat(parentDirFd, leafName, AT_REMOVEDIR)`).
  * Fails if directory is non-empty (`ENOTEMPTY`); never recursive. Used by `rewind_ops` (`RMDIR_EMPTY`).
  */
-export function rmdirEmptyBeneathWorkspace(workspaceRoot: string, relDirPath: string): boolean {
+export function rmdirEmptyBeneathWorkspace(workspaceRoot: string, relDirPath: string, syncParentDir = false): boolean {
   const bridge = getLinuxFsBridge();
   const { realWs, relPath } = normalizeLexicalWorkspaceRelPath(workspaceRoot, relDirPath);
   if (!relPath) throw new PathContainmentError(`[guard: cannot rmdir workspace root]`);
@@ -732,6 +793,13 @@ export function rmdirEmptyBeneathWorkspace(workspaceRoot: string, relDirPath: st
       verifyOpenFdContainedInWorkspace(pInfo.parentDirFd, realWs);
       try {
         bridge.unlinkatSingle(pInfo.parentDirFd, pInfo.leafName, true);
+        if (syncParentDir) {
+          try {
+            fs.fsyncSync(pInfo.parentDirFd);
+          } catch {
+            // ignore if fsync not supported
+          }
+        }
         return true;
       } catch (err) {
         const code = extractNativeErrnoCode(err);
@@ -827,6 +895,7 @@ export function readWorkspaceFileSafe(params: {
   candidatePath: string;
   unmaskedExceptions?: readonly string[];
   maxBytes?: number;
+  sessionId?: string;
 }): Buffer {
   const bridge = getLinuxFsBridge();
   const exceptions = params.unmaskedExceptions ?? DEFAULT_UNMASKED_SECRET_EXCEPTIONS;
@@ -838,7 +907,8 @@ export function readWorkspaceFileSafe(params: {
   if (!relPath) {
     throw new PathContainmentError(`[guard: cannot read workspace root directory as file]`);
   }
-  if (relPath === ".git" || relPath.startsWith(".git/")) {
+  const relSegments = relPath.replace(/\\/g, "/").split("/").filter(Boolean);
+  if (relSegments.includes(".git")) {
     throw new PathContainmentError(
       `[guard: direct .git metadata/object read denied (prevents historical secret blob extraction): ${relPath}]`
     );
@@ -846,6 +916,13 @@ export function readWorkspaceFileSafe(params: {
   if (relPath === ".harness" || relPath.startsWith(".harness/")) {
     if (!relPath.startsWith(".harness/spill/")) {
       throw new PathContainmentError(`[guard: internal .harness state read denied: ${relPath}]`);
+    }
+    if (params.sessionId) {
+      const sessionHash = crypto.createHash("sha256").update(params.sessionId).digest("hex").slice(0, 12);
+      const expectedSessionPrefix = `.harness/spill/session-${sessionHash}/`;
+      if (!relPath.startsWith(expectedSessionPrefix)) {
+        throw new PathContainmentError(`[guard: unauthorized cross-session spill read denied: ${relPath}]`);
+      }
     }
   }
 
