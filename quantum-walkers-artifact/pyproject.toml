@@ -1,0 +1,106 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantum-walkers"
+version = "0.1.0"
+description = "Quantum walk experiments in Qiskit — Fall Fest Amsterdam 2026"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Tony Barratt", email = "tony.barratt@hotmail.com"}]
+maintainers = [{name = "Tony Barratt", email = "tony.barratt@hotmail.com"}]
+keywords = ["qiskit", "quantum-walk", "quantum-computing", "fall-fest", "ibm-quantum"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "License :: OSI Approved :: MIT License",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+  "qiskit>=2.6,<3",
+  "qiskit-aer>=0.18,<0.19",
+  "numpy>=2.0",
+  "matplotlib>=3.9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=6.0",
+  "pytest-xdist>=3.0",
+  "ruff>=0.12",
+  "black>=24.0",
+  "mypy>=1.10",
+  "pre-commit>=4.0",
+  "types-setuptools",
+  "pydoclint",
+]
+docs = [
+  "jupyter>=1.0",
+  "ipykernel",
+]
+
+[project.urls]
+Homepage = "https://github.com/TonyBarratt100/quantum-walkers"
+Repository = "https://github.com/TonyBarratt100/quantum-walkers"
+Issues = "https://github.com/TonyBarratt100/quantum-walkers/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --cov=quantum_walkers --cov-report=term-missing --cov-fail-under=85"
+markers = [
+  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "hardware: requires IBM Quantum token",
+]
+
+[tool.coverage.run]
+source = ["quantum_walkers"]
+branch = true
+omit = ["tests/*", "examples/*", "notebooks/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "def __repr__",
+  "if __name__",
+  "raise NotImplementedError",
+  "class .*\\bProtocol\\b",
+  "@(abc\\.)?abstractmethod",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+extend-exclude = ["notebooks", "docs", "example_output"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "UP", "B", "C4", "I", "N", "RUF", "SIM"]
+ignore = ["N803", "N806", "RUF001", "RUF002", "RUF003", "E501"]  # allow σ in comments/strings; physics notation
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+exclude = ["tests", "examples", "notebooks"]
+
+[tool.pydocstyle]
+convention = "google"
