@@ -571,7 +571,8 @@ async function main(): Promise<void> {
         controller,
         workspaceRoot: repoA,
         host: "127.0.0.1",
-        port: 0
+        port: 0,
+        requireAuth: false
       });
 
       try {

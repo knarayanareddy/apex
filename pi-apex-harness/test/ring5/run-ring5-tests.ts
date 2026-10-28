@@ -119,7 +119,8 @@ async function main(): Promise<void> {
         controller,
         workspaceRoot: ws,
         host: "0.0.0.0",
-        port: 0
+        port: 0,
+        requireAuth: false
       });
       const listenInfo = await server.start();
       const baseUrl = `http://127.0.0.1:${listenInfo.port}`;
@@ -502,7 +503,11 @@ async function main(): Promise<void> {
           webAutoExitAfterMs: 350,
           onWebServerListening: (info) => {
             void (async () => {
-              const st = await httpJson(info.url, "/api/status");
+              const unauth = await httpJson(info.url, "/api/status");
+              if (unauth.status !== 401) return;
+              const st = await httpJson(info.url, "/api/status", {
+                headers: { Authorization: `Bearer ${info.token}` }
+              });
               if (
                 st.status === 200 &&
                 (st.data.prefix.activeSchemaTokens === 1073 ||

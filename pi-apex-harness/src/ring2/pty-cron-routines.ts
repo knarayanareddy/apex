@@ -24,7 +24,8 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { GuardrailsConfig } from "../types.ts";
+import type { GuardrailsConfig, SandboxMode } from "../types.ts";
+import { SandboxUnavailableError } from "../core/bwrap-sandbox.ts";
 import {
   evaluateShellCommandGuard,
   GuardDeniedError,
@@ -98,12 +99,21 @@ export interface PtyPollResult {
 export class PtyLeaseManager {
   private readonly workspaceRoot: string;
   private readonly guardrails: GuardrailsConfig;
+  private readonly sandboxMode: SandboxMode;
+  private readonly allowUnsandboxedDev: boolean;
   private readonly sessions = new Map<string, ActivePtySession>();
   private readonly exitOrder: string[] = [];
 
-  constructor(opts: { workspaceRoot: string; guardrails: GuardrailsConfig }) {
+  constructor(opts: {
+    workspaceRoot: string;
+    guardrails: GuardrailsConfig;
+    sandboxMode?: SandboxMode;
+    allowUnsandboxedDev?: boolean;
+  }) {
     this.workspaceRoot = path.resolve(opts.workspaceRoot);
     this.guardrails = opts.guardrails;
+    this.sandboxMode = opts.sandboxMode ?? "workspace-write";
+    this.allowUnsandboxedDev = opts.allowUnsandboxedDev ?? false;
   }
 
   public start(input: {
@@ -112,6 +122,14 @@ export class PtyLeaseManager {
     leaseMs?: number;
     watchPatterns?: string[];
   }): PtyLeaseInfo {
+    if (this.sandboxMode === "read-only") {
+      throw new GuardDeniedError("PTY_COMMAND_DENIED: PTY background process execution is denied in read-only sandbox mode.");
+    }
+    if (process.platform === "darwin" && !this.allowUnsandboxedDev) {
+      throw new SandboxUnavailableError(
+        "SANDBOX_UNAVAILABLE: PTY execution failed (bubblewrap is not supported on macOS darwin). Refusing unconfined execution without explicit allowUnsandboxedDev: true."
+      );
+    }
     const guard = evaluateShellCommandGuard({
       command: input.command,
       cfg: this.guardrails,
@@ -394,13 +412,23 @@ export class UnattendedCronScheduler {
   private readonly db: DatabaseSync;
   private readonly workspaceRoot: string;
   private readonly guardrails: GuardrailsConfig;
+  private readonly sandboxMode: SandboxMode;
+  private readonly allowUnsandboxedDev: boolean;
   private globalPaused = false;
   private globalPauseReason: string | null = null;
 
-  constructor(opts: { db: DatabaseSync; workspaceRoot: string; guardrails: GuardrailsConfig }) {
+  constructor(opts: {
+    db: DatabaseSync;
+    workspaceRoot: string;
+    guardrails: GuardrailsConfig;
+    sandboxMode?: SandboxMode;
+    allowUnsandboxedDev?: boolean;
+  }) {
     this.db = opts.db;
     this.workspaceRoot = path.resolve(opts.workspaceRoot);
     this.guardrails = opts.guardrails;
+    this.sandboxMode = opts.sandboxMode ?? "workspace-write";
+    this.allowUnsandboxedDev = opts.allowUnsandboxedDev ?? false;
     this.initSchema();
   }
 
@@ -581,6 +609,30 @@ export class UnattendedCronScheduler {
 
   private executeSingleUnattendedJob(job: CronRoutineRecord, nowMs: number): CronRunReceipt {
     const runId = `crun_${crypto.randomUUID().slice(0, 8)}`;
+
+    if (this.sandboxMode === "read-only") {
+      return this.persistRunReceipt({
+        runId,
+        jobId: job.jobId,
+        executedAtMs: nowMs,
+        status: "BLOCKED_DENY_UNATTENDED",
+        exitCode: 126,
+        output: "DENY_UNATTENDED (READ_ONLY_SANDBOX): cron routine execution denied in read-only sandbox mode",
+        blockedRuleId: "READ_ONLY_SANDBOX"
+      });
+    }
+
+    if (process.platform === "darwin" && !this.allowUnsandboxedDev) {
+      return this.persistRunReceipt({
+        runId,
+        jobId: job.jobId,
+        executedAtMs: nowMs,
+        status: "BLOCKED_DENY_UNATTENDED",
+        exitCode: 126,
+        output: "DENY_UNATTENDED (CONFINEMENT_UNAVAILABLE): bubblewrap is not supported on macOS darwin without allowUnsandboxedDev: true",
+        blockedRuleId: "CONFINEMENT_UNAVAILABLE"
+      });
+    }
 
     // 1. Check declared target paths via Ring 0 `resolveAndValidateWorkspacePath` (blocks `.env`, `.git`, outside-ws)
     for (const rel of job.targetPaths) {

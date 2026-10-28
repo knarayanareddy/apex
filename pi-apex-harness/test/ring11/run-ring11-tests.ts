@@ -130,7 +130,7 @@ async function main() {
   const faux=fauxProvider({models:[{id:"faux-1",name:"Faux Multimodal",reasoning:false,input:["text","image"]},{id:"faux-2",name:"Faux Text Reasoner",reasoning:true,input:["text"]}]});faux.setResponses([fauxAssistantMessage("Ring 11 route smoke passed.")]);
   const runtime=await createSharedModelRuntime(agentDir2);runtime.registerNativeProvider(faux.provider);await runtime.setRuntimeApiKey(faux.provider.id,"ring11-test-key");
   const harness=await createRing4Runtime({workspaceRoot:ws,surfacesDir:surfaces,agentDir:agentDir2,allowUnsandboxedDev:true,modelRuntime:runtime,model:faux.getModel()});
-  const mc=new MissionControlServer({controller:harness,workspaceRoot:ws,host:"0.0.0.0",port:0});const addr=await mc.start();const base=`http://127.0.0.1:${addr.port}`;
+  const mc=new MissionControlServer({controller:harness,workspaceRoot:ws,host:"0.0.0.0",port:0,requireAuth:false});const addr=await mc.start();const base=`http://127.0.0.1:${addr.port}`;
   try {
     const interaction=await fetch(base+"/api/interaction").then(r=>r.json()) as any;assert.equal(interaction.mode,"default");assert.ok(interaction.personas.some((p:any)=>p.id==="researcher"&&p.custom));assert.equal(interaction.personas.some((p:any)=>p.id==="poisoned"),false,"poisoned workspace persona is not offered");
     fs.mkdirSync(path.join(ws,".agents","skills","saved-from-disk","references"),{recursive:true});fs.writeFileSync(path.join(ws,".agents","skills","saved-from-disk","SKILL.md"),"---\nname: saved-from-disk\ndescription: A manually saved skill visible in the library.\n---\n# Saved workflow\nInspect only.");fs.writeFileSync(path.join(ws,".agents","skills","saved-from-disk","references","notes.md"),"supporting notes");

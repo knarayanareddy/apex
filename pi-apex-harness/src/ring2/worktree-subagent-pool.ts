@@ -31,6 +31,7 @@ import {
   type ModelRuntime
 } from "@earendil-works/pi-coding-agent";
 import type { DurabilityMode, SandboxMode } from "../types.ts";
+import { GuardDeniedError } from "../core/monotonic-guard.ts";
 import {
   readWorkspaceFileSafe,
   unlinkSafeBeneathWorkspace
@@ -715,6 +716,9 @@ export class WorktreeSubagentPool {
     }
 
     if (applyToRoot) {
+      if (this.childSandboxMode === "read-only") {
+        throw new GuardDeniedError("Cannot apply subagent changes to workspace in read-only sandbox mode");
+      }
       for (const delRel of deleted) {
         unlinkSafeBeneathWorkspace({ workspaceRoot: this.workspaceRoot, relPath: delRel });
       }

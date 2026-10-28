@@ -314,7 +314,7 @@ export interface RunPiApexCliOptions {
   terminal?: Terminal;
   interactiveAutoExitAfterInitMs?: number;
   webAutoExitAfterMs?: number;
-  onWebServerListening?: (info: { host: string; port: number; url: string }) => void;
+  onWebServerListening?: (info: { host: string; port: number; url: string; token: string }) => void;
 }
 
 export async function runPiApexCli(
@@ -488,12 +488,12 @@ export async function runPiApexCli(
     const server = new MissionControlServer({
       controller,
       workspaceRoot: parsed.cwd,
-      host: parsed.webHost,
+      host: parsed.webHost ?? "127.0.0.1",
       port: parsed.webPort
     });
     const info = await server.start();
     process.stdout.write(
-      `pi-apex v${PI_APEX_VERSION} Mission-Control Cockpit listening on ${info.url} (workspace: ${parsed.cwd})\n`
+      `pi-apex v${PI_APEX_VERSION} Mission-Control Cockpit listening on ${info.url}/?token=${info.token} (workspace: ${parsed.cwd})\n`
     );
     hostOpts?.onWebServerListening?.(info);
 

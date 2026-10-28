@@ -31,6 +31,33 @@ export class PreDispatchAbortedError extends Error {
   }
 }
 
+export function isPreDispatchDenialError(err: unknown): boolean {
+  if (err instanceof PreDispatchAbortedError) return true;
+  if (!err || typeof err !== "object") return false;
+  const name = (err as { name?: string }).name;
+  if (
+    name === "PreDispatchAbortedError" ||
+    name === "SandboxUnavailableError" ||
+    name === "GuardDeniedError" ||
+    name === "PathContainmentError"
+  ) {
+    return true;
+  }
+  const msg = (err as { message?: string }).message ?? "";
+  if (
+    msg.includes("SANDBOX_UNAVAILABLE") ||
+    msg.includes("GUARD_DENIED") ||
+    msg.includes("GuardDeniedError") ||
+    msg.includes("PATH_GUARD") ||
+    msg.includes("CI_COMMAND_DENIED") ||
+    msg.includes("PTY_COMMAND_DENIED") ||
+    msg.includes("PRESET_TOOL_RESTRICTED")
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export class TranscriptNotSyncedError extends Error {
   constructor(message: string) {
     super(message);
@@ -507,7 +534,7 @@ export async function executeThroughWalSpine<T = unknown>(
     rawEffectOut = await params.executeEffect();
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    if (err instanceof PreDispatchAbortedError || mutabilityClass === "PURE_READ") {
+    if (isPreDispatchDenialError(err) || mutabilityClass === "PURE_READ") {
       stateDb.db
         .prepare(`UPDATE wal_intents SET status = 'ABORTED_CLEAN', error_text = ?, updated_at_ms = ? WHERE idempotency_key = ?`)
         .run(errMsg, Date.now(), idempotencyKey);
@@ -690,10 +717,10 @@ export function markWalCallTreeTranscriptAppended(
       .prepare(
         `UPDATE wal_intents
          SET status = 'TRANSCRIPT_APPENDED', updated_at_ms = ?
-         WHERE session_id = ? AND parent_tool_call_id = ?
+         WHERE session_id = ? AND (parent_tool_call_id = ? OR tool_call_id LIKE ? || '/%')
            AND status IN ('EFFECT_COMMITTED', 'EFFECT_COMMITTED_RAW')`
       )
-      .run(now, sessionId, rootToolCallId);
+      .run(now, sessionId, rootToolCallId, rootToolCallId);
 
     stateDb.db.exec("COMMIT");
   } catch (err) {

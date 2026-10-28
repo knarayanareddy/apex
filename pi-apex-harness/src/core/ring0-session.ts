@@ -156,6 +156,8 @@ function wrapToolDefinitionWithWal(
       }
 
       const leafId = walContext.sessionManager.getLeafId() ?? walContext.sessionId;
+      const slashIdx = toolCallId.lastIndexOf("/");
+      const parentToolCallId = slashIdx !== -1 ? toolCallId.slice(0, slashIdx) : null;
 
       const walRes = await executeThroughWalSpine({
         stateDb: walContext.stateDb,
@@ -163,7 +165,7 @@ function wrapToolDefinitionWithWal(
         sessionId: walContext.sessionId,
         leafId,
         toolCallId,
-        parentToolCallId: null,
+        parentToolCallId,
         toolName: tool.name,
         mutabilityClass,
         args: params,
@@ -342,9 +344,10 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
           resolveAndValidateWorkspacePath(target, opts.workspaceRoot, accessMode, guardrails, sandboxMode);
         }
 
-        if (!event.parentToolCallId) {
-          pendingRootToolCallIds.add(event.toolCallId);
-        }
+        const rootCallId = event.parentToolCallId
+          ? event.parentToolCallId.split("/")[0]!
+          : event.toolCallId.split("/")[0]!;
+        pendingRootToolCallIds.add(rootCallId);
         interceptedToolCalls.push({
           toolCallId: event.toolCallId,
           parentToolCallId: event.parentToolCallId ?? null,

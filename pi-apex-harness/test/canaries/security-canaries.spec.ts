@@ -46,6 +46,7 @@ import {
   OutcomeUnknownLockError
 } from "../../src/core/wal-recovery.ts";
 import { BugBotAndCiEngine } from "../../src/ring2/bugbot-ci-loop.ts";
+import { PtyLeaseManager } from "../../src/ring2/pty-cron-routines.ts";
 import { createRing4Runtime } from "../../src/ring4/ring4-runtime.ts";
 import { MissionControlServer } from "../../src/ring5/mission-control-server.ts";
 
@@ -129,6 +130,43 @@ async function main(): Promise<void> {
       agentDir,
       allowUnsandboxedDev: true
     });
+
+    // 1A (0) Default construction canary: zero auth options provided (requireAuth defaults true, token auto-generated)
+    const defaultServer = new MissionControlServer({
+      controller,
+      workspaceRoot: ws,
+      port: 0
+    });
+    const defaultInfo = await defaultServer.start();
+    try {
+      const defaultUnauthPost = await runHttpRequest({
+        url: `${defaultInfo.url}/api/plan/toggle`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true })
+      });
+      assert.equal(
+        defaultUnauthPost.status,
+        401,
+        "Default MissionControlServer construction must reject unauthenticated POST with 401"
+      );
+      const defaultAuthPost = await runHttpRequest({
+        url: `${defaultInfo.url}/api/plan/toggle`,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${defaultInfo.token}`
+        },
+        body: JSON.stringify({ enabled: true })
+      });
+      assert.equal(
+        defaultAuthPost.status,
+        200,
+        "Default MissionControlServer construction must permit POST with generated token"
+      );
+    } finally {
+      await defaultServer.stop();
+    }
 
     const canaryToken = "canary-auth-secret-token-" + crypto.randomBytes(16).toString("hex");
     const server = new MissionControlServer({
@@ -307,6 +345,63 @@ async function main(): Promise<void> {
       }
       assert.equal(strictThrew, true, "Darwin bash must fail closed when allowUnsandboxedDev: false");
 
+      // 2A (ii) Pre-dispatch confinement refusal in WAL: Darwin refusal records ABORTED_CLEAN, not OUTCOME_UNKNOWN
+      const walDir = path.join(ws, ".harness");
+      fs.mkdirSync(walDir, { recursive: true });
+      const b2StateDb = new StateDb(path.join(walDir, "b2-state.db"), "crash-safe");
+      const b2SpillStore = new PrivateSpillStore({
+        rootDir: path.join(walDir, "spill"),
+        maxInlineBytes: 1024,
+        maxInlineLines: 100,
+        previewBytes: 256,
+        cleanupDays: 7
+      });
+
+      let b2WalThrew = false;
+      try {
+        await executeThroughWalSpine({
+          stateDb: b2StateDb,
+          spillStore: b2SpillStore,
+          sessionId: "session-canary-b2",
+          leafId: "leaf-b2-0",
+          toolCallId: "call_b2_strict_bash",
+          toolName: "bash",
+          mutabilityClass: "OPAQUE_EXTERNAL",
+          args: { command: "echo 'blocked'" },
+          executeEffect: async () => {
+            await strictBashOps.exec("echo 'blocked'", ws, { onData: () => {} });
+            return { rawText: "blocked" };
+          }
+        });
+      } catch (err) {
+        b2WalThrew = true;
+        assert.ok(err instanceof SandboxUnavailableError);
+      }
+      assert.equal(b2WalThrew, true, "executeThroughWalSpine must rethrow SandboxUnavailableError");
+
+      const b2Rows = b2StateDb.db
+        .prepare("SELECT status, error_text FROM wal_intents WHERE tool_call_id = 'call_b2_strict_bash'")
+        .all() as Array<{ status: string; error_text: string }>;
+      assert.equal(b2Rows.length, 1);
+      assert.equal(b2Rows[0].status, "ABORTED_CLEAN", "Confinement refusal must be recorded as ABORTED_CLEAN");
+      assert.ok(b2Rows[0].error_text.includes("SANDBOX_UNAVAILABLE"));
+
+      // Verify session is NOT locked and subsequent read proceeds cleanly
+      assertNoUnresolvedOutcomeUnknown(b2StateDb, "session-canary-b2");
+      const b2ReadRes = await executeThroughWalSpine({
+        stateDb: b2StateDb,
+        spillStore: b2SpillStore,
+        sessionId: "session-canary-b2",
+        leafId: "leaf-b2-0",
+        toolCallId: "call_b2_subsequent_read",
+        toolName: "read",
+        mutabilityClass: "PURE_READ",
+        args: { path: "AGENTS.md" },
+        executeEffect: async () => ({ rawText: "read-succeeded-ok" })
+      });
+      assert.equal(b2ReadRes.finalText, "read-succeeded-ok");
+      b2StateDb.close();
+
       // 2B. Positive Permitted Control: On Darwin with allowUnsandboxedDev: true -> executes with visible warning
       const devBashOps = createBwrapBashOperations({
         workspaceRoot: ws,
@@ -385,6 +480,60 @@ async function main(): Promise<void> {
       );
     }
     assert.equal(pathOutsideBlocked, true, "Path outside workspace must be blocked by containment guard");
+
+    // 3A (iii) Negative Denial Canary: learnReviewRule denied in read-only mode (cannot modify REVIEW_RULES.md)
+    let learnRuleBlocked = false;
+    try {
+      readOnlyCiEngine.learnReviewRule({
+        id: "NO_TAMPER",
+        title: "Block Tampering",
+        glob: "**/*",
+        forbiddenPattern: "tamper",
+        body: "Never tamper",
+        priority: 1
+      });
+    } catch (err) {
+      learnRuleBlocked = true;
+      assert.ok(err instanceof GuardDeniedError, `Expected GuardDeniedError, got ${String(err)}`);
+      assert.ok((err as Error).message.includes("read-only sandbox mode"));
+    }
+    assert.equal(learnRuleBlocked, true, "learnReviewRule must throw GuardDeniedError in read-only sandbox mode");
+    assert.equal(fs.existsSync(path.join(ws, "REVIEW_RULES.md")), false, "REVIEW_RULES.md must NOT be created");
+
+    // 3A (iv) Negative Denial Canary: PTY lease manager denies process start in read-only mode
+    const ptyManagerReadOnly = new PtyLeaseManager({
+      workspaceRoot: ws,
+      guardrails,
+      sandboxMode: "read-only",
+      allowUnsandboxedDev: true
+    });
+    let ptyReadOnlyBlocked = false;
+    try {
+      ptyManagerReadOnly.start({ command: "echo pty-test" });
+    } catch (err) {
+      ptyReadOnlyBlocked = true;
+      assert.ok(err instanceof GuardDeniedError, `Expected GuardDeniedError, got ${String(err)}`);
+      assert.ok((err as Error).message.includes("PTY_COMMAND_DENIED"));
+    }
+    assert.equal(ptyReadOnlyBlocked, true, "PTY start must be denied in read-only mode");
+
+    // 3A (v) Negative Denial Canary: PTY lease manager fails closed on Darwin without allowUnsandboxedDev
+    if (process.platform === "darwin") {
+      const ptyManagerStrict = new PtyLeaseManager({
+        workspaceRoot: ws,
+        guardrails,
+        sandboxMode: "workspace-write",
+        allowUnsandboxedDev: false
+      });
+      let ptyStrictBlocked = false;
+      try {
+        ptyManagerStrict.start({ command: "echo pty-darwin-strict" });
+      } catch (err) {
+        ptyStrictBlocked = true;
+        assert.ok(err instanceof SandboxUnavailableError, `Expected SandboxUnavailableError, got ${String(err)}`);
+      }
+      assert.equal(ptyStrictBlocked, true, "PTY start must fail closed on darwin without allowUnsandboxedDev");
+    }
 
     // 3B. Positive Permitted Control: CI execution permitted in workspace-write mode
     const permittedCiEngine = new BugBotAndCiEngine({
@@ -544,6 +693,49 @@ async function main(): Promise<void> {
     });
     assert.equal(walReplay.fromCache, true, "Idempotency cache hit must return cached result");
     assert.equal(effectExecutionCount, 1, "Effect must NOT be re-executed on idempotency hit");
+
+    // 5B (iii) Positive Permitted Control: Nested tool execution stores parent_tool_call_id and completes to TRANSCRIPT_APPENDED
+    const rootCallId = "audit-3";
+    const nestedCallId = "audit-3/1";
+    const rootRes = await executeThroughWalSpine({
+      stateDb,
+      spillStore,
+      sessionId: "session-canary-wal",
+      leafId: "leaf-canary-0",
+      toolCallId: rootCallId,
+      parentToolCallId: null,
+      toolName: "batch_execute",
+      mutabilityClass: "PURE_READ",
+      args: { actions: ["read"] },
+      executeEffect: async () => ({ rawText: "root executed" })
+    });
+    const nestedRes = await executeThroughWalSpine({
+      stateDb,
+      spillStore,
+      sessionId: "session-canary-wal",
+      leafId: "leaf-canary-0",
+      toolCallId: nestedCallId,
+      parentToolCallId: "audit-3",
+      toolName: "read",
+      mutabilityClass: "PURE_READ",
+      args: { path: "AGENTS.md" },
+      executeEffect: async () => ({ rawText: "nested executed" })
+    });
+
+    const rootRowBefore = stateDb.getWalRow(rootRes.idempotencyKey)!;
+    const nestedRowBefore = stateDb.getWalRow(nestedRes.idempotencyKey)!;
+    assert.equal(rootRowBefore.parent_tool_call_id, null);
+    assert.equal(nestedRowBefore.parent_tool_call_id, "audit-3", "Nested tool call must record parent_tool_call_id in WAL");
+    assert.equal(rootRowBefore.status, "EFFECT_COMMITTED");
+    assert.equal(nestedRowBefore.status, "EFFECT_COMMITTED");
+
+    // Calling markWalCallTreeTranscriptAppended on the root call ID marks both root and all descendants
+    markWalCallTreeTranscriptAppended(stateDb, "session-canary-wal", rootCallId, rootRes.idempotencyKey);
+
+    const rootRowAfter = stateDb.getWalRow(rootRes.idempotencyKey)!;
+    const nestedRowAfter = stateDb.getWalRow(nestedRes.idempotencyKey)!;
+    assert.equal(rootRowAfter.status, "TRANSCRIPT_APPENDED", "Root tool call must transition to TRANSCRIPT_APPENDED");
+    assert.equal(nestedRowAfter.status, "TRANSCRIPT_APPENDED", "Nested descendant tool call must transition to TRANSCRIPT_APPENDED");
 
     // 5A (i) Negative Denial Canary: Tamper with disk post-commit -> drift triggers OUTCOME_UNKNOWN lock!
     fs.writeFileSync(targetFile, "tampered-content-by-unconfined-actor");

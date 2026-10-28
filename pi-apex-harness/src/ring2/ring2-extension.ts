@@ -2,6 +2,7 @@ import path from "node:path";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { GuardDeniedError } from "../core/monotonic-guard.ts";
 import { loadVerifiedGuardrails } from "../core/guardrail-pin.ts";
 import type { Ring0HarnessOptions } from "../core/ring0-session.ts";
 import {
@@ -64,7 +65,9 @@ export async function createRing2Harness(
   });
   const ptyManager = new PtyLeaseManager({
     workspaceRoot: opts.workspaceRoot,
-    guardrails
+    guardrails,
+    sandboxMode: opts.sandboxMode ?? "workspace-write",
+    allowUnsandboxedDev: opts.allowUnsandboxedDev ?? false
   });
 
   const SubagentTaskSchema = Type.Object({
@@ -249,6 +252,11 @@ export async function createRing2Harness(
             };
           }
           case "learn_rule": {
+            if (opts.sandboxMode === "read-only") {
+              throw new GuardDeniedError(
+                "[guard: code_review_ci.learn_rule denied in read-only sandbox mode: cannot modify REVIEW_RULES.md]"
+              );
+            }
             if (!params.ruleId || !params.title || !params.forbiddenPattern) {
               throw new Error("ruleId, title, and forbiddenPattern are required for learn_rule");
             }
@@ -464,6 +472,11 @@ export async function createRing2Harness(
       async execute(_id, params): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown }> {
         switch (params.action) {
           case "start": {
+            if (opts.sandboxMode === "read-only") {
+              throw new GuardDeniedError(
+                "PTY_COMMAND_DENIED: PTY background process execution is denied in read-only sandbox mode."
+              );
+            }
             if (!params.command) throw new Error("command required for pty_session.start");
             const info = ptyManager.start({
               command: params.command,
@@ -654,7 +667,9 @@ export async function createRing2Harness(
   const cronScheduler = new UnattendedCronScheduler({
     db: ring1.stateDb.db,
     workspaceRoot: opts.workspaceRoot,
-    guardrails
+    guardrails,
+    sandboxMode: opts.sandboxMode ?? "workspace-write",
+    allowUnsandboxedDev: opts.allowUnsandboxedDev ?? false
   });
 
   trustArtifactsRef = trustArtifacts;

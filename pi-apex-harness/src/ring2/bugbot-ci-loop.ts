@@ -26,7 +26,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import type { DurabilityMode, GuardrailsConfig, SandboxMode } from "../types.ts";
 import { createBwrapBashOperations } from "../core/bwrap-sandbox.ts";
-import { evaluateShellCommandGuard } from "../core/monotonic-guard.ts";
+import { evaluateShellCommandGuard, GuardDeniedError } from "../core/monotonic-guard.ts";
 import { readWorkspaceFileSafe } from "../core/safe-path.ts";
 import { writeFileDurable } from "../core/wal-recovery.ts";
 import type { TrustArtifactController, TrustArtifactRecord } from "./plan-trust-artifacts.ts";
@@ -435,6 +435,11 @@ export class BugBotAndCiEngine {
   }
 
   public learnReviewRule(rule: LearnedReviewRule): { relPath: string; totalRules: number } {
+    if (this.sandboxMode === "read-only") {
+      throw new GuardDeniedError(
+        `[guard: learn_rule denied in read-only sandbox mode: cannot modify REVIEW_RULES.md]`
+      );
+    }
     const relPath = "REVIEW_RULES.md";
     let existing = "";
     try {

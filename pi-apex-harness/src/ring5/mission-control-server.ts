@@ -187,7 +187,7 @@ export class MissionControlServer {
     }
     this.requestedPort = opts.port ?? 4310;
     this.authToken = opts.authToken ?? crypto.randomBytes(32).toString("hex");
-    this.requireAuth = opts.requireAuth ?? (opts.authToken !== undefined);
+    this.requireAuth = opts.requireAuth ?? true;
     this.allowedHosts = new Set([
       "127.0.0.1",
       "localhost",
@@ -378,12 +378,13 @@ export class MissionControlServer {
     };
   }
 
-  async start(): Promise<{ host: string; port: number; url: string }> {
+  async start(): Promise<{ host: string; port: number; url: string; token: string }> {
     if (this.server) {
       return {
         host: this.host,
         port: this.boundPort,
-        url: `http://${this.host}:${this.boundPort}`
+        url: `http://${this.host}:${this.boundPort}`,
+        token: this.authToken
       };
     }
 
@@ -2067,7 +2068,8 @@ export class MissionControlServer {
     return {
       host: this.host,
       port: this.boundPort,
-      url: `http://${this.host}:${this.boundPort}`
+      url: `http://${this.host}:${this.boundPort}`,
+      token: this.authToken
     };
   }
 

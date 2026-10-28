@@ -477,7 +477,8 @@ async function main(): Promise<void> {
         controller,
         workspaceRoot: ws,
         host: "0.0.0.0",
-        port: 0
+        port: 0,
+        requireAuth: false
       });
       const info = await server.start();
       const baseUrl = `http://127.0.0.1:${info.port}`;
