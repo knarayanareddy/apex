@@ -381,14 +381,22 @@ export function normalizeWalToolResult<T = unknown>(params: {
   const { sessionId, spillStore, details, isError } = params;
   const rawContent = params.content;
 
-  const aggregateRawText =
-    params.rawText ??
-    (rawContent
-      ? rawContent
-          .filter((c): c is TextContent => c.type === "text" && typeof (c as any).text === "string")
-          .map((c) => c.text)
-          .join("\n")
-      : "");
+  const rawTextBlocks = rawContent
+    ? rawContent.filter((c): c is TextContent => c.type === "text" && typeof (c as any).text === "string")
+    : [];
+  const contentJoined = rawTextBlocks.map((c) => c.text).join("\n");
+  const callerRaw = typeof params.rawText === "string" ? params.rawText : undefined;
+
+  let aggregateRawText: string;
+  if (rawTextBlocks.length > 0) {
+    if (callerRaw !== undefined && Buffer.byteLength(callerRaw, "utf8") > Buffer.byteLength(contentJoined, "utf8")) {
+      aggregateRawText = callerRaw;
+    } else {
+      aggregateRawText = contentJoined;
+    }
+  } else {
+    aggregateRawText = callerRaw ?? "";
+  }
 
   const spillOut = spillStore.scrubAndMaybeSpill(sessionId, aggregateRawText);
   const textIsBounded = spillOut.spilled || spillOut.spillFallbackUsed;
@@ -515,6 +523,55 @@ export interface ExecuteWalResult<T> {
 }
 
 /**
+ * Checks whether a cached receipt from `result_json` is already compliant with the current
+ * normalization budget and delivery policy. Returns false if the receipt is un-normalized,
+ * from a pre-upgrade schema, or retains oversized structured content text.
+ */
+function isCachedResultNormalized(
+  cached: any,
+  spillStore: PrivateSpillStore
+): boolean {
+  if (!cached || typeof cached !== "object") return false;
+
+  // Check if content is present and is an array
+  if (!Array.isArray(cached.content)) {
+    // Legacy receipt without content array: if text exceeds budget, it's NOT normalized
+    const text = typeof cached.finalText === "string" ? cached.finalText : (typeof cached.rawText === "string" ? cached.rawText : "");
+    const byteLen = Buffer.byteLength(text, "utf8");
+    const lineCount = text.split("\n").length;
+    if (byteLen > spillStore.maxInlineBytes || lineCount > spillStore.maxInlineLines) {
+      return false;
+    }
+    return true;
+  }
+
+  // Content array is present: inspect all text blocks
+  const textBlocks = cached.content.filter((b: any) => b.type === "text" && typeof b.text === "string");
+  const aggregateContentText = textBlocks.map((b: any) => b.text).join("\n");
+  const byteLen = Buffer.byteLength(aggregateContentText, "utf8");
+  const lineCount = aggregateContentText.split("\n").length;
+
+  if (cached.spilled === true || cached.spillFallbackUsed === true) {
+    // If marked spilled/fallback, check if content was actually bounded to the spill notice
+    if (textBlocks.length > 0 && typeof cached.finalText === "string") {
+      // Content must match finalText notice, not retain the original un-spilled text
+      if (textBlocks[0].text === cached.finalText && textBlocks.length === 1) {
+        return true;
+      }
+    }
+    // If content has multiple text blocks or doesn't match finalText, it wasn't properly normalized
+    return false;
+  }
+
+  // Not marked spilled: aggregate text must strictly be within inline budget
+  if (byteLen > spillStore.maxInlineBytes || lineCount > spillStore.maxInlineLines) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * Executes a tool through the Ring-0 WAL Spine with Two-Step Post-Effect Receipt (`EFFECT_COMMITTED_RAW`).
  *
  * Reviewer #3 Fix: Returning a result to an in-memory QuickJS `Codemode` VM (`parentToolCallId != null`)
@@ -568,12 +625,86 @@ export async function executeThroughWalSpine<T = unknown>(
         return { idempotencyKey, fromCache: true, ...finalized };
       }
 
-      const cached = JSON.parse(existing.result_json!) as Omit<ExecuteWalResult<T>, "idempotencyKey" | "fromCache">;
+      let cached: any = {};
+      try {
+        cached = JSON.parse(existing.result_json ?? "{}");
+      } catch {
+        cached = {};
+      }
+
+      if (isCachedResultNormalized(cached, spillStore)) {
+        return {
+          idempotencyKey,
+          fromCache: true,
+          finalText: cached.finalText ?? "",
+          content: cached.content ?? [{ type: "text", text: cached.finalText ?? "" }],
+          details: cached.details as T,
+          isError: cached.isError,
+          spilled: Boolean(cached.spilled),
+          spillFallbackUsed: Boolean(cached.spillFallbackUsed)
+        };
+      }
+
+      const cachedRawText =
+        typeof cached.finalText === "string"
+          ? cached.finalText
+          : typeof cached.rawText === "string"
+            ? cached.rawText
+            : undefined;
+      const cachedContent = Array.isArray(cached.content) ? (cached.content as WalContentBlock[]) : undefined;
+
+      let normalized: NormalizedWalResult<T>;
+      try {
+        normalized = normalizeWalToolResult<T>({
+          sessionId: existing.session_id,
+          spillStore,
+          rawText: cachedRawText,
+          content: cachedContent,
+          details: cached.details as T,
+          isError: cached.isError
+        });
+      } catch {
+        const fallbackMsg = "[tool output normalization failed on cached replay]";
+        normalized = {
+          finalText: fallbackMsg,
+          content: [{ type: "text", text: fallbackMsg }],
+          details: cached.details as T,
+          isError: true,
+          spilled: false,
+          spillFallbackUsed: true
+        };
+      }
+
+      // If normalized representation changed, update result_json transactionally
+      const updatedResultJson = JSON.stringify({
+        finalText: normalized.finalText,
+        content: normalized.content,
+        details: normalized.details,
+        isError: normalized.isError,
+        spilled: normalized.spilled,
+        spillFallbackUsed: normalized.spillFallbackUsed,
+        normalizedVersion: 2
+      });
+
+      if (updatedResultJson !== existing.result_json) {
+        stateDb.db
+          .prepare(
+            `UPDATE wal_intents
+             SET result_json = ?, updated_at_ms = ?
+             WHERE idempotency_key = ?`
+          )
+          .run(updatedResultJson, Date.now(), idempotencyKey);
+      }
+
       return {
         idempotencyKey,
         fromCache: true,
-        ...cached,
-        content: cached.content ?? [{ type: "text", text: cached.finalText }]
+        finalText: normalized.finalText,
+        content: normalized.content,
+        details: normalized.details,
+        isError: normalized.isError,
+        spilled: normalized.spilled,
+        spillFallbackUsed: normalized.spillFallbackUsed
       };
     }
 
@@ -662,14 +793,22 @@ export async function executeThroughWalSpine<T = unknown>(
     throw err;
   }
 
-  const rawText =
-    rawEffectOut.rawText ??
-    (rawEffectOut.content
-      ? rawEffectOut.content
-          .filter((c) => c.type === "text" && typeof (c as any).text === "string")
-          .map((c) => (c as any).text)
-          .join("\n")
-      : "");
+  const spineTextBlocks = Array.isArray(rawEffectOut.content)
+    ? rawEffectOut.content.filter((c): c is TextContent => c.type === "text" && typeof (c as any).text === "string")
+    : [];
+  const spineContentJoined = spineTextBlocks.map((c) => c.text).join("\n");
+  const spineCallerRaw = typeof rawEffectOut.rawText === "string" ? rawEffectOut.rawText : undefined;
+
+  let rawText: string;
+  if (spineTextBlocks.length > 0) {
+    if (spineCallerRaw !== undefined && Buffer.byteLength(spineCallerRaw, "utf8") > Buffer.byteLength(spineContentJoined, "utf8")) {
+      rawText = spineCallerRaw;
+    } else {
+      rawText = spineContentJoined;
+    }
+  } else {
+    rawText = spineCallerRaw ?? "";
+  }
 
   let scrubbedContent: WalContentBlock[] | undefined = undefined;
   if (Array.isArray(rawEffectOut.content)) {
@@ -931,6 +1070,37 @@ export function reconcileWalOnStartup(
         finalizeCommittedRawRow(stateDb, spillStore, row);
         summary.promotedFromCommittedRaw.push(row.idempotency_key);
         committedRow = stateDb.getWalRow(row.idempotency_key)!;
+      }
+
+      if (committedRow.status === "EFFECT_COMMITTED" && committedRow.result_json) {
+        try {
+          const parsed = JSON.parse(committedRow.result_json);
+          const normalized = normalizeWalToolResult({
+            sessionId: committedRow.session_id,
+            spillStore,
+            rawText: parsed.finalText ?? parsed.rawText,
+            content: parsed.content,
+            details: parsed.details,
+            isError: parsed.isError
+          });
+          const updatedJson = JSON.stringify({
+            finalText: normalized.finalText,
+            content: normalized.content,
+            details: normalized.details,
+            isError: normalized.isError,
+            spilled: normalized.spilled,
+            spillFallbackUsed: normalized.spillFallbackUsed,
+            normalizedVersion: 2
+          });
+          if (updatedJson !== committedRow.result_json) {
+            stateDb.db
+              .prepare(`UPDATE wal_intents SET result_json = ?, updated_at_ms = ? WHERE idempotency_key = ?`)
+              .run(updatedJson, now, committedRow.idempotency_key);
+            committedRow = stateDb.getWalRow(committedRow.idempotency_key)!;
+          }
+        } catch {
+          // Keep intact if parse fails
+        }
       }
 
       if (!committedRow.parent_tool_call_id) {

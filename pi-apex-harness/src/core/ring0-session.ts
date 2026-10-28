@@ -25,7 +25,11 @@ import {
 import type { ApprovalPolicy, DurabilityMode, GuardrailsConfig, MutabilityClass, SandboxMode } from "../types.ts";
 import { createBwrapBashOperations, probeBwrapFunctional, SandboxUnavailableError } from "./bwrap-sandbox.ts";
 import { installSafeNetworkDispatcher } from "../ring10/safe-network.ts";
-import { captureTurnCheckpoint, recoverInterruptedRewinds } from "./git-rewind.ts";
+import {
+  captureTurnCheckpoint,
+  CheckpointSecurityError,
+  recoverInterruptedRewinds
+} from "./git-rewind.ts";
 import { loadVerifiedGuardrails } from "./guardrail-pin.ts";
 import {
   createConfinedFileOperations,
@@ -471,7 +475,13 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
             leafId,
             turnIndex: turnCounter
           });
-        } catch {
+        } catch (err: unknown) {
+          if (err instanceof CheckpointSecurityError || err instanceof GuardDeniedError) {
+            // Checkpoint creation refused by security guard (e.g. incomplete secret inventory).
+            // A tolerated non-Git workspace is different from a security refusal.
+            // A refused checkpoint must produce an explicit failure reason and fail closed.
+            throw err;
+          }
           // Non-git workspace tolerated gracefully unless /tree rewind invoked
         }
       }

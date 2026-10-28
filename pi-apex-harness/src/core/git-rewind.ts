@@ -5,6 +5,7 @@ import path from "node:path";
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { DurabilityMode } from "../types.ts";
 import { extractNativeErrnoCode, getLinuxFsBridge } from "./linux-fs-bridge.ts";
+import { GuardDeniedError } from "./monotonic-guard.ts";
 import {
   isSecretBasename,
   mkdirSingleBeneathWorkspace,
@@ -12,6 +13,7 @@ import {
   PathContainmentError,
   rmdirEmptyBeneathWorkspace,
   scanWorkspaceSecretsAndHardlinks,
+  type SecretScanResult,
   unlinkSafeBeneathWorkspace
 } from "./safe-path.ts";
 import type { StateDb } from "./state-db.ts";
@@ -114,6 +116,17 @@ function readSubmoduleHeadCommitOid(submoduleDir: string): string {
   }
 }
 
+export class CheckpointSecurityError extends GuardDeniedError {
+  readonly code: string;
+  readonly incompleteReasons: readonly string[];
+  constructor(code = "CHECKPOINT_SECRET_SCAN_INCOMPLETE", incompleteReasons: readonly string[] = []) {
+    super(`[checkpoint security refused: ${code} - ${incompleteReasons.join("; ") || "secret inventory incomplete"}]`);
+    this.name = "CheckpointSecurityError";
+    this.code = code;
+    this.incompleteReasons = incompleteReasons;
+  }
+}
+
 export interface WorkspaceSnapshotScan {
   entryStates: Record<string, WorkspaceEntryState>;
   fileHashes: Record<string, string>;
@@ -123,10 +136,20 @@ export interface WorkspaceSnapshotScan {
 /**
  * Scans workspace entries capturing exact `{ kind, hash, mode }` (including 9-bit POSIX modes `0000`..`0777`,
  * existing directories, non-traversed symlinks, and Git submodules) while excluding secrets and hardlink aliases.
+ * Fails closed with `CheckpointSecurityError` if secret scanning was incomplete.
  */
-export function scanWorkspaceEntryStates(workspaceRoot: string): WorkspaceSnapshotScan {
+export function scanWorkspaceEntryStates(
+  workspaceRoot: string,
+  validatedScan?: SecretScanResult
+): WorkspaceSnapshotScan {
   const realWs = fs.realpathSync(workspaceRoot);
-  const secretScan = scanWorkspaceSecretsAndHardlinks(realWs);
+  const secretScan = validatedScan ?? scanWorkspaceSecretsAndHardlinks(realWs);
+  if (!secretScan.complete) {
+    throw new CheckpointSecurityError(
+      "CHECKPOINT_SECRET_SCAN_INCOMPLETE",
+      secretScan.incompleteReasons
+    );
+  }
   const entryStates: Record<string, WorkspaceEntryState> = {};
   const fileHashes: Record<string, string> = {};
   const directories = new Set<string>();
@@ -180,8 +203,11 @@ export function scanWorkspaceEntryStates(workspaceRoot: string): WorkspaceSnapsh
   return { entryStates, fileHashes, directories };
 }
 
-export function scanWorkspaceFileHashes(workspaceRoot: string): Record<string, string> {
-  return scanWorkspaceEntryStates(workspaceRoot).fileHashes;
+export function scanWorkspaceFileHashes(
+  workspaceRoot: string,
+  validatedScan?: SecretScanResult
+): Record<string, string> {
+  return scanWorkspaceEntryStates(workspaceRoot, validatedScan).fileHashes;
 }
 
 interface GitTreeEntry {
@@ -218,19 +244,29 @@ function readGitTreeManifest(workspaceRoot: string, gitTreeOid: string): Record<
   return manifest;
 }
 
-export function snapshotWorkingTreeToGit(workspaceRoot: string): {
+export function snapshotWorkingTreeToGit(
+  workspaceRoot: string,
+  validatedScan?: SecretScanResult
+): {
   gitTreeOid: string;
   fileHashes: Record<string, string>;
   entryStates: Record<string, WorkspaceEntryState>;
   directories: Set<string>;
 } {
   const realWs = fs.realpathSync(workspaceRoot);
+  const secretScan = validatedScan ?? scanWorkspaceSecretsAndHardlinks(realWs);
+  if (!secretScan.complete) {
+    throw new CheckpointSecurityError(
+      "CHECKPOINT_SECRET_SCAN_INCOMPLETE",
+      secretScan.incompleteReasons
+    );
+  }
+
   const harnessDir = path.join(realWs, ".harness");
   fs.mkdirSync(harnessDir, { recursive: true, mode: 0o700 });
   const shadowIdx = path.join(harnessDir, `shadow.${process.pid}.${crypto.randomBytes(4).toString("hex")}.idx`);
   const env = { ...process.env, GIT_INDEX_FILE: shadowIdx };
-  const secretScan = scanWorkspaceSecretsAndHardlinks(realWs);
-  const { entryStates, fileHashes, directories } = scanWorkspaceEntryStates(realWs);
+  const { entryStates, fileHashes, directories } = scanWorkspaceEntryStates(realWs, secretScan);
 
   const dynamicExcludes = secretScan.allMaskedPaths
     .map((abs) => path.relative(realWs, abs).replace(/\\/g, "/"))
