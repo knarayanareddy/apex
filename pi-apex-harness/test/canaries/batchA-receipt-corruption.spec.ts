@@ -468,6 +468,13 @@ async function testA4NoSecretEchoInDiagnostics() {
   const stateDb = new StateDb(dbPath, "power-loss-safe");
   const spillStore = new PrivateSpillStore({ rootDir: spillsDir, maxInlineBytes: 256, maxInlineLines: 10 });
 
+  const unsupportedInput = JSON.stringify({ content: [{ type: secretMarker + "X".repeat(20_000) }] });
+  const unsupportedOutcome = ensureNormalizedCommittedResult({ receipt: unsupportedInput, spillStore, sessionId: sessId });
+  assert.equal(unsupportedOutcome.invalid, true);
+  assert.equal(unsupportedOutcome.result.isError, true);
+  assert.equal(JSON.stringify(unsupportedOutcome).includes(secretMarker), false, "Unsupported discriminators must not leak input");
+  assert.ok(Buffer.byteLength(unsupportedOutcome.result.finalText) < 512, "Invalid receipt diagnostics must remain bounded");
+
   const outcome = ensureNormalizedCommittedResult({
     receipt: malformedJsonWithSecret,
     spillStore,

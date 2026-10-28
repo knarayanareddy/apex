@@ -56,7 +56,9 @@ export interface PtyLeaseInfo {
   title: string;
   command: string;
   cwd: string;
-  status: "running" | "exited" | "lease_expired";
+  status: "running" | "exited" | "lease_expired" | "cleanup_pending" | "cleanup_unverified";
+  /** Snapshot-based only; it does not prove that no reparented descendants exist. */
+  cleanupStatus?: "pending" | "snapshot_cleared" | "unverified";
   pid: number;
   exitCode?: number | null;
   startedAtMs: number;
@@ -93,6 +95,7 @@ function buildSanitizedPtyEnv(): NodeJS.ProcessEnv {
 export interface PtyPollResult {
   id: string;
   status: PtyLeaseInfo["status"];
+  cleanupStatus?: PtyLeaseInfo["cleanupStatus"];
   exitCode?: number | null;
   replay: string;
   cursor: number;
@@ -221,9 +224,7 @@ export class PtyLeaseManager {
     const leaseTimer = setTimeout(() => {
       const current = this.sessions.get(id);
       if (current && current.info.status === "running") {
-        current.info.status = "lease_expired";
-        this.killProcessGroup(current.proc, current.procIdentity);
-        this.recordExitOrder(id);
+        this.requestCleanup(current, "lease_expired", false);
       }
     }, leaseMs);
     leaseTimer.unref();
@@ -286,7 +287,7 @@ export class PtyLeaseManager {
         session.info.status = "exited";
       }
       session.info.exitCode = code;
-      this.recordExitOrder(id);
+      if (!session.info.cleanupStatus || session.info.cleanupStatus === "snapshot_cleared") this.recordExitOrder(id);
     });
 
     this.sessions.set(id, session);
@@ -325,6 +326,7 @@ export class PtyLeaseManager {
     return {
       id: session.info.id,
       status: session.info.status,
+      cleanupStatus: session.info.cleanupStatus,
       exitCode: session.info.exitCode,
       replay,
       cursor: session.info.cursor,
@@ -349,11 +351,10 @@ export class PtyLeaseManager {
     if (!session) throw new Error(`PTY_NOT_FOUND: ${id}`);
     clearTimeout(session.leaseTimer);
     if (session.info.status === "running") {
-      this.killProcessGroup(session.proc, session.procIdentity);
-      session.info.status = "exited";
+      this.requestCleanup(session, "exited", removeRecord);
     }
     const snap = { ...session.info };
-    if (removeRecord) {
+    if (removeRecord && session.info.status === "exited" && session.info.cleanupStatus !== "unverified") {
       this.sessions.delete(id);
       const idx = this.exitOrder.indexOf(id);
       if (idx !== -1) this.exitOrder.splice(idx, 1);
@@ -369,18 +370,31 @@ export class PtyLeaseManager {
     for (const session of this.sessions.values()) {
       clearTimeout(session.leaseTimer);
       if (session.info.status === "running") {
-        this.killProcessGroup(session.proc, session.procIdentity);
+        this.requestCleanup(session, "exited", true);
       }
     }
-    this.sessions.clear();
-    this.exitOrder.length = 0;
   }
 
-  private killProcessGroup(proc: ChildProcess, procIdentity?: ProcessIdentity): void {
-    const pid = proc.pid;
-    if (pid && pid > 0) {
-      terminateProcessTree(pid, procIdentity);
-    }
+  private requestCleanup(session: ActivePtySession, successStatus: "exited" | "lease_expired", removeRecord: boolean): void {
+    session.info.status = successStatus === "lease_expired" ? "lease_expired" : "cleanup_pending";
+    session.info.cleanupStatus = "pending";
+    const finish = (success: boolean, diagnostic: string) => {
+      session.info.cleanupStatus = success ? "snapshot_cleared" : "unverified";
+      session.info.status = success ? successStatus : "cleanup_unverified";
+      if (!success) {
+        console.warn(`[PTY_CLEANUP_UNVERIFIED] ${diagnostic}`);
+        return;
+      }
+      this.recordExitOrder(session.info.id);
+      if (removeRecord) {
+        this.sessions.delete(session.info.id);
+        const index = this.exitOrder.indexOf(session.info.id);
+        if (index !== -1) this.exitOrder.splice(index, 1);
+      }
+    };
+    void terminateProcessTree(session.proc.pid ?? -1, session.procIdentity)
+      .then((result) => finish(result.success, result.diagnostic))
+      .catch((error) => finish(false, error instanceof Error ? error.message : String(error)));
   }
 
   private recordExitOrder(id: string): void {

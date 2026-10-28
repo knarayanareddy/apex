@@ -36,7 +36,7 @@ export function recordProcessIdentity(pid: number): ProcessIdentity {
 }
 
 export function isProcessAliveWithIdentity(identity: ProcessIdentity): boolean {
-  if (identity.pid <= 0) return false;
+  if (identity.pid <= 0 || !identity.startTime) return false;
   try {
     process.kill(identity.pid, 0); // test signal
   } catch {
@@ -80,12 +80,13 @@ export function findDescendantPids(rootPid: number): number[] {
             list.push(pid);
             parentMap.set(ppid, list);
           }
-        } catch {
-          // Process exited
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT" && (err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
         }
       }
     } catch {
-      // Fallback to ps
+      // A partial /proc snapshot must not be mistaken for a complete tree.
+      parentMap.clear();
     }
   }
 
@@ -109,8 +110,8 @@ export function findDescendantPids(rootPid: number): number[] {
           }
         }
       }
-    } catch {
-      return [];
+    } catch (err) {
+      throw new Error(`PROCESS_DISCOVERY_UNAVAILABLE: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -143,8 +144,9 @@ export interface TerminationResult {
 }
 
 /**
- * Safely terminates a process tree without signalling recycled process groups.
- * Deepest descendants are signalled first with SIGTERM, followed by SIGKILL.
+ * Best-effort termination of a discovered process tree. Identity is checked
+ * before each signal, but a userspace PID check and signal are not atomic;
+ * descendants may also reparent or spawn after discovery.
  */
 export async function terminateProcessTree(
   rootPid: number,
@@ -157,7 +159,7 @@ export async function terminateProcessTree(
 
   if (rootPid <= 0) {
     return {
-      success: true,
+      success: false,
       killedPids: [],
       survivingPids: [],
       recycledDetected: false,
@@ -165,8 +167,12 @@ export async function terminateProcessTree(
     };
   }
 
-  // 1. Verify root identity if supplied
-  if (rootIdentity) {
+  if (!rootIdentity || rootIdentity.pid !== rootPid || !rootIdentity.startTime) {
+    return { success: false, killedPids: [], survivingPids: [rootPid], recycledDetected: false, diagnostic: `REFUSING_SIGNAL: PID ${rootPid} has unknown or mismatched identity` };
+  }
+
+  // 1. Verify root identity before discovering its descendants.
+  {
     const alive = isProcessAliveWithIdentity(rootIdentity);
     if (!alive) {
       // Check if process exists under different start time (recycled!)
@@ -182,24 +188,42 @@ export async function terminateProcessTree(
           diagnostic: `REFUSING_SIGNAL: PID ${rootPid} was recycled by an unrelated process`
         };
       } catch {
-        // Already dead, nothing to kill
+        // A dead root does not establish whether descendants were reparented.
         return {
-          success: true,
+          success: false,
           killedPids: [],
           survivingPids: [],
           recycledDetected: false,
-          diagnostic: `Root PID ${rootPid} is already dead`
+          diagnostic: `Root PID ${rootPid} is gone; descendant ownership is unverified`
         };
       }
     }
   }
 
   // 2. Discover all descendants before killing root
-  const descendants = findDescendantPids(rootPid);
+  let descendants: number[];
+  try {
+    descendants = findDescendantPids(rootPid);
+  } catch {
+    return { success: false, killedPids: [], survivingPids: [rootPid], recycledDetected: false, diagnostic: "REFUSING_SIGNAL: descendant discovery unavailable" };
+  }
   const allPidsToKill = [...descendants.reverse(), rootPid]; // leaves first
+  const identities = new Map<number, ProcessIdentity>([[rootPid, rootIdentity]]);
+  for (const pid of descendants) identities.set(pid, recordProcessIdentity(pid));
+  let unverified = false;
 
   // 3. Send SIGTERM
   for (const pid of allPidsToKill) {
+    const identity = identities.get(pid)!;
+    if (!identity.startTime || !isProcessAliveWithIdentity(identity)) {
+      try {
+        process.kill(pid, 0);
+        unverified = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ESRCH") unverified = true;
+      }
+      continue;
+    }
     try {
       process.kill(pid, "SIGTERM");
       killedPids.push(pid);
@@ -216,13 +240,17 @@ export async function terminateProcessTree(
   for (const pid of allPidsToKill) {
     try {
       process.kill(pid, 0); // still alive?
+      if (!isProcessAliveWithIdentity(identities.get(pid)!)) {
+        unverified = true;
+        continue;
+      }
       try {
         process.kill(pid, "SIGKILL");
       } catch {
         // ignore
       }
-    } catch {
-      // gone
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ESRCH") unverified = true;
     }
   }
 
@@ -251,14 +279,14 @@ export async function terminateProcessTree(
     }
   }
 
-  const success = survivingPids.length === 0;
+  const success = survivingPids.length === 0 && !unverified;
   return {
     success,
     killedPids,
     survivingPids,
     recycledDetected,
     diagnostic: success
-      ? `Terminated ${killedPids.length} process(es)`
-      : `Failed to terminate ${survivingPids.length} process(es): [${survivingPids.join(", ")}]`
+      ? `No survivors observed in the discovered process snapshot (${killedPids.length} signalled); reparented or newly spawned descendants are unverified`
+      : `Cleanup unverified or incomplete; ${survivingPids.length} process(es) remain: [${survivingPids.join(", ")}]`
   };
 }

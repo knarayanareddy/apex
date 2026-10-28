@@ -165,6 +165,7 @@ export function createConfinedFileOperations(params: {
   workspaceRoot: string;
   cfg: GuardrailsConfig;
   durabilityMode: DurabilityMode;
+  sessionId?: string;
   mode?: SandboxMode;
   beforeAction?: (tool: string, summary: string) => Promise<void>;
 }): {
@@ -209,7 +210,8 @@ export function createConfinedFileOperations(params: {
             return readWorkspaceFileSafe({
               workspaceRoot: params.workspaceRoot,
               candidatePath: wsDoc,
-              unmaskedExceptions: params.cfg.sandbox.unmasked_exceptions
+              unmaskedExceptions: params.cfg.sandbox.unmasked_exceptions,
+              sessionId: params.sessionId
             });
           } catch {
             // fall through to bundled if error
@@ -224,7 +226,8 @@ export function createConfinedFileOperations(params: {
         return readWorkspaceFileSafe({
           workspaceRoot: params.workspaceRoot,
           candidatePath: absPath,
-          unmaskedExceptions: params.cfg.sandbox.unmasked_exceptions
+          unmaskedExceptions: params.cfg.sandbox.unmasked_exceptions,
+          sessionId: params.sessionId
         });
       } catch (err) {
         if (err instanceof PathContainmentError) {

@@ -274,7 +274,7 @@ export class ChromiumCdpSession {
     }
     this.chromiumPath = resolvedBin;
     this.workspaceRoot = opts.workspaceRoot;
-    this.connectTimeoutMs = opts.connectTimeoutMs ?? 30_000;
+    this.connectTimeoutMs = opts.connectTimeoutMs ?? 12_000;
   }
 
   public get pid(): number | undefined {
@@ -492,7 +492,15 @@ export class ChromiumCdpSession {
   public async navigate(url: string): Promise<{ url: string; domRevision: number }> {
     const safeUrl = validateBrowserNavigationUrl(url, this.workspaceRoot);
     await this.ensureStarted();
-    await this.sendCdp("Page.navigate", { url: safeUrl });
+    // A failed or timed-out navigation can still replace the document.
+    this.activeSnapshotId = null;
+    this.activeSnapshotDomRevision = -1;
+    this.activeRefs = {};
+    const navigation = await this.sendCdp("Page.navigate", { url: safeUrl });
+    if (typeof navigation.errorText === "string" && navigation.errorText) {
+      const safeError = /^net::ERR_[A-Z0-9_]+$/.test(navigation.errorText) ? navigation.errorText : "NAVIGATION_ERROR";
+      throw new Error(`CDP_NAVIGATION_FAILED: ${safeError}`);
+    }
 
     // Wait until document.readyState === 'complete' (bounded)
     for (let i = 0; i < 40; i++) {
@@ -508,11 +516,6 @@ export class ChromiumCdpSession {
 
     this.currentUrl = await this.getLiveLocationHref();
     const domRevision = await this.getLiveDomRevision();
-    // Invalidate prior snapshot refs across navigation!
-    this.activeSnapshotId = null;
-    this.activeSnapshotDomRevision = -1;
-    this.activeRefs = {};
-
     return { url: this.currentUrl, domRevision };
   }
 

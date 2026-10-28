@@ -697,11 +697,7 @@ export function unlinkSafeBeneathWorkspace(params: {
       verifyOpenFdContainedInWorkspace(parentInfo.parentDirFd, realWs);
       bridge.unlinkatSingle(parentInfo.parentDirFd, parentInfo.leafName, false);
       if (params.syncParentDir) {
-        try {
-          fs.fsyncSync(parentInfo.parentDirFd);
-        } catch {
-          // ignore if fsync not supported on filesystem
-        }
+        fs.fsyncSync(parentInfo.parentDirFd);
       }
       return true;
     } finally {
@@ -734,11 +730,7 @@ export function mkdirSingleBeneathWorkspace(workspaceRoot: string, relDirPath: s
       try {
         bridge.mkdiratSingle(pInfo.parentDirFd, pInfo.leafName, 0o755);
         if (syncParentDir) {
-          try {
-            fs.fsyncSync(pInfo.parentDirFd);
-          } catch {
-            // ignore if fsync not supported
-          }
+          fs.fsyncSync(pInfo.parentDirFd);
         }
       } catch (err) {
         const code = extractNativeErrnoCode(err);
@@ -794,11 +786,7 @@ export function rmdirEmptyBeneathWorkspace(workspaceRoot: string, relDirPath: st
       try {
         bridge.unlinkatSingle(pInfo.parentDirFd, pInfo.leafName, true);
         if (syncParentDir) {
-          try {
-            fs.fsyncSync(pInfo.parentDirFd);
-          } catch {
-            // ignore if fsync not supported
-          }
+          fs.fsyncSync(pInfo.parentDirFd);
         }
         return true;
       } catch (err) {
@@ -917,12 +905,13 @@ export function readWorkspaceFileSafe(params: {
     if (!relPath.startsWith(".harness/spill/")) {
       throw new PathContainmentError(`[guard: internal .harness state read denied: ${relPath}]`);
     }
-    if (params.sessionId) {
-      const sessionHash = crypto.createHash("sha256").update(params.sessionId).digest("hex").slice(0, 12);
-      const expectedSessionPrefix = `.harness/spill/session-${sessionHash}/`;
-      if (!relPath.startsWith(expectedSessionPrefix)) {
-        throw new PathContainmentError(`[guard: unauthorized cross-session spill read denied: ${relPath}]`);
-      }
+    if (!params.sessionId) {
+      throw new PathContainmentError(`[guard: spill read requires a session identity: ${relPath}]`);
+    }
+    const sessionHash = crypto.createHash("sha256").update(params.sessionId).digest("hex").slice(0, 12);
+    const expectedSessionPrefix = `.harness/spill/session-${sessionHash}/`;
+    if (!relPath.startsWith(expectedSessionPrefix)) {
+      throw new PathContainmentError(`[guard: unauthorized cross-session spill read denied: ${relPath}]`);
     }
   }
 

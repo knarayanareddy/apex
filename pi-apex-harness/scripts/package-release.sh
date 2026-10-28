@@ -13,6 +13,11 @@ ARCHIVE_NAME="pi-apex-v${VERSION}-personal.tar.gz"
 ARCHIVE_PATH="${OUT_DIR}/${ARCHIVE_NAME}"
 SHA_PATH="${ARCHIVE_PATH}.sha256"
 
+if [[ -e "${ARCHIVE_PATH}" || -e "${SHA_PATH}" ]]; then
+  echo "[package-release] Refusing to overwrite existing release output" >&2
+  exit 1
+fi
+
 STAGE_TMP="$(mktemp -d)"
 trap 'rm -rf "${STAGE_TMP}"' EXIT
 
@@ -46,11 +51,20 @@ chmod 0444 "${STAGE_PKG}/surfaces-immutable/GUARDRAILS.yaml"
 chmod 0755 "${STAGE_PKG}/bin/pi-apex" "${STAGE_PKG}/scripts/bootstrap-host.sh" "${STAGE_PKG}/scripts/install-personal.sh" "${STAGE_PKG}/scripts/package-release.sh"
 
 mkdir -p "${OUT_DIR}"
+# These are path exclusions, not a content-based secret scan. Never include
+# workspace state, private key files, sessions, or host-specific native addons.
+EXCLUDES=(
+  '--exclude=*/.harness' '--exclude=*/node_modules' '--exclude=*/.venv'
+  '--exclude=*/.env' '--exclude=*/.env.*' '--exclude=*/.npmrc' '--exclude=*/.netrc'
+  '--exclude=*/.pypirc' '--exclude=*/.pgpass' '--exclude=*/id_rsa' '--exclude=*/id_ed25519'
+  '--exclude=*/id_ecdsa' '--exclude=*/id_dsa' '--exclude=*.pem' '--exclude=*.key'
+  '--exclude=*.p12' '--exclude=*.pfx' '--exclude=*.jsonl' '--exclude=*.node'
+)
 if tar --help 2>&1 | grep -q -- "--sort="; then
   tar --sort=name --mtime='UTC 2026-10-26' --owner=0 --group=0 --numeric-owner \
-    -czf "${ARCHIVE_PATH}" -C "${STAGE_TMP}" pi-apex-harness
+    "${EXCLUDES[@]}" -czf "${ARCHIVE_PATH}" -C "${STAGE_TMP}" pi-apex-harness
 else
-  tar -czf "${ARCHIVE_PATH}" -C "${STAGE_TMP}" pi-apex-harness
+  tar "${EXCLUDES[@]}" -czf "${ARCHIVE_PATH}" -C "${STAGE_TMP}" pi-apex-harness
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then

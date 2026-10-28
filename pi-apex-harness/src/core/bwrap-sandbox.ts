@@ -426,7 +426,19 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
 
         const terminateDescendantsAndStreams = () => {
           if (child.pid) {
-            terminateProcessTree(child.pid, procIdentity);
+            void terminateProcessTree(child.pid, procIdentity)
+              .then((result) => {
+                if (!result.success) {
+                  const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${result.diagnostic}`;
+                  console.warn(warning);
+                  if (!settled) options.onData(Buffer.from(`\n${warning}\n`, "utf8"));
+                }
+              })
+              .catch((error) => {
+                const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${error instanceof Error ? error.message : String(error)}`;
+                console.warn(warning);
+                if (!settled) options.onData(Buffer.from(`\n${warning}\n`, "utf8"));
+              });
           }
           try {
             child.stdout.destroy();

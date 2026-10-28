@@ -299,6 +299,7 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     workspaceRoot: opts.workspaceRoot,
     cfg: guardrails,
     durabilityMode,
+    sessionId,
     mode: sandboxMode
   });
 
