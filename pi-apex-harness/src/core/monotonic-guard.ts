@@ -68,6 +68,11 @@ export function resolveAndValidateWorkspacePath(
         `[guard: hardlink alias to secret file inode denied (${mode}): ${rel}]`
       );
     }
+    if (info.leafStat.nlink > 1 && !secretScan.complete) {
+      throw new GuardDeniedError(
+        `[guard: incomplete secret inventory prevents verifying multi-link file alias safety (${mode}): ${rel} (${secretScan.incompleteReasons.join("; ")})]`
+      );
+    }
   }
 
   if (mode === "write") {

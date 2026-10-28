@@ -49,11 +49,16 @@ export function isSecretBasename(
   return false;
 }
 
+export const MAX_SECRET_SCAN_DEPTH = 32;
+export const MAX_SECRET_SCAN_DIRECTORIES = 25000;
+
 export interface SecretScanResult {
   realWorkspaceRoot: string;
   allMaskedPaths: string[];
   hardlinkAliasPaths: string[];
   secretInodeKeys: Set<string>;
+  complete: boolean;
+  incompleteReasons: string[];
 }
 
 /**
@@ -70,7 +75,9 @@ export function scanWorkspaceSecretsAndHardlinks(
       realWorkspaceRoot: path.resolve(workspaceRoot),
       allMaskedPaths: [],
       hardlinkAliasPaths: [],
-      secretInodeKeys: new Set()
+      secretInodeKeys: new Set(),
+      complete: true,
+      incompleteReasons: []
     };
   }
 
@@ -80,14 +87,35 @@ export function scanWorkspaceSecretsAndHardlinks(
   const secretInodeKeys = new Set<string>();
   const multiLinkedInodeKeys = new Set<string>();
   let expectedExtraHardlinks = 0;
+  let complete = true;
+  const incompleteReasons: string[] = [];
+  let totalDirectoriesVisited = 0;
 
   const deferredHeavyDirs: string[] = [];
 
-  const walkPass1 = (absDir: string, relDir: string) => {
+  const walkPass1 = (absDir: string, relDir: string, depth: number = 0) => {
+    if (depth >= MAX_SECRET_SCAN_DEPTH) {
+      complete = false;
+      incompleteReasons.push(
+        `Maximum scan depth (${MAX_SECRET_SCAN_DEPTH}) reached at '${absDir}'`
+      );
+      return;
+    }
+    if (++totalDirectoriesVisited > MAX_SECRET_SCAN_DIRECTORIES) {
+      complete = false;
+      incompleteReasons.push(
+        `Maximum directory scan count (${MAX_SECRET_SCAN_DIRECTORIES}) exceeded at '${absDir}'`
+      );
+      return;
+    }
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(absDir, { withFileTypes: true });
-    } catch {
+    } catch (err) {
+      complete = false;
+      incompleteReasons.push(
+        `Directory read error at '${absDir}': ${err instanceof Error ? err.message : String(err)}`
+      );
       return;
     }
 
@@ -102,7 +130,7 @@ export function scanWorkspaceSecretsAndHardlinks(
           deferredHeavyDirs.push(absPath);
           continue;
         }
-        walkPass1(absPath, relPath);
+        walkPass1(absPath, relPath, depth + 1);
         continue;
       }
 
@@ -117,21 +145,41 @@ export function scanWorkspaceSecretsAndHardlinks(
             multiLinkedInodeKeys.add(key);
             expectedExtraHardlinks += st.nlink - 1;
           }
-        } catch {
-          // ignore race unlink
+        } catch (err) {
+          complete = false;
+          incompleteReasons.push(
+            `lstat error on file '${absPath}': ${err instanceof Error ? err.message : String(err)}`
+          );
         }
       }
     }
   };
 
-  walkPass1(realWs, "");
+  walkPass1(realWs, "", 0);
 
   const walkHeavyDir = (absDir: string, depth: number = 0) => {
-    if (depth > 20) return;
+    if (depth >= MAX_SECRET_SCAN_DEPTH) {
+      complete = false;
+      incompleteReasons.push(
+        `Maximum heavy directory scan depth (${MAX_SECRET_SCAN_DEPTH}) reached at '${absDir}'`
+      );
+      return;
+    }
+    if (++totalDirectoriesVisited > MAX_SECRET_SCAN_DIRECTORIES) {
+      complete = false;
+      incompleteReasons.push(
+        `Maximum heavy directory scan count (${MAX_SECRET_SCAN_DIRECTORIES}) exceeded at '${absDir}'`
+      );
+      return;
+    }
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(absDir, { withFileTypes: true });
-    } catch {
+    } catch (err) {
+      complete = false;
+      incompleteReasons.push(
+        `Heavy directory read error at '${absDir}': ${err instanceof Error ? err.message : String(err)}`
+      );
       return;
     }
     for (const entry of entries) {
@@ -154,8 +202,11 @@ export function scanWorkspaceSecretsAndHardlinks(
               expectedExtraHardlinks += st.nlink - 1;
             }
           }
-        } catch {
-          // ignore
+        } catch (err) {
+          complete = false;
+          incompleteReasons.push(
+            `lstat error on heavy file '${absPath}': ${err instanceof Error ? err.message : String(err)}`
+          );
         }
       }
     }
@@ -168,11 +219,21 @@ export function scanWorkspaceSecretsAndHardlinks(
   if (multiLinkedInodeKeys.size > 0) {
     let foundAliases = 0;
     const sweepInodes = (absDir: string, includeVendor: boolean, depth: number = 0) => {
-      if (depth > 20) return;
+      if (depth >= MAX_SECRET_SCAN_DEPTH) {
+        complete = false;
+        incompleteReasons.push(
+          `Maximum inode sweep depth (${MAX_SECRET_SCAN_DEPTH}) reached at '${absDir}'`
+        );
+        return;
+      }
       let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(absDir, { withFileTypes: true });
-      } catch {
+      } catch (err) {
+        complete = false;
+        incompleteReasons.push(
+          `Inode sweep directory read error at '${absDir}': ${err instanceof Error ? err.message : String(err)}`
+        );
         return;
       }
       for (const entry of entries) {
@@ -199,10 +260,10 @@ export function scanWorkspaceSecretsAndHardlinks(
       }
     };
 
-    sweepInodes(realWs, false);
+    sweepInodes(realWs, false, 0);
     if (foundAliases < expectedExtraHardlinks) {
       for (const heavyDir of deferredHeavyDirs) {
-        sweepInodes(heavyDir, true);
+        sweepInodes(heavyDir, true, 0);
       }
     }
   }
@@ -211,7 +272,9 @@ export function scanWorkspaceSecretsAndHardlinks(
     realWorkspaceRoot: realWs,
     allMaskedPaths: Array.from(maskedSet).sort(),
     hardlinkAliasPaths: hardlinkAliases.sort(),
-    secretInodeKeys
+    secretInodeKeys,
+    complete,
+    incompleteReasons
   };
 }
 
@@ -825,16 +888,22 @@ export function readWorkspaceFileSafe(params: {
         `[guard: hardlink alias to secret file inode denied (read): ${relPath}]`
       );
     }
-    if (
-      st.nlink > 1 &&
-      !relPath.startsWith("node_modules/") &&
-      !relPath.startsWith(".venv/")
-    ) {
-      const inWsCount = countInodeDentriesInWorkspace(realWs, st.dev, st.ino);
-      if (inWsCount < st.nlink) {
+    if (st.nlink > 1) {
+      if (!secretScan.complete) {
         throw new PathContainmentError(
-          `[guard: external hardlink escaping workspace boundary denied (nlink=${st.nlink}, inWorkspace=${inWsCount}): ${relPath}]`
+          `[guard: incomplete secret inventory prevents verifying multi-link file alias safety (read): ${relPath} (${secretScan.incompleteReasons.join("; ")})]`
         );
+      }
+      if (
+        !relPath.startsWith("node_modules/") &&
+        !relPath.startsWith(".venv/")
+      ) {
+        const inWsCount = countInodeDentriesInWorkspace(realWs, st.dev, st.ino);
+        if (inWsCount < st.nlink) {
+          throw new PathContainmentError(
+            `[guard: external hardlink escaping workspace boundary denied (nlink=${st.nlink}, inWorkspace=${inWsCount}): ${relPath}]`
+          );
+        }
       }
     }
     if (params.maxBytes !== undefined) {

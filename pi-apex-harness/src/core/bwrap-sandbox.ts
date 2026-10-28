@@ -205,7 +205,13 @@ export function collectMaskedSecretFiles(
   workspaceRoot: string,
   unmaskedExceptions: readonly string[] = DEFAULT_UNMASKED_SECRET_EXCEPTIONS
 ): string[] {
-  return scanWorkspaceSecretsAndHardlinks(workspaceRoot, unmaskedExceptions).allMaskedPaths;
+  const scan = scanWorkspaceSecretsAndHardlinks(workspaceRoot, unmaskedExceptions);
+  if (!scan.complete) {
+    throw new SandboxUnavailableError(
+      `Cannot collect masked secret files with incomplete secret scan coverage: ${scan.incompleteReasons.join("; ")}`
+    );
+  }
+  return scan.allMaskedPaths;
 }
 
 export function buildMinimalBwrapArgv(
@@ -306,7 +312,13 @@ export function buildMinimalBwrapArgv(
   }
 
   // Mask workspace secret files & hardlink aliases recursively
-  for (const secretPath of collectMaskedSecretFiles(ws, cfg.unmaskedSecretExceptions)) {
+  const secretScan = scanWorkspaceSecretsAndHardlinks(ws, cfg.unmaskedSecretExceptions);
+  if (!secretScan.complete) {
+    throw new SandboxUnavailableError(
+      `Cannot execute bubblewrap sandbox with incomplete secret mask coverage: ${secretScan.incompleteReasons.join("; ")}`
+    );
+  }
+  for (const secretPath of secretScan.allMaskedPaths) {
     args.push("--ro-bind", "/dev/null", secretPath);
   }
 

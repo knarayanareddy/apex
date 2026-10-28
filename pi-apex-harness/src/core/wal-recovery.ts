@@ -350,6 +350,93 @@ export function resolveOutcomeUnknown(
 
 export type WalContentBlock = TextContent | ImageContent;
 
+export interface NormalizedWalResult<T = unknown> {
+  finalText: string;
+  content: WalContentBlock[];
+  details?: T;
+  isError?: boolean;
+  spilled: boolean;
+  spillFallbackUsed: boolean;
+}
+
+/**
+ * Normalizes tool results through a single shared bounded path:
+ * 1. Computes total aggregate text across all text blocks and rawText.
+ * 2. Runs scrubSecretsInfallible + spillStore.scrubAndMaybeSpill (handles disk spill and inline ENOSPC fallback).
+ * 3. When text is bounded (spilled === true || spillFallbackUsed === true):
+ *    - Replaces text blocks so that the aggregate delivered text in `content` does not exceed the inline budget,
+ *      embedding the bounded/spilled reference text in the primary text block.
+ *    - Preserves all image blocks, MIME types, and relative ordering intact.
+ * 4. When text is within inline budget:
+ *    - Scrubs secrets across all text blocks and preserves all image blocks.
+ */
+export function normalizeWalToolResult<T = unknown>(params: {
+  sessionId: string;
+  spillStore: PrivateSpillStore;
+  rawText?: string;
+  content?: WalContentBlock[];
+  details?: T;
+  isError?: boolean;
+}): NormalizedWalResult<T> {
+  const { sessionId, spillStore, details, isError } = params;
+  const rawContent = params.content;
+
+  const aggregateRawText =
+    params.rawText ??
+    (rawContent
+      ? rawContent
+          .filter((c): c is TextContent => c.type === "text" && typeof (c as any).text === "string")
+          .map((c) => c.text)
+          .join("\n")
+      : "");
+
+  const spillOut = spillStore.scrubAndMaybeSpill(sessionId, aggregateRawText);
+  const textIsBounded = spillOut.spilled || spillOut.spillFallbackUsed;
+
+  let finalContent: WalContentBlock[];
+
+  if (rawContent && rawContent.length > 0) {
+    if (textIsBounded) {
+      let primaryTextSet = false;
+      finalContent = [];
+      for (const block of rawContent) {
+        if (block.type === "image") {
+          finalContent.push(block);
+        } else if (block.type === "text") {
+          if (!primaryTextSet) {
+            primaryTextSet = true;
+            finalContent.push({ ...block, text: spillOut.text });
+          }
+          // Secondary text blocks in an oversized result are omitted to respect aggregate delivered budget
+        } else {
+          finalContent.push(block);
+        }
+      }
+      if (!primaryTextSet && spillOut.text) {
+        finalContent.unshift({ type: "text", text: spillOut.text });
+      }
+    } else {
+      finalContent = rawContent.map((block) => {
+        if (block.type === "text" && typeof (block as any).text === "string") {
+          return { ...block, text: scrubSecretsInfallible((block as any).text) };
+        }
+        return block;
+      });
+    }
+  } else {
+    finalContent = [{ type: "text", text: spillOut.text }];
+  }
+
+  return {
+    finalText: spillOut.text,
+    content: finalContent,
+    details,
+    isError,
+    spilled: spillOut.spilled,
+    spillFallbackUsed: spillOut.spillFallbackUsed
+  };
+}
+
 /**
  * Promotes an `EFFECT_COMMITTED_RAW` row to `EFFECT_COMMITTED` by running secret-scrub + spill
  * (degrading inline on ENOSPC without re-executing the effect).
@@ -358,14 +445,7 @@ function finalizeCommittedRawRow<T = unknown>(
   stateDb: StateDb,
   spillStore: PrivateSpillStore,
   row: WalIntentRow
-): {
-  finalText: string;
-  content: WalContentBlock[];
-  details?: T;
-  isError?: boolean;
-  spilled: boolean;
-  spillFallbackUsed: boolean;
-} {
+): NormalizedWalResult<T> {
   const rawReceipt = row.raw_receipt_json
     ? (JSON.parse(row.raw_receipt_json) as {
         rawText?: string;
@@ -374,42 +454,24 @@ function finalizeCommittedRawRow<T = unknown>(
         isError?: boolean;
       })
     : { rawText: "" };
-  const rawText =
-    rawReceipt.rawText ??
-    (rawReceipt.content
-      ? rawReceipt.content
-          .filter((c) => c.type === "text" && typeof (c as any).text === "string")
-          .map((c) => (c as any).text)
-          .join("\n")
-      : "");
-  const spillOut = spillStore.scrubAndMaybeSpill(row.session_id, rawText);
-  let finalContent: WalContentBlock[] | undefined = rawReceipt.content;
-  if (finalContent) {
-    finalContent = finalContent.map((b) => {
-      if (b.type === "text" && typeof (b as any).text === "string") {
-        return { ...b, text: scrubSecretsInfallible((b as any).text) };
-      }
-      return b;
-    });
-  } else {
-    finalContent = [{ type: "text", text: spillOut.text }];
-  }
-  const finalized = {
-    finalText: spillOut.text,
-    content: finalContent,
+
+  const normalized = normalizeWalToolResult<T>({
+    sessionId: row.session_id,
+    spillStore,
+    rawText: rawReceipt.rawText,
+    content: rawReceipt.content,
     details: rawReceipt.details,
-    isError: rawReceipt.isError,
-    spilled: spillOut.spilled,
-    spillFallbackUsed: spillOut.spillFallbackUsed
-  };
+    isError: rawReceipt.isError
+  });
+
   stateDb.db
     .prepare(
       `UPDATE wal_intents
        SET status = 'EFFECT_COMMITTED', result_json = ?, updated_at_ms = ?
        WHERE idempotency_key = ?`
     )
-    .run(JSON.stringify(finalized), Date.now(), row.idempotency_key);
-  return finalized;
+    .run(JSON.stringify(normalized), Date.now(), row.idempotency_key);
+  return normalized;
 }
 
 export interface ExecuteWalParams<T> {
@@ -637,19 +699,14 @@ export async function executeThroughWalSpine<T = unknown>(
     )
     .run(safeRawReceipt, Date.now(), idempotencyKey);
 
-  const spillOut = spillStore.scrubAndMaybeSpill(sessionId, rawText);
-  let finalContent: WalContentBlock[] = scrubbedContent ?? [{ type: "text", text: spillOut.text }];
-  if (spillOut.spilled && finalContent.length === 1 && finalContent[0].type === "text") {
-    finalContent = [{ ...finalContent[0], text: spillOut.text }];
-  }
-  const finalizedPayload = {
-    finalText: spillOut.text,
-    content: finalContent,
+  const normalized = normalizeWalToolResult<T>({
+    sessionId,
+    spillStore,
+    rawText,
+    content: scrubbedContent,
     details: rawEffectOut.details,
-    isError: rawEffectOut.isError,
-    spilled: spillOut.spilled,
-    spillFallbackUsed: spillOut.spillFallbackUsed
-  };
+    isError: rawEffectOut.isError
+  });
 
   // Both top-level AND nested QuickJS sub-calls stay EFFECT_COMMITTED until root JSONL append!
   stateDb.db
@@ -658,12 +715,12 @@ export async function executeThroughWalSpine<T = unknown>(
        SET status = 'EFFECT_COMMITTED', result_json = ?, updated_at_ms = ?
        WHERE idempotency_key = ?`
     )
-    .run(JSON.stringify(finalizedPayload), Date.now(), idempotencyKey);
+    .run(JSON.stringify(normalized), Date.now(), idempotencyKey);
 
   return {
     idempotencyKey,
     fromCache: false,
-    ...finalizedPayload
+    ...normalized
   };
 }
 

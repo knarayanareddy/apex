@@ -57,6 +57,8 @@ export interface ExternalPluginCommandDef {
   name: string;
   description: string;
   execute: (args: string) => Promise<string> | string;
+  readOnly?: boolean;
+  mutabilityClass?: string;
 }
 
 export interface ExternalPluginRegistrationApi {
@@ -421,6 +423,10 @@ export class ExternalPluginHost {
       if (!rec.enabled) continue;
       const cmd = rec.commands.get(pluginIdOrCmd);
       if (cmd) {
+        const isSafeRead = cmd.readOnly === true || cmd.mutabilityClass === "PURE_READ";
+        if (!isSafeRead) {
+          this.checkMutationAllowed(`invoke non-read-only plugin command '${cmd.name}'`);
+        }
         const out = await cmd.execute(rawArgs);
         return scrubSecretsInfallible(String(out));
       }
