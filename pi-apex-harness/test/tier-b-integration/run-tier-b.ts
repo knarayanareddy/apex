@@ -23,7 +23,7 @@ import {
 } from "../../src/core/git-rewind.ts";
 import { countO200kTokens } from "../../src/core/prefix-budget.ts";
 import { createRing0Harness, createSharedModelRuntime } from "../../src/core/ring0-session.ts";
-import { PrivateSpillStore } from "../../src/core/spill-store.ts";
+import { PrivateSpillStore, scrubSecretsInfallible } from "../../src/core/spill-store.ts";
 import { StateDb } from "../../src/core/state-db.ts";
 import {
   executeThroughWalSpine,
@@ -967,6 +967,9 @@ async function runTierB(): Promise<void> {
 
     const cmResultMsg = harness.session.messages.find((m) => m.role === "toolResult");
     const cmText = JSON.stringify(cmResultMsg);
+    if (!cmText.includes("RESULT_42:90")) {
+      console.error(`[TIER_B_B4_RESULT_DIAGNOSTIC] ${scrubSecretsInfallible(cmText).slice(0, 8192)}`);
+    }
     assert.ok(cmText.includes("RESULT_42:90"));
     assert.ok(cmText.includes("NESTED_ENV_DENIED"));
     assert.ok(cmText.includes("HARDLINK_DENIED"));
