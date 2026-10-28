@@ -75,7 +75,7 @@ export function parsePiApexCliArgs(
   let obsidianVaultArg: string | undefined;
   let allowUnsandboxedDev = process.env["PI_APEX_ALLOW_UNSANDBOXED"] === "1";
   let webMode = false;
-  let webHost = "0.0.0.0";
+  let webHost = "127.0.0.1";
   let webPort = 4310;
   let seedDemo = false;
   let mockFauxResponse: string | undefined = process.env["PI_APEX_MOCK_RESPONSE"];
@@ -482,6 +482,11 @@ export async function runPiApexCli(
   });
 
   if (parsed.webMode) {
+    if (parsed.webHost === "0.0.0.0") {
+      process.stderr.write(
+        "[SECURITY WARNING] Mission Control Server explicitly bound to 0.0.0.0 (all interfaces). It is accessible across the local network.\n"
+      );
+    }
     if (parsed.seedDemo) {
       seedMissionControlDemo(controller.getCurrentHarness(), parsed.cwd);
     }

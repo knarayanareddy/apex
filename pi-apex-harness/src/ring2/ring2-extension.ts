@@ -650,7 +650,7 @@ export async function createRing2Harness(
     currentDepth: opts.ring2?.subagentDepth ?? 0,
     worktreeBaseDir: opts.ring2?.worktreeBaseDir,
     childSandboxMode: opts.sandboxMode ?? "workspace-write",
-    childAllowUnsandboxedDev: opts.allowUnsandboxedDev ?? true,
+    childAllowUnsandboxedDev: opts.allowUnsandboxedDev ?? false,
     durabilityMode: opts.durabilityMode ?? "crash-safe"
   });
 

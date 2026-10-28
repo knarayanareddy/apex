@@ -25,7 +25,11 @@ import crypto from "node:crypto";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { GuardrailsConfig, SandboxMode } from "../types.ts";
-import { SandboxUnavailableError } from "../core/bwrap-sandbox.ts";
+import {
+  buildMinimalBwrapArgv,
+  probeBwrapFunctional,
+  SandboxUnavailableError
+} from "../core/bwrap-sandbox.ts";
 import {
   evaluateShellCommandGuard,
   GuardDeniedError,
@@ -125,11 +129,38 @@ export class PtyLeaseManager {
     if (this.sandboxMode === "read-only") {
       throw new GuardDeniedError("PTY_COMMAND_DENIED: PTY background process execution is denied in read-only sandbox mode.");
     }
-    if (process.platform === "darwin" && !this.allowUnsandboxedDev) {
-      throw new SandboxUnavailableError(
-        "SANDBOX_UNAVAILABLE: PTY execution failed (bubblewrap is not supported on macOS darwin). Refusing unconfined execution without explicit allowUnsandboxedDev: true."
+
+    const probe = probeBwrapFunctional();
+    let bin = "bwrap";
+    let argv: string[];
+
+    if (this.sandboxMode === "danger-full-access") {
+      bin = "/bin/bash";
+      argv = ["-c", input.command];
+    } else if (probe.ok) {
+      bin = "bwrap";
+      argv = buildMinimalBwrapArgv(input.command, this.workspaceRoot, {
+        workspaceRoot: this.workspaceRoot,
+        mode: this.sandboxMode,
+        unshareNet: this.guardrails.sandbox.unshare_network_by_default,
+        allowUnsandboxedDev: this.allowUnsandboxedDev,
+        unmaskedSecretExceptions: this.guardrails.sandbox.unmasked_exceptions
+      });
+    } else {
+      if (!this.allowUnsandboxedDev) {
+        throw new SandboxUnavailableError(
+          process.platform === "darwin"
+            ? "SANDBOX_UNAVAILABLE: PTY execution failed (bubblewrap is not supported on macOS darwin). Refusing unconfined execution without explicit allowUnsandboxedDev: true."
+            : `SANDBOX_UNAVAILABLE: PTY execution failed (bubblewrap is not functional on Linux host: ${probe.reason ?? "unknown"}). Refusing unconfined execution without explicit allowUnsandboxedDev: true.`
+        );
+      }
+      console.warn(
+        `[APEX_CONFINEMENT_WARNING] Running unconfined development PTY on ${process.platform}. Kernel namespaces disabled.`
       );
+      bin = "/bin/bash";
+      argv = ["-c", input.command];
     }
+
     const guard = evaluateShellCommandGuard({
       command: input.command,
       cfg: this.guardrails,
@@ -161,9 +192,9 @@ export class PtyLeaseManager {
       }
     }
 
-    const proc = spawn("/bin/bash", ["-c", input.command], {
+    const proc = spawn(bin, argv, {
       cwd: this.workspaceRoot,
-      env: buildSanitizedPtyEnv(),
+      env: bin === "/bin/bash" ? buildSanitizedPtyEnv() : {},
       detached: true,
       stdio: ["pipe", "pipe", "pipe"]
     });
@@ -622,16 +653,39 @@ export class UnattendedCronScheduler {
       });
     }
 
-    if (process.platform === "darwin" && !this.allowUnsandboxedDev) {
-      return this.persistRunReceipt({
-        runId,
-        jobId: job.jobId,
-        executedAtMs: nowMs,
-        status: "BLOCKED_DENY_UNATTENDED",
-        exitCode: 126,
-        output: "DENY_UNATTENDED (CONFINEMENT_UNAVAILABLE): bubblewrap is not supported on macOS darwin without allowUnsandboxedDev: true",
-        blockedRuleId: "CONFINEMENT_UNAVAILABLE"
+    const probe = probeBwrapFunctional();
+    let bin = "bwrap";
+    let argv: string[];
+
+    if (this.sandboxMode === "danger-full-access") {
+      bin = "/bin/bash";
+      argv = ["-c", job.command];
+    } else if (probe.ok) {
+      bin = "bwrap";
+      argv = buildMinimalBwrapArgv(job.command, this.workspaceRoot, {
+        workspaceRoot: this.workspaceRoot,
+        mode: this.sandboxMode,
+        unshareNet: this.guardrails.sandbox.unshare_network_by_default,
+        allowUnsandboxedDev: this.allowUnsandboxedDev,
+        unmaskedSecretExceptions: this.guardrails.sandbox.unmasked_exceptions
       });
+    } else {
+      if (!this.allowUnsandboxedDev) {
+        return this.persistRunReceipt({
+          runId,
+          jobId: job.jobId,
+          executedAtMs: nowMs,
+          status: "BLOCKED_DENY_UNATTENDED",
+          exitCode: 126,
+          output: `DENY_UNATTENDED (CONFINEMENT_UNAVAILABLE): bubblewrap confinement is unavailable on ${process.platform} (${probe.reason ?? "unknown"}). Refusing unconfined execution without explicit allowUnsandboxedDev: true`,
+          blockedRuleId: "CONFINEMENT_UNAVAILABLE"
+        });
+      }
+      console.warn(
+        `[APEX_CONFINEMENT_WARNING] Running unconfined development cron on ${process.platform}. Kernel namespaces disabled.`
+      );
+      bin = "/bin/bash";
+      argv = ["-c", job.command];
     }
 
     // 1. Check declared target paths via Ring 0 `resolveAndValidateWorkspacePath` (blocks `.env`, `.git`, outside-ws)
@@ -675,12 +729,12 @@ export class UnattendedCronScheduler {
       });
     }
 
-    // 3. Execute safe unattended command in sanitized env
-    const res = spawnSync("/bin/bash", ["-c", job.command], {
+    // 3. Execute safe unattended command
+    const res = spawnSync(bin, argv, {
       cwd: this.workspaceRoot,
       encoding: "utf8",
       timeout: 30_000,
-      env: buildSanitizedPtyEnv()
+      env: bin === "/bin/bash" ? buildSanitizedPtyEnv() : {}
     });
     const exitCode = res.status ?? 1;
     const output = `${res.stdout ?? ""}\n${res.stderr ?? ""}`.trim();

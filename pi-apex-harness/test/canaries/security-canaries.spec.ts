@@ -39,16 +39,22 @@ import { PrivateSpillStore } from "../../src/core/spill-store.ts";
 import { StateDb } from "../../src/core/state-db.ts";
 import {
   assertNoUnresolvedOutcomeUnknown,
+  canonicalizeArgs,
   computeBytesSha256,
   computeFileContentSha256,
+  computeIdempotencyKey,
   executeThroughWalSpine,
   markWalCallTreeTranscriptAppended,
-  OutcomeUnknownLockError
+  OutcomeUnknownLockError,
+  resolveOutcomeUnknown
 } from "../../src/core/wal-recovery.ts";
 import { BugBotAndCiEngine } from "../../src/ring2/bugbot-ci-loop.ts";
 import { PtyLeaseManager } from "../../src/ring2/pty-cron-routines.ts";
 import { createRing4Runtime } from "../../src/ring4/ring4-runtime.ts";
 import { MissionControlServer } from "../../src/ring5/mission-control-server.ts";
+import { AutonomousPrPipeline } from "../../src/ring7/autonomous-pr-pipeline.ts";
+import { ExternalPluginHost } from "../../src/ring9/external-plugin-host.ts";
+import { parsePiApexCliArgs } from "../../src/cli/pi-apex-cli.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
@@ -232,6 +238,34 @@ async function main(): Promise<void> {
         "Disallowed origin must not receive Access-Control-Allow-Origin header"
       );
 
+      // 1A (vi) Negative Denial Canary: Cookie-authenticated mutation from cross-port Origin -> 403 CSRF_ORIGIN_MISMATCH
+      const crossPortPost = await runHttpRequest({
+        url: `${baseUrl}/api/plan/toggle`,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `apex_session=${canaryToken}`,
+          Origin: "http://127.0.0.1:9999"
+        },
+        body: JSON.stringify({ enabled: false })
+      });
+      assert.equal(crossPortPost.status, 403, "Cross-port origin cookie mutation must return 403");
+      assert.ok(crossPortPost.body.includes("CSRF_ORIGIN_MISMATCH"));
+
+      // 1A (vii) Negative Denial Canary: Cookie-authenticated mutation from untrusted domain Origin -> 403 CSRF_ORIGIN_MISMATCH
+      const untrustedOriginPost = await runHttpRequest({
+        url: `${baseUrl}/api/plan/toggle`,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `apex_session=${canaryToken}`,
+          Origin: "http://attacker-controlled.site"
+        },
+        body: JSON.stringify({ enabled: false })
+      });
+      assert.equal(untrustedOriginPost.status, 403, "Untrusted origin cookie mutation must return 403");
+      assert.ok(untrustedOriginPost.body.includes("CSRF_ORIGIN_MISMATCH"));
+
       // 1B (i) Positive Permitted Control: Authenticated POST with Bearer token -> 200
       const authPost = await runHttpRequest({
         url: `${baseUrl}/api/plan/toggle`,
@@ -301,8 +335,43 @@ async function main(): Promise<void> {
       assert.equal(cookieSse.status, 200, "Cookie-authenticated SSE stream must return 200");
       assert.ok(cookieSse.connectedFrame.includes("connected"), "SSE stream must yield connected frame");
 
-      checks.push("Boundary 1: Cockpit Token/Cookie Auth + Rebinding 403 + SSE Cookie Gate: PASS");
-      console.log("  [PASS] Boundary 1 verified (5 negative denials + 4 positive controls).");
+      // 1B (v) Positive Permitted Control: Cookie-authenticated mutation with exact same-port Origin -> 200
+      const exactOriginPost = await runHttpRequest({
+        url: `${baseUrl}/api/plan/toggle`,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `apex_session=${canaryToken}`,
+          Origin: `http://127.0.0.1:${info.port}`
+        },
+        body: JSON.stringify({ enabled: false })
+      });
+      assert.equal(exactOriginPost.status, 200, "Exact same-port origin cookie mutation must return 200");
+      const exactOriginJson = JSON.parse(exactOriginPost.body);
+      assert.equal(exactOriginJson.planModeActive, false);
+
+      // 1B (vi) Positive Permitted Control: Origin-less Bearer token mutation -> 200
+      const originlessBearerPost = await runHttpRequest({
+        url: `${baseUrl}/api/plan/toggle`,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${canaryToken}`
+        },
+        body: JSON.stringify({ enabled: true })
+      });
+      assert.equal(originlessBearerPost.status, 200, "Origin-less Bearer token mutation must return 200");
+      const originlessJson = JSON.parse(originlessBearerPost.body);
+      assert.equal(originlessJson.planModeActive, true);
+
+      // CLI Binding Default Tests (P1-1)
+      const cliDefaults = parsePiApexCliArgs(["--web"], ws);
+      assert.equal(cliDefaults.webHost, "127.0.0.1", "CLI --web must default webHost to 127.0.0.1");
+      const cliExplicit = parsePiApexCliArgs(["--web", "--host", "0.0.0.0"], ws);
+      assert.equal(cliExplicit.webHost, "0.0.0.0", "Explicit --host 0.0.0.0 must be preserved");
+
+      checks.push("Boundary 1: Cockpit Auth + Exact Origin CSRF Gate + CLI 127.0.0.1 Default: PASS");
+      console.log("  [PASS] Boundary 1 verified (7 negative denials + 6 positive controls + CLI binding).");
     } finally {
       await server.stop();
       await controller.dispose();
@@ -368,6 +437,14 @@ async function main(): Promise<void> {
           toolName: "bash",
           mutabilityClass: "OPAQUE_EXTERNAL",
           args: { command: "echo 'blocked'" },
+          preflightAdmission: () => {
+            const probe = probeBwrapFunctional();
+            if (!probe.ok) {
+              throw new SandboxUnavailableError(
+                `SANDBOX_UNAVAILABLE: bubblewrap confinement failed (${probe.reason ?? "unknown"}). Refusing unconfined execution without explicit allowUnsandboxedDev: true.`
+              );
+            }
+          },
           executeEffect: async () => {
             await strictBashOps.exec("echo 'blocked'", ws, { onData: () => {} });
             return { rawText: "blocked" };
@@ -400,6 +477,61 @@ async function main(): Promise<void> {
         executeEffect: async () => ({ rawText: "read-succeeded-ok" })
       });
       assert.equal(b2ReadRes.finalText, "read-succeeded-ok");
+
+      // 2A (iii) Post-dispatch execution failure in OPAQUE_EXTERNAL: classified as OUTCOME_UNKNOWN despite error text (P0-2)
+      let fakePreSpawnThrew = false;
+      const markerPath = path.join(ws, "side-effect-marker.txt");
+      try {
+        await executeThroughWalSpine({
+          stateDb: b2StateDb,
+          spillStore: b2SpillStore,
+          sessionId: "session-canary-b2",
+          leafId: "leaf-b2-0",
+          toolCallId: "call_b2_post_dispatch_fail",
+          toolName: "bash",
+          mutabilityClass: "OPAQUE_EXTERNAL",
+          args: { command: "echo 'side-effect'" },
+          executeEffect: async () => {
+            fs.writeFileSync(markerPath, "side-effect-marker");
+            throw new Error("SANDBOX_UNAVAILABLE: fake refusal thrown post-dispatch");
+          }
+        });
+      } catch (err) {
+        fakePreSpawnThrew = true;
+        assert.ok((err as Error).message.includes("fake refusal thrown"));
+      }
+      assert.equal(fakePreSpawnThrew, true);
+
+      const fakeRows = b2StateDb.db
+        .prepare("SELECT status, error_text FROM wal_intents WHERE tool_call_id = 'call_b2_post_dispatch_fail'")
+        .all() as Array<{ status: string; error_text: string }>;
+      assert.equal(fakeRows.length, 1);
+      assert.equal(fakeRows[0].status, "OUTCOME_UNKNOWN", "Dispatched error on OPAQUE_EXTERNAL must be OUTCOME_UNKNOWN");
+
+      // Verify session is now locked fail-closed by OUTCOME_UNKNOWN
+      let lockEnforced = false;
+      try {
+        assertNoUnresolvedOutcomeUnknown(b2StateDb, "session-canary-b2");
+      } catch (err) {
+        lockEnforced = true;
+        assert.ok(err instanceof OutcomeUnknownLockError);
+      }
+      assert.equal(lockEnforced, true, "Session must be locked fail-closed by OUTCOME_UNKNOWN");
+
+      // Operator resolves the lock with abort resolution
+      resolveOutcomeUnknown(
+        b2StateDb,
+        computeIdempotencyKey({
+          sessionId: "session-canary-b2",
+          leafId: "leaf-b2-0",
+          toolCallId: "call_b2_post_dispatch_fail",
+          toolName: "bash",
+          canonicalArgs: canonicalizeArgs({ command: "echo 'side-effect'" })
+        }),
+        "abort",
+        "Operator audited side-effect and aborted"
+      );
+      assertNoUnresolvedOutcomeUnknown(b2StateDb, "session-canary-b2");
       b2StateDb.close();
 
       // 2B. Positive Permitted Control: On Darwin with allowUnsandboxedDev: true -> executes with visible warning
@@ -602,6 +734,62 @@ async function main(): Promise<void> {
       assert.ok((err as Error).message.includes("write access denied in read-only sandbox mode"));
     }
     assert.equal(pathResolveBlocked, true, "resolveAndValidateWorkspacePath must deny write access in read-only mode");
+
+    // 4A (iii) PR Pipeline fails closed with GuardDeniedError in read-only mode (P0-1)
+    const b4StateDb = new StateDb(path.join(ws, ".harness", "b4-state.db"), "crash-safe");
+    const prPipelineReadOnly = new AutonomousPrPipeline({
+      workspaceRoot: ws,
+      db: b4StateDb.db,
+      sandboxMode: "read-only"
+    });
+    assert.equal(prPipelineReadOnly.getSandboxMode(), "read-only");
+    let prPipelineBlocked = false;
+    try {
+      await prPipelineReadOnly.run({
+        slug: "canary-ro-pr",
+        title: "Canary Read-Only PR",
+        baseBranch: "main",
+        filePatches: [{ relPath: "ro-patch.txt", content: "forbidden-patch" }]
+      });
+    } catch (err) {
+      prPipelineBlocked = true;
+      assert.ok(err instanceof GuardDeniedError, `Expected GuardDeniedError, got: ${String(err)}`);
+      assert.ok((err as Error).message.includes("read-only sandbox mode"));
+    }
+    assert.equal(prPipelineBlocked, true, "AutonomousPrPipeline must fail closed in read-only sandbox mode");
+    assert.equal(fs.existsSync(path.join(ws, "ro-patch.txt")), false, "PR patch file must not be written in read-only mode");
+
+    // 4A (iv) External Plugin Host fails closed with GuardDeniedError on mutations in read-only mode (P0-1)
+    const pluginHostReadOnly = new ExternalPluginHost({
+      workspaceRoot: ws,
+      db: b4StateDb.db,
+      sandboxMode: "read-only"
+    });
+    assert.equal(pluginHostReadOnly.getSandboxMode(), "read-only");
+    let pluginInstallBlocked = false;
+    try {
+      await pluginHostReadOnly.installAndLoadPlugin({
+        sourceType: "npm",
+        locator: "sample-plugin@1.0.0"
+      });
+    } catch (err) {
+      pluginInstallBlocked = true;
+      assert.ok(err instanceof GuardDeniedError, `Expected GuardDeniedError, got: ${String(err)}`);
+      assert.ok((err as Error).message.includes("read-only sandbox mode"));
+    }
+    assert.equal(pluginInstallBlocked, true, "Plugin install must fail closed in read-only mode");
+
+    let pluginRemoveBlocked = false;
+    try {
+      await pluginHostReadOnly.removePlugin("sample-plugin");
+    } catch (err) {
+      pluginRemoveBlocked = true;
+      assert.ok(err instanceof GuardDeniedError, `Expected GuardDeniedError, got: ${String(err)}`);
+      assert.ok((err as Error).message.includes("read-only sandbox mode"));
+    }
+    assert.equal(pluginRemoveBlocked, true, "Plugin remove must fail closed in read-only mode");
+
+    b4StateDb.close();
 
     // 4B. Positive Permitted Control: File operations in workspace-write mode succeed
     const permittedOps = createConfinedFileOperations({

@@ -123,11 +123,20 @@ export function buildBootPinnedPrefix(params: {
     tools: ReadonlyArray<{ name: string; description?: string; parameters?: unknown }>
   ): string =>
     JSON.stringify(
-      tools.map((t) => ({
-        name: t.name,
-        description: t.description ?? "",
-        parameters: t.parameters ?? null
-      }))
+      tools.map((t) => {
+        let desc = t.description ?? "";
+        if (t.name === "codemode") {
+          desc = desc.replace(
+            /Read \S+?\/docs\/codemode\.md first\./,
+            "Read /home/user/pi-apex-harness/node_modules/@earendil-works/pi-coding-agent/docs/codemode.md first."
+          );
+        }
+        return {
+          name: t.name,
+          description: desc,
+          parameters: t.parameters ?? null
+        };
+      })
     );
 
   return {

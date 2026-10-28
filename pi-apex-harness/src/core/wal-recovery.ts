@@ -31,33 +31,6 @@ export class PreDispatchAbortedError extends Error {
   }
 }
 
-export function isPreDispatchDenialError(err: unknown): boolean {
-  if (err instanceof PreDispatchAbortedError) return true;
-  if (!err || typeof err !== "object") return false;
-  const name = (err as { name?: string }).name;
-  if (
-    name === "PreDispatchAbortedError" ||
-    name === "SandboxUnavailableError" ||
-    name === "GuardDeniedError" ||
-    name === "PathContainmentError"
-  ) {
-    return true;
-  }
-  const msg = (err as { message?: string }).message ?? "";
-  if (
-    msg.includes("SANDBOX_UNAVAILABLE") ||
-    msg.includes("GUARD_DENIED") ||
-    msg.includes("GuardDeniedError") ||
-    msg.includes("PATH_GUARD") ||
-    msg.includes("CI_COMMAND_DENIED") ||
-    msg.includes("PTY_COMMAND_DENIED") ||
-    msg.includes("PRESET_TOOL_RESTRICTED")
-  ) {
-    return true;
-  }
-  return false;
-}
-
 export class TranscriptNotSyncedError extends Error {
   constructor(message: string) {
     super(message);
@@ -413,6 +386,11 @@ export interface ExecuteWalParams<T> {
   toolName: string;
   mutabilityClass: MutabilityClass;
   args: unknown;
+  /**
+   * Framework preflight admission check executed BEFORE effect dispatch.
+   * If this throws, operation is guaranteed pre-dispatch and recorded as ABORTED_CLEAN.
+   */
+  preflightAdmission?: () => void | Promise<void>;
   /** Required when mutabilityClass === 'LOCAL_REVERSIBLE' */
   localReversibleSpec?: {
     targetPath: string;
@@ -525,6 +503,18 @@ export async function executeThroughWalSpine<T = unknown>(
       now
     );
 
+  if (params.preflightAdmission) {
+    try {
+      await params.preflightAdmission();
+    } catch (preflightErr) {
+      const errMsg = preflightErr instanceof Error ? preflightErr.message : String(preflightErr);
+      stateDb.db
+        .prepare(`UPDATE wal_intents SET status = 'ABORTED_CLEAN', error_text = ?, updated_at_ms = ? WHERE idempotency_key = ?`)
+        .run(errMsg, Date.now(), idempotencyKey);
+      throw preflightErr;
+    }
+  }
+
   stateDb.db
     .prepare(`UPDATE wal_intents SET status = 'EXECUTING', updated_at_ms = ? WHERE idempotency_key = ?`)
     .run(Date.now(), idempotencyKey);
@@ -534,7 +524,7 @@ export async function executeThroughWalSpine<T = unknown>(
     rawEffectOut = await params.executeEffect();
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    if (isPreDispatchDenialError(err) || mutabilityClass === "PURE_READ") {
+    if (mutabilityClass === "PURE_READ") {
       stateDb.db
         .prepare(`UPDATE wal_intents SET status = 'ABORTED_CLEAN', error_text = ?, updated_at_ms = ? WHERE idempotency_key = ?`)
         .run(errMsg, Date.now(), idempotencyKey);

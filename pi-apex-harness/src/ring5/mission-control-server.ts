@@ -222,6 +222,52 @@ export class MissionControlServer {
     }
   }
 
+  private _isCookieAuthenticated(req: http.IncomingMessage): boolean {
+    // If valid Bearer token is present, request is Bearer-authenticated (immune to ambient CSRF)
+    const authHeader = req.headers["authorization"];
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const candidate = authHeader.slice("Bearer ".length).trim();
+      if (candidate && timingSafeEqualStr(candidate, this.authToken)) {
+        return false;
+      }
+    }
+    const cookieHeader = req.headers["cookie"];
+    if (cookieHeader) {
+      const cookies = parseCookies(cookieHeader);
+      const sessionVal = cookies["apex_session"];
+      if (sessionVal && timingSafeEqualStr(sessionVal, this.authToken)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private _isExactTrustedOrigin(originHeader?: string): boolean {
+    if (!originHeader) return false;
+    try {
+      const u = new URL(originHeader);
+      const port = u.port ? parseInt(u.port, 10) : (u.protocol === "https:" ? 443 : 80);
+      const boundPort = this.boundPort;
+      // Must match server bound port (cross-port origins are untrusted for CSRF)
+      if (boundPort && port !== boundPort) {
+        return false;
+      }
+      const hostname = u.hostname.toLowerCase();
+      if (
+        hostname === "127.0.0.1" ||
+        hostname === "localhost" ||
+        hostname === this.host.toLowerCase() ||
+        this.allowedHosts.has(hostname) ||
+        hostname.endsWith(".e2b.app")
+      ) {
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   private _validateAuth(req: http.IncomingMessage): boolean {
     if (!this.requireAuth) return true;
 
@@ -462,6 +508,27 @@ export class MissionControlServer {
             req
           );
           return;
+        }
+
+        // Exact-Origin Protection: reject untrusted, cross-port, or missing Origin for cookie-authenticated mutations (Reviewer P1-2)
+        const isMutatingMethod =
+          req.method === "POST" ||
+          req.method === "PUT" ||
+          req.method === "DELETE" ||
+          req.method === "PATCH";
+
+        if (isMutatingMethod && this._isCookieAuthenticated(req)) {
+          const rawOrigin = req.headers["origin"];
+          const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
+          if (!this._isExactTrustedOrigin(origin)) {
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: "CSRF_ORIGIN_MISMATCH: untrusted, cross-port, or missing Origin for cookie-authenticated mutation"
+              })
+            );
+            return;
+          }
         }
 
         // 2. Live SSE event stream
@@ -1340,6 +1407,15 @@ export class MissionControlServer {
             return;
           }
           if (req.method === "POST") {
+            if (h.prPipeline.getSandboxMode() === "read-only") {
+              this._sendJson(
+                res,
+                403,
+                { error: "READ_ONLY_SANDBOX: PR pipeline execution is denied in read-only sandbox mode." },
+                req
+              );
+              return;
+            }
             const body = await readJsonBody(req);
             const title = String(body["title"] ?? "").trim();
             const githubIssueRef =
@@ -1845,6 +1921,17 @@ export class MissionControlServer {
               const report = host.auditPluginDirectory(String(body["sourceDir"] ?? ""));
               this._sendJson(res, 200, report);
               return;
+            }
+            if (action === "install" || action === "enable" || action === "disable" || action === "remove") {
+              if (host.getSandboxMode() === "read-only") {
+                this._sendJson(
+                  res,
+                  403,
+                  { error: "READ_ONLY_SANDBOX: Plugin modifications are denied in read-only sandbox mode." },
+                  req
+                );
+                return;
+              }
             }
             if (action === "install") {
               const summary = await host.installAndLoadPlugin(String(body["sourceDir"] ?? ""), {

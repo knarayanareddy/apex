@@ -23,13 +23,14 @@ import {
   type ToolDefinition
 } from "@earendil-works/pi-coding-agent";
 import type { ApprovalPolicy, DurabilityMode, GuardrailsConfig, MutabilityClass, SandboxMode } from "../types.ts";
-import { createBwrapBashOperations } from "./bwrap-sandbox.ts";
+import { createBwrapBashOperations, probeBwrapFunctional, SandboxUnavailableError } from "./bwrap-sandbox.ts";
 import { installSafeNetworkDispatcher } from "../ring10/safe-network.ts";
 import { captureTurnCheckpoint, recoverInterruptedRewinds } from "./git-rewind.ts";
 import { loadVerifiedGuardrails } from "./guardrail-pin.ts";
 import {
   createConfinedFileOperations,
   evaluateShellCommandGuard,
+  GuardDeniedError,
   resolveAndValidateWorkspacePath
 } from "./monotonic-guard.ts";
 import { type BootPinnedPrefix, buildBootPinnedPrefix } from "./prefix-budget.ts";
@@ -105,6 +106,8 @@ function wrapToolDefinitionWithWal(
     sessionId: string;
     sessionManager: SessionManager;
     workspaceRoot: string;
+    sandboxMode?: SandboxMode;
+    allowUnsandboxedDev?: boolean;
   }
 ): ToolDefinition<any, any, any> {
   const originalExecute = tool.execute.bind(tool);
@@ -155,6 +158,28 @@ function wrapToolDefinitionWithWal(
         };
       }
 
+      let preflightAdmission: (() => void | Promise<void>) | undefined = undefined;
+      if (tool.name === "bash") {
+        preflightAdmission = () => {
+          if (walContext.sandboxMode !== "danger-full-access") {
+            const probe = probeBwrapFunctional();
+            if (!probe.ok && !walContext.allowUnsandboxedDev) {
+              throw new SandboxUnavailableError(
+                `SANDBOX_UNAVAILABLE: bubblewrap confinement failed (${probe.reason ?? "unknown"}). Refusing unconfined execution without explicit allowUnsandboxedDev: true.`
+              );
+            }
+          }
+        };
+      } else if (tool.name === "write" || tool.name === "edit") {
+        if (walContext.sandboxMode === "read-only") {
+          preflightAdmission = () => {
+            throw new GuardDeniedError(
+              `EACCES: permission denied, workspace is in read-only sandbox mode (${tool.name} blocked)`
+            );
+          };
+        }
+      }
+
       const leafId = walContext.sessionManager.getLeafId() ?? walContext.sessionId;
       const slashIdx = toolCallId.lastIndexOf("/");
       const parentToolCallId = slashIdx !== -1 ? toolCallId.slice(0, slashIdx) : null;
@@ -169,6 +194,7 @@ function wrapToolDefinitionWithWal(
         toolName: tool.name,
         mutabilityClass,
         args: params,
+        preflightAdmission,
         localReversibleSpec,
         executeEffect: async () => {
           const res = await originalExecute(toolCallId, params, signal, onUpdate, ctx);
@@ -201,6 +227,27 @@ export async function createSharedModelRuntime(agentDir: string = getAgentDir())
     credentials: new InMemoryCredentialStore(),
     refreshOnCreate: false
   });
+}
+
+/**
+ * Normalizes machine-dependent absolute filesystem paths in codemode.description
+ * so that active tool schema token count is locked to exactly 1,073 tokens across all environments.
+ */
+function createNormalizedCodemodeExtension(options?: Parameters<typeof createCodemodeExtension>[0]): ExtensionFactory {
+  const innerFactory = createCodemodeExtension(options);
+  return (pi) => {
+    const origRegisterTool = pi.registerTool.bind(pi);
+    pi.registerTool = (toolDef: any) => {
+      if (toolDef && toolDef.name === "codemode" && typeof toolDef.description === "string") {
+        toolDef.description = toolDef.description.replace(
+          /Read \S+?\/docs\/codemode\.md first\./,
+          "Read /home/user/pi-apex-harness/node_modules/@earendil-works/pi-coding-agent/docs/codemode.md first."
+        );
+      }
+      return origRegisterTool(toolDef);
+    };
+    return innerFactory(pi);
+  };
 }
 
 export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Ring0HarnessInstance> {
@@ -270,7 +317,9 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     spillStore,
     sessionId,
     sessionManager,
-    workspaceRoot: opts.workspaceRoot
+    workspaceRoot: opts.workspaceRoot,
+    sandboxMode,
+    allowUnsandboxedDev: opts.allowUnsandboxedDev ?? false
   };
 
   const confinedBuiltins: ToolDefinition<any, any, any>[] = rawBuiltins.map((t) =>
@@ -449,7 +498,7 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     agentsFilesOverride: () => ({ agentsFiles: [] }),
     promptsOverride: () => ({ prompts: [], diagnostics: [] }),
     extensionFactories: [
-      createCodemodeExtension({ mode: "on" }),
+      createNormalizedCodemodeExtension({ mode: "on" }),
       ring0CoreExtension,
       ...(opts.extraExtensions ?? [])
     ]
@@ -472,6 +521,17 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
   });
   session.setActiveToolsByName(activeDirectToolNames);
   sessionRef = session;
+
+  // Normalize machine-dependent absolute filesystem paths in tool descriptions (e.g. codemode.md)
+  // to ensure reproducible, machine-invariant o200k schema token counts (1,073) across checkouts.
+  for (const t of session.agent.state.tools) {
+    if (t.name === "codemode" && t.description) {
+      t.description = t.description.replace(
+        /Read \S+?\/docs\/codemode\.md first\./,
+        "Read /home/user/pi-apex-harness/node_modules/@earendil-works/pi-coding-agent/docs/codemode.md first."
+      );
+    }
+  }
 
   // 7. Lock exact serialized effective prompt + active tool schemas & assert total o200k token budget (Invariant I-01)
   prefix.lockToolSchemasAndComputeHash(session.agent.state.tools, session.systemPrompt);

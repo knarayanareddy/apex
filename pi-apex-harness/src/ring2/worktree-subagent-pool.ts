@@ -453,7 +453,7 @@ export class WorktreeSubagentPool {
     this.model = opts.model;
     this.currentDepth = opts.currentDepth ?? 0;
     this.childSandboxMode = opts.childSandboxMode ?? "workspace-write";
-    this.childAllowUnsandboxedDev = opts.childAllowUnsandboxedDev ?? true;
+    this.childAllowUnsandboxedDev = opts.childAllowUnsandboxedDev ?? false;
     this.durabilityMode = opts.durabilityMode ?? "crash-safe";
     this.worktreeBaseDir =
       opts.worktreeBaseDir ??

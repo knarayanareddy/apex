@@ -22,7 +22,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { GuardDeniedError } from "../core/monotonic-guard.ts";
 import { scrubSecretsInfallible } from "../core/spill-store.ts";
+import type { SandboxMode } from "../types.ts";
 import { scanSkillBundle, type SkillVerdict } from "../ring3/skills-guard-quarantine.ts";
 import type { GatewayPlatformAdapter, OmniChannelGateway } from "./messaging-gateway.ts";
 
@@ -129,22 +131,29 @@ export class ExternalPluginHost {
   private readonly workspaceRoot: string;
   private readonly pluginsStoreDir: string;
   private readonly getGateway?: () => OmniChannelGateway;
+  private readonly sandboxMode: SandboxMode;
   private readonly plugins = new Map<string, LoadedPluginRecord>();
 
   private hashPluginDirectory(dir:string):string {
     const files=collectPluginSourceFiles(dir);const hash=crypto.createHash("sha256");
-    for(const name of Object.keys(files).sort())hash.update(name).update("\\0").update(files[name]!).update("\\0");
+    for(const name of Object.keys(files).sort())hash.update(name).update("\0").update(files[name]!).update("\0");
     return hash.digest("hex");
   }
 
   constructor(opts: {
     workspaceRoot: string;
     getGateway?: () => OmniChannelGateway;
+    sandboxMode?: SandboxMode;
   }) {
     this.workspaceRoot = path.resolve(opts.workspaceRoot);
     this.pluginsStoreDir = path.join(this.workspaceRoot, ".harness", "plugins");
     this.getGateway = opts.getGateway;
+    this.sandboxMode = opts.sandboxMode ?? "workspace-write";
     fs.mkdirSync(this.pluginsStoreDir, { recursive: true, mode: 0o700 });
+  }
+
+  public getSandboxMode(): SandboxMode {
+    return this.sandboxMode;
   }
 
   /**
@@ -229,6 +238,11 @@ export class ExternalPluginHost {
     sourceDir: string,
     opts?: { allowCaution?: boolean }
   ): Promise<InstalledPluginSummary> {
+    if (this.sandboxMode === "read-only") {
+      throw new GuardDeniedError(
+        "ExternalPluginHost: cannot install or modify plugins in read-only sandbox mode"
+      );
+    }
     const audit = this.auditPluginDirectory(sourceDir);
     if (!audit.allowed || (audit.scanVerdict === "caution" && opts?.allowCaution !== true)) {
       throw new Error(
@@ -337,6 +351,11 @@ export class ExternalPluginHost {
   }
 
   public removePlugin(pluginId:string):{id:string;removed:boolean}{
+    if (this.sandboxMode === "read-only") {
+      throw new GuardDeniedError(
+        "ExternalPluginHost: cannot remove plugins in read-only sandbox mode"
+      );
+    }
     if(!VALID_PLUGIN_ID_RE.test(pluginId))throw new Error("PLUGIN_INVALID_ID");
     const rec=this.plugins.get(pluginId);if(rec){for(const p of rec.gatewayPlatforms)this.getGateway?.().unregisterAdapter(p);this.plugins.delete(pluginId);}
     const dir=path.join(this.pluginsStoreDir,pluginId);

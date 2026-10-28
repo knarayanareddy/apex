@@ -374,7 +374,8 @@ export async function createRing4Harness(
 
   pluginHostRef = new ExternalPluginHost({
     workspaceRoot: resolvedWs,
-    getGateway: () => gatewayRef!
+    getGateway: () => gatewayRef!,
+    sandboxMode: opts.sandboxMode ?? "workspace-write"
   });
 
   onboardingVaultRef = new OnboardingVault({
@@ -403,6 +404,7 @@ export async function createRing4Harness(
     subagentPool: ring3.subagentPool,
     bugBotCi: ring3.bugBotCi,
     durabilityMode: opts.durabilityMode ?? "crash-safe",
+    sandboxMode: opts.sandboxMode ?? "workspace-write",
     modelRuntime: ring3.modelRuntime,
     getActiveModel: () => ring3.session.model,
     issueBridge: issueBridgeRef,

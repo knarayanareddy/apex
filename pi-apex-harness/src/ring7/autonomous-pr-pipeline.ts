@@ -29,6 +29,7 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { Api, Message, Model } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { GuardDeniedError } from "../core/monotonic-guard.ts";
 import { isSecretBasename, readWorkspaceFileSafe } from "../core/safe-path.ts";
 import { scrubSecretsInfallible } from "../core/spill-store.ts";
 import { writeFileDurable } from "../core/wal-recovery.ts";
@@ -37,7 +38,7 @@ import type { TrustArtifactController } from "../ring2/plan-trust-artifacts.ts";
 import type { SubagentRole, WorktreeSubagentPool } from "../ring2/worktree-subagent-pool.ts";
 import type { GitHubIssueBridge } from "../ring8/github-issue-bridge.ts";
 import type { SelfLearningLedger } from "../ring9/self-learning-ledger.ts";
-import type { DurabilityMode } from "../types.ts";
+import type { DurabilityMode, SandboxMode } from "../types.ts";
 
 export interface PrFilePatchSpec {
   relPath: string;
@@ -190,6 +191,7 @@ export class AutonomousPrPipeline {
   private readonly subagentPool: WorktreeSubagentPool;
   private readonly bugBotCi: BugBotAndCiEngine;
   private readonly durabilityMode: DurabilityMode;
+  private readonly sandboxMode: SandboxMode;
   private readonly modelRuntime?: ModelRuntime;
   private readonly getActiveModel?: () => Model<Api> | undefined;
   private readonly issueBridge?: GitHubIssueBridge;
@@ -204,6 +206,7 @@ export class AutonomousPrPipeline {
     subagentPool: WorktreeSubagentPool;
     bugBotCi: BugBotAndCiEngine;
     durabilityMode?: DurabilityMode;
+    sandboxMode?: SandboxMode;
     modelRuntime?: ModelRuntime;
     getActiveModel?: () => Model<Api> | undefined;
     issueBridge?: GitHubIssueBridge;
@@ -216,6 +219,7 @@ export class AutonomousPrPipeline {
     this.subagentPool = opts.subagentPool;
     this.bugBotCi = opts.bugBotCi;
     this.durabilityMode = opts.durabilityMode ?? "crash-safe";
+    this.sandboxMode = opts.sandboxMode ?? "workspace-write";
     this.modelRuntime = opts.modelRuntime;
     this.getActiveModel = opts.getActiveModel;
     this.issueBridge = opts.issueBridge;
@@ -559,7 +563,22 @@ export class AutonomousPrPipeline {
     }));
   }
 
+  public getSandboxMode(): SandboxMode {
+    return this.sandboxMode;
+  }
+
   public async run(spec: AutonomousPrRunSpec): Promise<AutonomousPrReceipt> {
+    if (this.sandboxMode === "read-only") {
+      throw new GuardDeniedError(
+        "AutonomousPrPipeline: cannot run mutating PR pipeline in read-only sandbox mode"
+      );
+    }
+    if (this.trustArtifacts?.isPlanModeActive()) {
+      throw new GuardDeniedError(
+        "AutonomousPrPipeline: cannot run mutating PR pipeline while Plan Mode is active"
+      );
+    }
+
     // Stage 0 (Ring 8): Quarantine-scan untrusted GitHub Issue BEFORE creating any branch
     let ingestedIssueMeta:
       | { repo: string; number: number; scanVerdict: string; sanitized: boolean }
