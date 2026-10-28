@@ -522,53 +522,180 @@ export interface ExecuteWalResult<T> {
   spillFallbackUsed: boolean;
 }
 
+export interface EnsureNormalizedCommittedResultParams<T = unknown> {
+  receipt: unknown;
+  spillStore: PrivateSpillStore;
+  sessionId: string;
+}
+
+export interface EnsureNormalizedCommittedResultOutcome<T = unknown> {
+  result: NormalizedWalResult<T>;
+  changed: boolean;
+}
+
 /**
- * Checks whether a cached receipt from `result_json` is already compliant with the current
- * normalization budget and delivery policy. Returns false if the receipt is un-normalized,
- * from a pre-upgrade schema, or retains oversized structured content text.
+ * Validates whether a cached receipt from `result_json` satisfies the active delivery policy:
+ * 1. Inline delivery: aggregate UTF-8 bytes <= maxInlineBytes AND lines <= maxInlineLines,
+ *    and neither spilled nor spillFallbackUsed.
+ * 2. Formatted spill notice: exactly one text block delivering a genuine spill notice
+ *    (prefixed with '[OUTPUT SPILLED TO DISK:' and containing '--- HEAD ---' / '--- TAIL ---'),
+ *    whose UTF-8 bytes do not exceed the provable notice limit (previewBytes * 4 + 1024),
+ *    matching finalText, with secondary text blocks omitted.
+ * 3. Formatted fallback notice: exactly one text block delivering a genuine inline truncation notice
+ *    (prefixed with '[OUTPUT TRUNCATED INLINE (' and containing '--- HEAD ---' / '--- TAIL ---'),
+ *    whose UTF-8 bytes do not exceed the provable notice limit, matching finalText.
  */
-function isCachedResultNormalized(
+export function isReceiptDeliveryCompliant(
   cached: any,
   spillStore: PrivateSpillStore
 ): boolean {
   if (!cached || typeof cached !== "object") return false;
 
-  // Check if content is present and is an array
+  const maxNoticeBytes = Math.max(spillStore.previewBytes * 4 + 1024, 8192);
+
+  // Must have structured content array to be compliant with modern delivery policy
   if (!Array.isArray(cached.content)) {
-    // Legacy receipt without content array: if text exceeds budget, it's NOT normalized
-    const text = typeof cached.finalText === "string" ? cached.finalText : (typeof cached.rawText === "string" ? cached.rawText : "");
-    const byteLen = Buffer.byteLength(text, "utf8");
-    const lineCount = text.split("\n").length;
-    if (byteLen > spillStore.maxInlineBytes || lineCount > spillStore.maxInlineLines) {
-      return false;
-    }
-    return true;
+    return false;
   }
 
-  // Content array is present: inspect all text blocks
-  const textBlocks = cached.content.filter((b: any) => b.type === "text" && typeof b.text === "string");
-  const aggregateContentText = textBlocks.map((b: any) => b.text).join("\n");
-  const byteLen = Buffer.byteLength(aggregateContentText, "utf8");
-  const lineCount = aggregateContentText.split("\n").length;
+  const textBlocks = cached.content.filter(
+    (b: any) => b && b.type === "text" && typeof b.text === "string"
+  );
+  const aggregateText = textBlocks.map((b: any) => b.text).join("\n");
+  const aggregateBytes = Buffer.byteLength(aggregateText, "utf8");
+  const aggregateLines = aggregateText.split("\n").length;
 
-  if (cached.spilled === true || cached.spillFallbackUsed === true) {
-    // If marked spilled/fallback, check if content was actually bounded to the spill notice
-    if (textBlocks.length > 0 && typeof cached.finalText === "string") {
-      // Content must match finalText notice, not retain the original un-spilled text
-      if (textBlocks[0].text === cached.finalText && textBlocks.length === 1) {
+  // Case 1: Unspilled inline text
+  if (!cached.spilled && !cached.spillFallbackUsed) {
+    if (aggregateBytes <= spillStore.maxInlineBytes && aggregateLines <= spillStore.maxInlineLines) {
+      if (typeof cached.finalText === "string" && Buffer.byteLength(cached.finalText, "utf8") <= spillStore.maxInlineBytes) {
         return true;
       }
     }
-    // If content has multiple text blocks or doesn't match finalText, it wasn't properly normalized
     return false;
   }
 
-  // Not marked spilled: aggregate text must strictly be within inline budget
-  if (byteLen > spillStore.maxInlineBytes || lineCount > spillStore.maxInlineLines) {
-    return false;
+  // Case 2 & 3: Spilled or fallback notice
+  if (cached.spilled === true || cached.spillFallbackUsed === true) {
+    // Must have exactly one primary text block delivering the notice
+    if (textBlocks.length !== 1) return false;
+    const noticeText = textBlocks[0].text;
+
+    if (typeof cached.finalText !== "string" || noticeText !== cached.finalText) {
+      return false;
+    }
+
+    const noticeBytes = Buffer.byteLength(noticeText, "utf8");
+    if (noticeBytes > maxNoticeBytes) {
+      return false;
+    }
+
+    if (cached.spilled === true) {
+      if (
+        !noticeText.startsWith("[OUTPUT SPILLED TO DISK:") ||
+        !noticeText.includes("--- HEAD ---") ||
+        !noticeText.includes("--- TAIL ---")
+      ) {
+        return false;
+      }
+    } else {
+      if (
+        !noticeText.startsWith("[OUTPUT TRUNCATED INLINE (") ||
+        !noticeText.includes("--- HEAD ---") ||
+        !noticeText.includes("--- TAIL ---")
+      ) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
-  return true;
+  return false;
+}
+
+/**
+ * Single shared validation and normalization path for cached committed tool results.
+ * Used identically by direct cache replay in `executeThroughWalSpine()` and startup reconciliation in `reconcileWalOnStartup()`.
+ */
+export function ensureNormalizedCommittedResult<T = unknown>(
+  params: EnsureNormalizedCommittedResultParams<T>
+): EnsureNormalizedCommittedResultOutcome<T> {
+  const { receipt, spillStore, sessionId } = params;
+
+  let cached: any;
+  if (typeof receipt === "string") {
+    try {
+      cached = JSON.parse(receipt);
+    } catch {
+      cached = {};
+    }
+  } else if (receipt && typeof receipt === "object") {
+    cached = receipt;
+  } else {
+    cached = {};
+  }
+
+  // If already compliant with delivery policy, return unchanged
+  if (isReceiptDeliveryCompliant(cached, spillStore)) {
+    return {
+      result: {
+        finalText: cached.finalText ?? "",
+        content: cached.content ?? [{ type: "text", text: cached.finalText ?? "" }],
+        details: cached.details as T,
+        isError: cached.isError,
+        spilled: Boolean(cached.spilled),
+        spillFallbackUsed: Boolean(cached.spillFallbackUsed)
+      },
+      changed: false
+    };
+  }
+
+  // Noncompliant, legacy, or crafted receipt: normalize through canonical routine
+  let normalized: NormalizedWalResult<T>;
+  try {
+    const rawText =
+      typeof cached.finalText === "string"
+        ? cached.finalText
+        : typeof cached.rawText === "string"
+          ? cached.rawText
+          : undefined;
+    const content = Array.isArray(cached.content) ? (cached.content as WalContentBlock[]) : undefined;
+
+    normalized = normalizeWalToolResult<T>({
+      sessionId,
+      spillStore,
+      rawText,
+      content,
+      details: cached.details as T,
+      isError: cached.isError
+    });
+
+    if (!isReceiptDeliveryCompliant(normalized, spillStore)) {
+      throw new Error("Normalized output failed delivery compliance check");
+    }
+  } catch {
+    const fallbackNotice = [
+      `[OUTPUT TRUNCATED INLINE (spill unavailable: NORMALIZATION_FAILED; total 0 bytes, 1 lines)]`,
+      `--- HEAD ---`,
+      ``,
+      `--- TAIL ---`,
+      ``
+    ].join("\n");
+    normalized = {
+      finalText: fallbackNotice,
+      content: [{ type: "text", text: fallbackNotice }],
+      details: cached?.details as T,
+      isError: true,
+      spilled: false,
+      spillFallbackUsed: true
+    };
+  }
+
+  return {
+    result: normalized,
+    changed: true
+  };
 }
 
 /**
@@ -625,68 +752,17 @@ export async function executeThroughWalSpine<T = unknown>(
         return { idempotencyKey, fromCache: true, ...finalized };
       }
 
-      let cached: any = {};
-      try {
-        cached = JSON.parse(existing.result_json ?? "{}");
-      } catch {
-        cached = {};
-      }
-
-      if (isCachedResultNormalized(cached, spillStore)) {
-        return {
-          idempotencyKey,
-          fromCache: true,
-          finalText: cached.finalText ?? "",
-          content: cached.content ?? [{ type: "text", text: cached.finalText ?? "" }],
-          details: cached.details as T,
-          isError: cached.isError,
-          spilled: Boolean(cached.spilled),
-          spillFallbackUsed: Boolean(cached.spillFallbackUsed)
-        };
-      }
-
-      const cachedRawText =
-        typeof cached.finalText === "string"
-          ? cached.finalText
-          : typeof cached.rawText === "string"
-            ? cached.rawText
-            : undefined;
-      const cachedContent = Array.isArray(cached.content) ? (cached.content as WalContentBlock[]) : undefined;
-
-      let normalized: NormalizedWalResult<T>;
-      try {
-        normalized = normalizeWalToolResult<T>({
-          sessionId: existing.session_id,
-          spillStore,
-          rawText: cachedRawText,
-          content: cachedContent,
-          details: cached.details as T,
-          isError: cached.isError
-        });
-      } catch {
-        const fallbackMsg = "[tool output normalization failed on cached replay]";
-        normalized = {
-          finalText: fallbackMsg,
-          content: [{ type: "text", text: fallbackMsg }],
-          details: cached.details as T,
-          isError: true,
-          spilled: false,
-          spillFallbackUsed: true
-        };
-      }
-
-      // If normalized representation changed, update result_json transactionally
-      const updatedResultJson = JSON.stringify({
-        finalText: normalized.finalText,
-        content: normalized.content,
-        details: normalized.details,
-        isError: normalized.isError,
-        spilled: normalized.spilled,
-        spillFallbackUsed: normalized.spillFallbackUsed,
-        normalizedVersion: 2
+      const { result, changed } = ensureNormalizedCommittedResult<T>({
+        receipt: existing.result_json,
+        spillStore,
+        sessionId: existing.session_id
       });
 
-      if (updatedResultJson !== existing.result_json) {
+      if (changed) {
+        const updatedResultJson = JSON.stringify({
+          ...result,
+          normalizedVersion: 2
+        });
         stateDb.db
           .prepare(
             `UPDATE wal_intents
@@ -699,12 +775,12 @@ export async function executeThroughWalSpine<T = unknown>(
       return {
         idempotencyKey,
         fromCache: true,
-        finalText: normalized.finalText,
-        content: normalized.content,
-        details: normalized.details,
-        isError: normalized.isError,
-        spilled: normalized.spilled,
-        spillFallbackUsed: normalized.spillFallbackUsed
+        finalText: result.finalText,
+        content: result.content,
+        details: result.details,
+        isError: result.isError,
+        spilled: result.spilled,
+        spillFallbackUsed: result.spillFallbackUsed
       };
     }
 
@@ -1074,25 +1150,16 @@ export function reconcileWalOnStartup(
 
       if (committedRow.status === "EFFECT_COMMITTED" && committedRow.result_json) {
         try {
-          const parsed = JSON.parse(committedRow.result_json);
-          const normalized = normalizeWalToolResult({
-            sessionId: committedRow.session_id,
+          const { result, changed } = ensureNormalizedCommittedResult({
+            receipt: committedRow.result_json,
             spillStore,
-            rawText: parsed.finalText ?? parsed.rawText,
-            content: parsed.content,
-            details: parsed.details,
-            isError: parsed.isError
+            sessionId: committedRow.session_id
           });
-          const updatedJson = JSON.stringify({
-            finalText: normalized.finalText,
-            content: normalized.content,
-            details: normalized.details,
-            isError: normalized.isError,
-            spilled: normalized.spilled,
-            spillFallbackUsed: normalized.spillFallbackUsed,
-            normalizedVersion: 2
-          });
-          if (updatedJson !== committedRow.result_json) {
+          if (changed) {
+            const updatedJson = JSON.stringify({
+              ...result,
+              normalizedVersion: 2
+            });
             stateDb.db
               .prepare(`UPDATE wal_intents SET result_json = ?, updated_at_ms = ? WHERE idempotency_key = ?`)
               .run(updatedJson, now, committedRow.idempotency_key);
