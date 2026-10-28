@@ -26,6 +26,7 @@ import type { ImageContent, Model } from "@earendil-works/pi-ai";
 import type { ExecutionMode } from "../ring11/execution-mode-controller.ts";
 import { rewindChatAndDiskToLeaf } from "../core/git-rewind.ts";
 import { COMPILED_GUARDRAILS_SHA256, loadVerifiedGuardrails } from "../core/guardrail-pin.ts";
+import { GuardDeniedError } from "../core/monotonic-guard.ts";
 import { countO200kTokens } from "../core/prefix-budget.ts";
 import { isSecretBasename } from "../core/safe-path.ts";
 import { scrubSecretsInfallible } from "../core/spill-store.ts";
@@ -209,19 +210,6 @@ export class MissionControlServer {
     return false;
   }
 
-  private _isAllowedOrigin(originHeader?: string): boolean {
-    if (!originHeader) return false;
-    try {
-      const u = new URL(originHeader);
-      const hostname = u.hostname.toLowerCase();
-      if (this.allowedHosts.has(hostname)) return true;
-      if (hostname.endsWith(".e2b.app")) return true;
-      return false;
-    } catch {
-      return false;
-    }
-  }
-
   private _isCookieAuthenticated(req: http.IncomingMessage): boolean {
     // If valid Bearer token is present, request is Bearer-authenticated (immune to ambient CSRF)
     const authHeader = req.headers["authorization"];
@@ -246,9 +234,10 @@ export class MissionControlServer {
     if (!originHeader) return false;
     try {
       const u = new URL(originHeader);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return false;
       const port = u.port ? parseInt(u.port, 10) : (u.protocol === "https:" ? 443 : 80);
       const boundPort = this.boundPort;
-      // Must match server bound port (cross-port origins are untrusted for CSRF)
+      // Must match server bound port (cross-port origins are untrusted for CSRF/SSE)
       if (boundPort && port !== boundPort) {
         return false;
       }
@@ -256,9 +245,9 @@ export class MissionControlServer {
       if (
         hostname === "127.0.0.1" ||
         hostname === "localhost" ||
+        hostname === "::1" ||
         hostname === this.host.toLowerCase() ||
-        this.allowedHosts.has(hostname) ||
-        hostname.endsWith(".e2b.app")
+        this.allowedHosts.has(hostname)
       ) {
         return true;
       }
@@ -329,11 +318,15 @@ export class MissionControlServer {
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff"
     };
-    if (req?.headers.origin && this._isAllowedOrigin(req.headers.origin)) {
-      headers["Access-Control-Allow-Origin"] = req.headers.origin;
-      headers["Access-Control-Allow-Credentials"] = "true";
-      headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
-      headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
+    if (req?.headers.origin) {
+      const rawOrigin = req.headers.origin;
+      const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
+      if (origin && this._isExactTrustedOrigin(origin)) {
+        headers["Access-Control-Allow-Origin"] = origin;
+        headers["Access-Control-Allow-Credentials"] = "true";
+        headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
+        headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
+      }
     }
     res.writeHead(status, headers);
     res.end(safePayload);
@@ -453,13 +446,14 @@ export class MissionControlServer {
         }
 
         if (req.method === "OPTIONS") {
-          const origin = req.headers.origin;
+          const rawOrigin = req.headers.origin;
+          const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
           const headers: Record<string, string> = {
             "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type, Authorization",
             "Access-Control-Allow-Credentials": "true"
           };
-          if (origin && this._isAllowedOrigin(origin)) {
+          if (origin && this._isExactTrustedOrigin(origin)) {
             headers["Access-Control-Allow-Origin"] = origin;
           }
           res.writeHead(204, headers);
@@ -533,13 +527,49 @@ export class MissionControlServer {
 
         // 2. Live SSE event stream
         if (req.method === "GET" && pathname === "/api/events") {
+          const rawOrigin = req.headers.origin;
+          const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
+
+          // Reject cross-port or untrusted origins before sending headers or adding client!
+          if (origin && !this._isExactTrustedOrigin(origin)) {
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: "CSRF_ORIGIN_MISMATCH: cross-port or untrusted Origin disallowed for event stream"
+              })
+            );
+            return;
+          }
+
+          // If Origin is absent, check Referer if present (e.g. browser EventSource)
+          const rawReferer = req.headers.referer;
+          const referer = Array.isArray(rawReferer) ? rawReferer[0] : rawReferer;
+          if (!origin && referer) {
+            try {
+              const refUrl = new URL(referer);
+              if (!this._isExactTrustedOrigin(refUrl.origin)) {
+                res.writeHead(403, { "Content-Type": "application/json" });
+                res.end(
+                  JSON.stringify({
+                    error: "CSRF_ORIGIN_MISMATCH: cross-port or untrusted Referer disallowed for event stream"
+                  })
+                );
+                return;
+              }
+            } catch {
+              res.writeHead(403, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Invalid Referer header" }));
+              return;
+            }
+          }
+
           const sseHeaders: Record<string, string> = {
             "Content-Type": "text/event-stream; charset=utf-8",
             "Cache-Control": "no-cache, no-transform",
             Connection: "keep-alive"
           };
-          if (req.headers.origin && this._isAllowedOrigin(req.headers.origin)) {
-            sseHeaders["Access-Control-Allow-Origin"] = req.headers.origin;
+          if (origin && this._isExactTrustedOrigin(origin)) {
+            sseHeaders["Access-Control-Allow-Origin"] = origin;
             sseHeaders["Access-Control-Allow-Credentials"] = "true";
           }
           res.writeHead(200, sseHeaders);
@@ -1922,7 +1952,7 @@ export class MissionControlServer {
               this._sendJson(res, 200, report);
               return;
             }
-            if (action === "install" || action === "enable" || action === "disable" || action === "remove") {
+            if (action === "install" || action === "enable" || action === "remove") {
               if (host.getSandboxMode() === "read-only") {
                 this._sendJson(
                   res,
@@ -1932,42 +1962,60 @@ export class MissionControlServer {
                 );
                 return;
               }
+              if (h.trustArtifacts.isPlanModeActive()) {
+                this._sendJson(
+                  res,
+                  403,
+                  { error: "PLAN_MODE_LOCKED: Plugin modifications are denied while Plan Mode is active." },
+                  req
+                );
+                return;
+              }
             }
-            if (action === "install") {
-              const summary = await host.installAndLoadPlugin(String(body["sourceDir"] ?? ""), {
-                allowCaution: Boolean(body["allowCaution"])
-              });
-              this.broadcastSse({ type: "cockpit_refresh", reason: "plugin_installed" });
-              this._sendJson(res, 200, summary);
-              return;
-            }
-            if (action === "disable") {
-              const summary = host.disablePlugin(String(body["pluginId"] ?? ""));
-              this.broadcastSse({ type: "cockpit_refresh", reason: "plugin_disabled" });
-              this._sendJson(res, 200, summary);
-              return;
-            }
-            if (action === "enable") {
-              const summary = await host.enablePlugin(String(body["pluginId"] ?? ""));
-              this.broadcastSse({ type: "cockpit_refresh", reason: "plugin_enabled" });
-              this._sendJson(res, 200, summary);
-              return;
-            }
-            if (action === "remove") {
-              const result=host.removePlugin(String(body["pluginId"]??""));
-              this.broadcastSse({type:"cockpit_refresh",reason:"plugin_removed",pluginId:result.id});
-              this._sendJson(res,200,result);return;
-            }
-            if (action === "call_tool") {
-              const out = await host.invokePluginTool(
-                String(body["pluginId"] ?? ""),
-                String(body["toolName"] ?? ""),
-                typeof body["args"] === "object" && body["args"] !== null
-                  ? (body["args"] as Record<string, unknown>)
-                  : {}
-              );
-              this._sendJson(res, 200, out);
-              return;
+            try {
+              if (action === "install") {
+                const summary = await host.installAndLoadPlugin(String(body["sourceDir"] ?? ""), {
+                  allowCaution: Boolean(body["allowCaution"])
+                });
+                this.broadcastSse({ type: "cockpit_refresh", reason: "plugin_installed" });
+                this._sendJson(res, 200, summary);
+                return;
+              }
+              if (action === "disable") {
+                const summary = host.disablePlugin(String(body["pluginId"] ?? ""));
+                this.broadcastSse({ type: "cockpit_refresh", reason: "plugin_disabled" });
+                this._sendJson(res, 200, summary);
+                return;
+              }
+              if (action === "enable") {
+                const summary = await host.enablePlugin(String(body["pluginId"] ?? ""));
+                this.broadcastSse({ type: "cockpit_refresh", reason: "plugin_enabled" });
+                this._sendJson(res, 200, summary);
+                return;
+              }
+              if (action === "remove") {
+                const result = host.removePlugin(String(body["pluginId"] ?? ""));
+                this.broadcastSse({ type: "cockpit_refresh", reason: "plugin_removed", pluginId: result.id });
+                this._sendJson(res, 200, result);
+                return;
+              }
+              if (action === "call_tool") {
+                const out = await host.invokePluginTool(
+                  String(body["pluginId"] ?? ""),
+                  String(body["toolName"] ?? ""),
+                  typeof body["args"] === "object" && body["args"] !== null
+                    ? (body["args"] as Record<string, unknown>)
+                    : {}
+                );
+                this._sendJson(res, 200, out);
+                return;
+              }
+            } catch (err) {
+              if (err instanceof GuardDeniedError) {
+                this._sendJson(res, 403, { error: err.message }, req);
+                return;
+              }
+              throw err;
             }
             throw new Error(`Unsupported /api/plugins action: '${action}'`);
           }

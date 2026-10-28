@@ -126,11 +126,24 @@ export function scanWorkspaceSecretsAndHardlinks(
 
   walkPass1(realWs, "");
 
-  for (const heavyDir of deferredHeavyDirs) {
+  const walkHeavyDir = (absDir: string, depth: number = 0) => {
+    if (depth > 20) return;
+    let entries: fs.Dirent[];
     try {
-      for (const entry of fs.readdirSync(heavyDir, { withFileTypes: true })) {
-        if (entry.isFile() && isSecretBasename(entry.name, unmaskedExceptions)) {
-          const absPath = path.join(heavyDir, entry.name);
+      entries = fs.readdirSync(absDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const absPath = path.join(absDir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === ".git" || entry.name === ".harness") continue;
+        walkHeavyDir(absPath, depth + 1);
+        continue;
+      }
+      if (entry.isFile() && isSecretBasename(entry.name, unmaskedExceptions)) {
+        try {
           const st = fs.lstatSync(absPath);
           if (st.isFile()) {
             const key = `${st.dev}:${st.ino}`;
@@ -141,16 +154,21 @@ export function scanWorkspaceSecretsAndHardlinks(
               expectedExtraHardlinks += st.nlink - 1;
             }
           }
+        } catch {
+          // ignore
         }
       }
-    } catch {
-      // ignore
     }
+  };
+
+  for (const heavyDir of deferredHeavyDirs) {
+    walkHeavyDir(heavyDir, 0);
   }
 
   if (multiLinkedInodeKeys.size > 0) {
     let foundAliases = 0;
-    const sweepInodes = (absDir: string, includeVendor: boolean) => {
+    const sweepInodes = (absDir: string, includeVendor: boolean, depth: number = 0) => {
+      if (depth > 20) return;
       let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(absDir, { withFileTypes: true });
@@ -163,7 +181,7 @@ export function scanWorkspaceSecretsAndHardlinks(
         if (entry.isDirectory()) {
           if (entry.name === ".git" || entry.name === ".harness") continue;
           if (!includeVendor && (entry.name === "node_modules" || entry.name === ".venv")) continue;
-          sweepInodes(absPath, includeVendor);
+          sweepInodes(absPath, includeVendor, depth + 1);
           continue;
         }
         if (entry.isFile() && !maskedSet.has(absPath)) {

@@ -30,6 +30,7 @@ import {
   SessionManager
 } from "@earendil-works/pi-coding-agent";
 import type { Ring0HarnessOptions } from "../core/ring0-session.ts";
+import { GuardDeniedError } from "../core/monotonic-guard.ts";
 import type { Ring1Options } from "../ring1/ring1-extension.ts";
 import type { Ring2Options } from "../ring2/ring2-extension.ts";
 import {
@@ -375,7 +376,18 @@ export async function createRing4Harness(
   pluginHostRef = new ExternalPluginHost({
     workspaceRoot: resolvedWs,
     getGateway: () => gatewayRef!,
-    sandboxMode: opts.sandboxMode ?? "workspace-write"
+    sandboxMode: opts.sandboxMode ?? "workspace-write",
+    isPlanModeActive: () => ring3.trustArtifacts.isPlanModeActive(),
+    mutationAdmission: {
+      assertAllowed: (action: string) => {
+        if ((opts.sandboxMode ?? "workspace-write") === "read-only") {
+          throw new GuardDeniedError(`ExternalPluginHost: cannot ${action} in read-only sandbox mode`);
+        }
+        if (ring3.trustArtifacts.isPlanModeActive()) {
+          throw new GuardDeniedError(`ExternalPluginHost: cannot ${action} while Plan Mode is active`);
+        }
+      }
+    }
   });
 
   onboardingVaultRef = new OnboardingVault({

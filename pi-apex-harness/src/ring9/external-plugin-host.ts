@@ -49,6 +49,8 @@ export interface ExternalPluginToolDef {
   name: string;
   description: string;
   execute: (args: Record<string, unknown>) => Promise<unknown> | unknown;
+  readOnly?: boolean;
+  mutabilityClass?: string;
 }
 
 export interface ExternalPluginCommandDef {
@@ -127,11 +129,25 @@ function collectPluginSourceFiles(pluginDir: string): Record<string, string> {
   return files;
 }
 
+export interface PluginMutationAdmission {
+  assertAllowed(action: string): void;
+}
+
+export interface ExternalPluginHostOptions {
+  workspaceRoot: string;
+  getGateway?: () => OmniChannelGateway;
+  sandboxMode?: SandboxMode;
+  mutationAdmission?: PluginMutationAdmission | ((action: string) => void);
+  isPlanModeActive?: () => boolean;
+}
+
 export class ExternalPluginHost {
   private readonly workspaceRoot: string;
   private readonly pluginsStoreDir: string;
   private readonly getGateway?: () => OmniChannelGateway;
   private readonly sandboxMode: SandboxMode;
+  private readonly isPlanModeActive?: () => boolean;
+  private readonly mutationAdmission?: PluginMutationAdmission | ((action: string) => void);
   private readonly plugins = new Map<string, LoadedPluginRecord>();
 
   private hashPluginDirectory(dir:string):string {
@@ -140,20 +156,36 @@ export class ExternalPluginHost {
     return hash.digest("hex");
   }
 
-  constructor(opts: {
-    workspaceRoot: string;
-    getGateway?: () => OmniChannelGateway;
-    sandboxMode?: SandboxMode;
-  }) {
+  constructor(opts: ExternalPluginHostOptions) {
     this.workspaceRoot = path.resolve(opts.workspaceRoot);
     this.pluginsStoreDir = path.join(this.workspaceRoot, ".harness", "plugins");
     this.getGateway = opts.getGateway;
     this.sandboxMode = opts.sandboxMode ?? "workspace-write";
+    this.isPlanModeActive = opts.isPlanModeActive;
+    this.mutationAdmission = opts.mutationAdmission;
     fs.mkdirSync(this.pluginsStoreDir, { recursive: true, mode: 0o700 });
   }
 
   public getSandboxMode(): SandboxMode {
     return this.sandboxMode;
+  }
+
+  private checkMutationAllowed(action: string): void {
+    if (this.sandboxMode === "read-only") {
+      throw new GuardDeniedError(
+        `ExternalPluginHost: cannot ${action} in read-only sandbox mode`
+      );
+    }
+    if (this.isPlanModeActive?.()) {
+      throw new GuardDeniedError(
+        `ExternalPluginHost: cannot ${action} while Plan Mode is active`
+      );
+    }
+    if (typeof this.mutationAdmission === "function") {
+      this.mutationAdmission(action);
+    } else if (this.mutationAdmission && typeof this.mutationAdmission.assertAllowed === "function") {
+      this.mutationAdmission.assertAllowed(action);
+    }
   }
 
   /**
@@ -238,11 +270,7 @@ export class ExternalPluginHost {
     sourceDir: string,
     opts?: { allowCaution?: boolean }
   ): Promise<InstalledPluginSummary> {
-    if (this.sandboxMode === "read-only") {
-      throw new GuardDeniedError(
-        "ExternalPluginHost: cannot install or modify plugins in read-only sandbox mode"
-      );
-    }
+    this.checkMutationAllowed("install or modify plugins");
     const audit = this.auditPluginDirectory(sourceDir);
     if (!audit.allowed || (audit.scanVerdict === "caution" && opts?.allowCaution !== true)) {
       throw new Error(
@@ -342,6 +370,7 @@ export class ExternalPluginHost {
   }
 
   public async enablePlugin(pluginId: string): Promise<InstalledPluginSummary> {
+    this.checkMutationAllowed("enable or activate plugins");
     const rec = this.plugins.get(pluginId);
     if(!VALID_PLUGIN_ID_RE.test(pluginId))throw new Error("PLUGIN_INVALID_ID");
     if (rec) { const installedDir=rec.installedPath;for(const p of rec.gatewayPlatforms)this.getGateway?.().unregisterAdapter(p);this.plugins.delete(pluginId);return await this.installAndLoadPlugin(installedDir); }
@@ -351,11 +380,7 @@ export class ExternalPluginHost {
   }
 
   public removePlugin(pluginId:string):{id:string;removed:boolean}{
-    if (this.sandboxMode === "read-only") {
-      throw new GuardDeniedError(
-        "ExternalPluginHost: cannot remove plugins in read-only sandbox mode"
-      );
-    }
+    this.checkMutationAllowed("remove plugins");
     if(!VALID_PLUGIN_ID_RE.test(pluginId))throw new Error("PLUGIN_INVALID_ID");
     const rec=this.plugins.get(pluginId);if(rec){for(const p of rec.gatewayPlatforms)this.getGateway?.().unregisterAdapter(p);this.plugins.delete(pluginId);}
     const dir=path.join(this.pluginsStoreDir,pluginId);
@@ -374,6 +399,10 @@ export class ExternalPluginHost {
     const tool = rec.tools.get(toolName);
     if (!tool) {
       throw new Error(`PLUGIN_TOOL_NOT_FOUND: '${toolName}' on plugin '${pluginId}'.`);
+    }
+    const isSafeRead = tool.readOnly === true || tool.mutabilityClass === "PURE_READ";
+    if (!isSafeRead) {
+      this.checkMutationAllowed(`invoke non-read-only tool '${toolName}'`);
     }
     const raw = await tool.execute(args);
     const scrubbed =

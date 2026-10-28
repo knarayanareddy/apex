@@ -34,7 +34,11 @@ import {
   resolveAndValidateWorkspacePath
 } from "../../src/core/monotonic-guard.ts";
 import { createRing0Harness } from "../../src/core/ring0-session.ts";
-import { PathContainmentError } from "../../src/core/safe-path.ts";
+import {
+  PathContainmentError,
+  readWorkspaceFileSafe,
+  scanWorkspaceSecretsAndHardlinks
+} from "../../src/core/safe-path.ts";
 import { PrivateSpillStore } from "../../src/core/spill-store.ts";
 import { StateDb } from "../../src/core/state-db.ts";
 import {
@@ -265,6 +269,23 @@ async function main(): Promise<void> {
       });
       assert.equal(untrustedOriginPost.status, 403, "Untrusted origin cookie mutation must return 403");
       assert.ok(untrustedOriginPost.body.includes("CSRF_ORIGIN_MISMATCH"));
+
+      // 1A (viii) Negative Denial Canary: Cookie-authenticated SSE /api/events with cross-port Origin -> 403 CSRF_ORIGIN_MISMATCH
+      const crossPortSse = await runHttpRequest({
+        url: `${baseUrl}/api/events`,
+        method: "GET",
+        headers: {
+          Cookie: `apex_session=${canaryToken}`,
+          Origin: "http://127.0.0.1:9999"
+        }
+      });
+      assert.equal(crossPortSse.status, 403, "Cross-port origin cookie SSE must return 403");
+      assert.ok(crossPortSse.body.includes("CSRF_ORIGIN_MISMATCH"));
+      assert.notEqual(
+        crossPortSse.headers["access-control-allow-origin"],
+        "http://127.0.0.1:9999",
+        "Untrusted cross-port origin must not receive CORS allow header"
+      );
 
       // 1B (i) Positive Permitted Control: Authenticated POST with Bearer token -> 200
       const authPost = await runHttpRequest({
@@ -693,7 +714,7 @@ async function main(): Promise<void> {
   // ===========================================================================
   {
     console.log("\n[Boundary 4] Testing Read-Only Mode Mutation & Tool Interception Gates...");
-    const { ws, surfaces } = createTmpWorkspace("b4-readonly");
+    const { ws, surfaces, agentDir } = createTmpWorkspace("b4-readonly");
     const { config: guardrails } = loadVerifiedGuardrails();
 
     // 4A (i) Negative Denial Canary: File operations mutation boundary throws in read-only mode
@@ -735,17 +756,43 @@ async function main(): Promise<void> {
     }
     assert.equal(pathResolveBlocked, true, "resolveAndValidateWorkspacePath must deny write access in read-only mode");
 
-    // 4A (iii) PR Pipeline fails closed with GuardDeniedError in read-only mode (P0-1)
-    const b4StateDb = new StateDb(path.join(ws, ".harness", "b4-state.db"), "crash-safe");
-    const prPipelineReadOnly = new AutonomousPrPipeline({
+    // 4A (iii) PR Pipeline & External Plugin Host fail closed in read-only mode (P0-1)
+    const pluginFixtureDir = path.join(ws, "fixture-plugin");
+    fs.mkdirSync(pluginFixtureDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginFixtureDir, "apex-plugin.json"),
+      JSON.stringify({
+        id: "sample-plugin",
+        name: "Sample Plugin",
+        version: "1.0.0",
+        description: "Canary fixture plugin",
+        entry: "index.js",
+        capabilities: {
+          allowNetwork: false,
+          allowChildProcess: false,
+          allowEnvRead: false
+        }
+      })
+    );
+    fs.writeFileSync(
+      path.join(pluginFixtureDir, "index.js"),
+      "export default function activate(api) {}\n"
+    );
+
+    const r4ReadOnly = await createRing4Runtime({
       workspaceRoot: ws,
-      db: b4StateDb.db,
-      sandboxMode: "read-only"
+      surfacesDir: surfaces,
+      agentDir,
+      sandboxMode: "read-only",
+      allowUnsandboxedDev: true
     });
-    assert.equal(prPipelineReadOnly.getSandboxMode(), "read-only");
+    const hReadOnly = r4ReadOnly.getCurrentHarness();
+    assert.equal(hReadOnly.prPipeline.getSandboxMode(), "read-only");
+    assert.equal(hReadOnly.pluginHost.getSandboxMode(), "read-only");
+
     let prPipelineBlocked = false;
     try {
-      await prPipelineReadOnly.run({
+      await hReadOnly.prPipeline.run({
         slug: "canary-ro-pr",
         title: "Canary Read-Only PR",
         baseBranch: "main",
@@ -759,19 +806,9 @@ async function main(): Promise<void> {
     assert.equal(prPipelineBlocked, true, "AutonomousPrPipeline must fail closed in read-only sandbox mode");
     assert.equal(fs.existsSync(path.join(ws, "ro-patch.txt")), false, "PR patch file must not be written in read-only mode");
 
-    // 4A (iv) External Plugin Host fails closed with GuardDeniedError on mutations in read-only mode (P0-1)
-    const pluginHostReadOnly = new ExternalPluginHost({
-      workspaceRoot: ws,
-      db: b4StateDb.db,
-      sandboxMode: "read-only"
-    });
-    assert.equal(pluginHostReadOnly.getSandboxMode(), "read-only");
     let pluginInstallBlocked = false;
     try {
-      await pluginHostReadOnly.installAndLoadPlugin({
-        sourceType: "npm",
-        locator: "sample-plugin@1.0.0"
-      });
+      await hReadOnly.pluginHost.installAndLoadPlugin(pluginFixtureDir);
     } catch (err) {
       pluginInstallBlocked = true;
       assert.ok(err instanceof GuardDeniedError, `Expected GuardDeniedError, got: ${String(err)}`);
@@ -781,7 +818,7 @@ async function main(): Promise<void> {
 
     let pluginRemoveBlocked = false;
     try {
-      await pluginHostReadOnly.removePlugin("sample-plugin");
+      hReadOnly.pluginHost.removePlugin("sample-plugin");
     } catch (err) {
       pluginRemoveBlocked = true;
       assert.ok(err instanceof GuardDeniedError, `Expected GuardDeniedError, got: ${String(err)}`);
@@ -789,7 +826,130 @@ async function main(): Promise<void> {
     }
     assert.equal(pluginRemoveBlocked, true, "Plugin remove must fail closed in read-only mode");
 
-    b4StateDb.close();
+    await r4ReadOnly.dispose();
+
+    // 4A (iv) Negative Denial Canary: Plan Mode blocks PR pipeline and plugin mutations in workspace-write mode
+    const { ws: wsWrite, surfaces: surfacesWrite, agentDir: agentDirWrite } = createTmpWorkspace("b4-planmode");
+    const pluginFixtureWrite = path.join(wsWrite, "fixture-plugin");
+    fs.mkdirSync(pluginFixtureWrite, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginFixtureWrite, "apex-plugin.json"),
+      JSON.stringify({
+        id: "sample-plugin",
+        name: "Sample Plugin",
+        version: "1.0.0",
+        description: "Canary fixture plugin",
+        entry: "index.js",
+        capabilities: {
+          allowNetwork: false,
+          allowChildProcess: false,
+          allowEnvRead: false
+        }
+      })
+    );
+    fs.writeFileSync(
+      path.join(pluginFixtureWrite, "index.js"),
+      "export default function activate(api) {}\n"
+    );
+
+    const r4Write = await createRing4Runtime({
+      workspaceRoot: wsWrite,
+      surfacesDir: surfacesWrite,
+      agentDir: agentDirWrite,
+      sandboxMode: "workspace-write",
+      allowUnsandboxedDev: true
+    });
+    const hWrite = r4Write.getCurrentHarness();
+    assert.equal(hWrite.prPipeline.getSandboxMode(), "workspace-write");
+
+    // Activate Plan Mode
+    hWrite.trustArtifacts.setPlanMode(true);
+    assert.equal(hWrite.trustArtifacts.isPlanModeActive(), true);
+
+    let planPrBlocked = false;
+    try {
+      await hWrite.prPipeline.run({
+        slug: "canary-plan-pr",
+        title: "Canary Plan PR",
+        baseBranch: "main",
+        filePatches: [{ relPath: "plan-patch.txt", content: "forbidden-patch" }]
+      });
+    } catch (err) {
+      planPrBlocked = true;
+      assert.ok(err instanceof GuardDeniedError, `Expected GuardDeniedError, got: ${String(err)}`);
+      assert.ok((err as Error).message.includes("Plan Mode is active"));
+    }
+    assert.equal(planPrBlocked, true, "AutonomousPrPipeline must fail closed when Plan Mode is active");
+
+    let planPluginInstallBlocked = false;
+    try {
+      await hWrite.pluginHost.installAndLoadPlugin(pluginFixtureWrite);
+    } catch (err) {
+      planPluginInstallBlocked = true;
+      assert.ok(err instanceof GuardDeniedError, `Expected GuardDeniedError, got: ${String(err)}`);
+      assert.ok((err as Error).message.includes("Plan Mode is active"));
+    }
+    assert.equal(planPluginInstallBlocked, true, "Plugin install must fail closed when Plan Mode is active");
+
+    let planPluginRemoveBlocked = false;
+    try {
+      hWrite.pluginHost.removePlugin("sample-plugin");
+    } catch (err) {
+      planPluginRemoveBlocked = true;
+      assert.ok(err instanceof GuardDeniedError, `Expected GuardDeniedError, got: ${String(err)}`);
+      assert.ok((err as Error).message.includes("Plan Mode is active"));
+    }
+    assert.equal(planPluginRemoveBlocked, true, "Plugin remove must fail closed when Plan Mode is active");
+
+    // Deactivate Plan Mode -> mutations permitted
+    hWrite.trustArtifacts.setPlanMode(false);
+    assert.equal(hWrite.trustArtifacts.isPlanModeActive(), false);
+
+    const installed = await hWrite.pluginHost.installAndLoadPlugin(pluginFixtureWrite);
+    assert.equal(installed.id, "sample-plugin");
+    const removed = hWrite.pluginHost.removePlugin("sample-plugin");
+    assert.equal(removed.removed, true);
+
+    await r4Write.dispose();
+
+    // 4A (v) Negative Denial Canary: Nested vendor secret and hardlink alias bypass denied via inode matching
+    const realWs = fs.realpathSync(ws);
+    const nestedSecretDir = path.join(realWs, "node_modules", "@scope", "deep-pkg");
+    fs.mkdirSync(nestedSecretDir, { recursive: true });
+    const nestedSecretPath = path.join(nestedSecretDir, ".env");
+    fs.writeFileSync(nestedSecretPath, "SECRET_VENDOR_TOKEN=super_confidential\n", "utf8");
+
+    const innocentHardlinkPath = path.join(realWs, "innocent.txt");
+    fs.linkSync(nestedSecretPath, innocentHardlinkPath);
+
+    const secretScan = scanWorkspaceSecretsAndHardlinks(realWs);
+    assert.ok(secretScan.allMaskedPaths.includes(nestedSecretPath), "Nested vendor secret must be in allMaskedPaths");
+    assert.ok(secretScan.allMaskedPaths.includes(innocentHardlinkPath), "Hardlink alias to nested secret must be in allMaskedPaths");
+    assert.ok(secretScan.hardlinkAliasPaths.includes(innocentHardlinkPath), "Hardlink alias to nested secret must be in hardlinkAliasPaths");
+
+    let directNestedBlocked = false;
+    try {
+      readWorkspaceFileSafe({ workspaceRoot: ws, candidatePath: "node_modules/@scope/deep-pkg/.env" });
+    } catch (err) {
+      directNestedBlocked = true;
+      assert.ok(err instanceof PathContainmentError);
+      assert.ok((err as Error).message.includes("secret file access denied"));
+    }
+    assert.equal(directNestedBlocked, true, "Direct read of nested vendor .env must be blocked");
+
+    let hardlinkBlocked = false;
+    try {
+      readWorkspaceFileSafe({ workspaceRoot: ws, candidatePath: "innocent.txt" });
+    } catch (err) {
+      hardlinkBlocked = true;
+      assert.ok(err instanceof PathContainmentError);
+      assert.ok((err as Error).message.includes("hardlink alias to secret file inode denied"));
+    }
+    assert.equal(hardlinkBlocked, true, "Reading innocent.txt hardlinked to nested secret must be blocked");
+
+    fs.writeFileSync(path.join(ws, "normal.txt"), "hello world\n", "utf8");
+    const normalRead = readWorkspaceFileSafe({ workspaceRoot: ws, candidatePath: "normal.txt" });
+    assert.equal(normalRead.toString("utf8"), "hello world\n");
 
     // 4B. Positive Permitted Control: File operations in workspace-write mode succeed
     const permittedOps = createConfinedFileOperations({
@@ -924,6 +1084,67 @@ async function main(): Promise<void> {
     const nestedRowAfter = stateDb.getWalRow(nestedRes.idempotencyKey)!;
     assert.equal(rootRowAfter.status, "TRANSCRIPT_APPENDED", "Root tool call must transition to TRANSCRIPT_APPENDED");
     assert.equal(nestedRowAfter.status, "TRANSCRIPT_APPENDED", "Nested descendant tool call must transition to TRANSCRIPT_APPENDED");
+
+    // 5B (iv) Positive Permitted Control: Structured tool result preservation (images, details, error flags across execution and idempotency cache)
+    const fakePngData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let imageEffectCalls = 0;
+    const imageWalRes = await executeThroughWalSpine({
+      stateDb,
+      spillStore,
+      sessionId: "session-canary-wal",
+      leafId: "leaf-canary-0",
+      toolCallId: "call_screenshot_1",
+      toolName: "browser_screenshot",
+      mutabilityClass: "PURE_READ",
+      args: { fullPage: true },
+      executeEffect: async () => {
+        imageEffectCalls += 1;
+        return {
+          content: [
+            { type: "text", text: "Page screenshot taken:" },
+            { type: "image", data: fakePngData, mimeType: "image/png" }
+          ],
+          details: { width: 1920, height: 1080 },
+          isError: false
+        };
+      }
+    });
+
+    assert.equal(imageEffectCalls, 1);
+    assert.equal(imageWalRes.fromCache, false);
+    assert.equal(imageWalRes.content.length, 2);
+    assert.equal(imageWalRes.content[0].type, "text");
+    assert.equal(imageWalRes.content[1].type, "image");
+    assert.equal((imageWalRes.content[1] as any).data, fakePngData);
+    assert.equal((imageWalRes.content[1] as any).mimeType, "image/png");
+    assert.deepEqual(imageWalRes.details, { width: 1920, height: 1080 });
+    assert.equal(imageWalRes.isError, false);
+
+    // Replay unchanged image tool call -> returned from idempotency cache with image content preserved intact
+    const imageReplay = await executeThroughWalSpine({
+      stateDb,
+      spillStore,
+      sessionId: "session-canary-wal",
+      leafId: "leaf-canary-0",
+      toolCallId: "call_screenshot_1",
+      toolName: "browser_screenshot",
+      mutabilityClass: "PURE_READ",
+      args: { fullPage: true },
+      executeEffect: async () => {
+        imageEffectCalls += 1;
+        throw new Error("SHOULD_NOT_EXECUTE: image result must return from cache");
+      }
+    });
+
+    assert.equal(imageReplay.fromCache, true);
+    assert.equal(imageEffectCalls, 1, "Image effect must not re-execute on cache hit");
+    assert.equal(imageReplay.content.length, 2);
+    assert.equal(imageReplay.content[0].type, "text");
+    assert.equal(imageReplay.content[1].type, "image");
+    assert.equal((imageReplay.content[1] as any).data, fakePngData);
+    assert.equal((imageReplay.content[1] as any).mimeType, "image/png");
+    assert.deepEqual(imageReplay.details, { width: 1920, height: 1080 });
+    assert.equal(imageReplay.isError, false);
 
     // 5A (i) Negative Denial Canary: Tamper with disk post-commit -> drift triggers OUTCOME_UNKNOWN lock!
     fs.writeFileSync(targetFile, "tampered-content-by-unconfined-actor");

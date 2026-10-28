@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { DurabilityMode, MutabilityClass, WalIntentRow } from "../types.ts";
 import { extractNativeErrnoCode, getLinuxFsBridge } from "./linux-fs-bridge.ts";
 import {
@@ -347,6 +348,8 @@ export function resolveOutcomeUnknown(
   }
 }
 
+export type WalContentBlock = TextContent | ImageContent;
+
 /**
  * Promotes an `EFFECT_COMMITTED_RAW` row to `EFFECT_COMMITTED` by running secret-scrub + spill
  * (degrading inline on ENOSPC without re-executing the effect).
@@ -355,14 +358,47 @@ function finalizeCommittedRawRow<T = unknown>(
   stateDb: StateDb,
   spillStore: PrivateSpillStore,
   row: WalIntentRow
-): { finalText: string; details?: T; spilled: boolean; spillFallbackUsed: boolean } {
+): {
+  finalText: string;
+  content: WalContentBlock[];
+  details?: T;
+  isError?: boolean;
+  spilled: boolean;
+  spillFallbackUsed: boolean;
+} {
   const rawReceipt = row.raw_receipt_json
-    ? (JSON.parse(row.raw_receipt_json) as { rawText: string; details?: T })
+    ? (JSON.parse(row.raw_receipt_json) as {
+        rawText?: string;
+        content?: WalContentBlock[];
+        details?: T;
+        isError?: boolean;
+      })
     : { rawText: "" };
-  const spillOut = spillStore.scrubAndMaybeSpill(row.session_id, rawReceipt.rawText);
+  const rawText =
+    rawReceipt.rawText ??
+    (rawReceipt.content
+      ? rawReceipt.content
+          .filter((c) => c.type === "text" && typeof (c as any).text === "string")
+          .map((c) => (c as any).text)
+          .join("\n")
+      : "");
+  const spillOut = spillStore.scrubAndMaybeSpill(row.session_id, rawText);
+  let finalContent: WalContentBlock[] | undefined = rawReceipt.content;
+  if (finalContent) {
+    finalContent = finalContent.map((b) => {
+      if (b.type === "text" && typeof (b as any).text === "string") {
+        return { ...b, text: scrubSecretsInfallible((b as any).text) };
+      }
+      return b;
+    });
+  } else {
+    finalContent = [{ type: "text", text: spillOut.text }];
+  }
   const finalized = {
     finalText: spillOut.text,
+    content: finalContent,
     details: rawReceipt.details,
+    isError: rawReceipt.isError,
     spilled: spillOut.spilled,
     spillFallbackUsed: spillOut.spillFallbackUsed
   };
@@ -397,14 +433,21 @@ export interface ExecuteWalParams<T> {
     expectedAfterBytes: Buffer | string;
   };
   /** Executes the underlying confined effect and returns raw output text + structured metadata. */
-  executeEffect: () => Promise<{ rawText: string; details?: T }>;
+  executeEffect: () => Promise<{
+    rawText?: string;
+    content?: WalContentBlock[];
+    details?: T;
+    isError?: boolean;
+  }>;
 }
 
 export interface ExecuteWalResult<T> {
   idempotencyKey: string;
   fromCache: boolean;
   finalText: string;
+  content: WalContentBlock[];
   details?: T;
+  isError?: boolean;
   spilled: boolean;
   spillFallbackUsed: boolean;
 }
@@ -464,7 +507,12 @@ export async function executeThroughWalSpine<T = unknown>(
       }
 
       const cached = JSON.parse(existing.result_json!) as Omit<ExecuteWalResult<T>, "idempotencyKey" | "fromCache">;
-      return { idempotencyKey, fromCache: true, ...cached };
+      return {
+        idempotencyKey,
+        fromCache: true,
+        ...cached,
+        content: cached.content ?? [{ type: "text", text: cached.finalText }]
+      };
     }
 
     if (existing.status === "ABORTED_CLEAN") {
@@ -519,7 +567,12 @@ export async function executeThroughWalSpine<T = unknown>(
     .prepare(`UPDATE wal_intents SET status = 'EXECUTING', updated_at_ms = ? WHERE idempotency_key = ?`)
     .run(Date.now(), idempotencyKey);
 
-  let rawEffectOut: { rawText: string; details?: T };
+  let rawEffectOut: {
+    rawText?: string;
+    content?: WalContentBlock[];
+    details?: T;
+    isError?: boolean;
+  };
   try {
     rawEffectOut = await params.executeEffect();
   } catch (err) {
@@ -547,10 +600,34 @@ export async function executeThroughWalSpine<T = unknown>(
     throw err;
   }
 
+  const rawText =
+    rawEffectOut.rawText ??
+    (rawEffectOut.content
+      ? rawEffectOut.content
+          .filter((c) => c.type === "text" && typeof (c as any).text === "string")
+          .map((c) => (c as any).text)
+          .join("\n")
+      : "");
+
+  let scrubbedContent: WalContentBlock[] | undefined = undefined;
+  if (Array.isArray(rawEffectOut.content)) {
+    scrubbedContent = rawEffectOut.content.map((block) => {
+      if (block.type === "text" && typeof (block as any).text === "string") {
+        return {
+          ...block,
+          text: scrubSecretsInfallible((block as any).text)
+        };
+      }
+      return block;
+    });
+  }
+
   // Immediately persist EFFECT_COMMITTED_RAW before optional spill I/O
   const safeRawReceipt = JSON.stringify({
-    rawText: scrubSecretsInfallible(rawEffectOut.rawText),
-    details: rawEffectOut.details
+    rawText: scrubSecretsInfallible(rawText),
+    content: scrubbedContent,
+    details: rawEffectOut.details,
+    isError: rawEffectOut.isError
   });
   stateDb.db
     .prepare(
@@ -560,10 +637,16 @@ export async function executeThroughWalSpine<T = unknown>(
     )
     .run(safeRawReceipt, Date.now(), idempotencyKey);
 
-  const spillOut = spillStore.scrubAndMaybeSpill(sessionId, rawEffectOut.rawText);
+  const spillOut = spillStore.scrubAndMaybeSpill(sessionId, rawText);
+  let finalContent: WalContentBlock[] = scrubbedContent ?? [{ type: "text", text: spillOut.text }];
+  if (spillOut.spilled && finalContent.length === 1 && finalContent[0].type === "text") {
+    finalContent = [{ ...finalContent[0], text: spillOut.text }];
+  }
   const finalizedPayload = {
     finalText: spillOut.text,
+    content: finalContent,
     details: rawEffectOut.details,
+    isError: rawEffectOut.isError,
     spilled: spillOut.spilled,
     spillFallbackUsed: spillOut.spillFallbackUsed
   };

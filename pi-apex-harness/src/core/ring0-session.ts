@@ -204,14 +204,17 @@ function wrapToolDefinitionWithWal(
             .join("\n");
           return {
             rawText,
-            details: res.details
+            content: res.content,
+            details: res.details,
+            isError: res.isError
           };
         }
       });
 
       return {
-        content: [{ type: "text", text: walRes.finalText }],
-        details: walRes.details
+        content: walRes.content ?? [{ type: "text", text: walRes.finalText }],
+        details: walRes.details,
+        ...(walRes.isError !== undefined ? { isError: walRes.isError } : {})
       };
     }
   };
