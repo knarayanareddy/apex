@@ -1,0 +1,55 @@
+name: Apex Linux qualification
+
+on:
+  push:
+    branches: [main, fix/apex-safety-recovery]
+  pull_request:
+    paths:
+      - 'pi-apex-harness/**'
+      - '.github/workflows/apex-linux-qualification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apex-linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  qualification:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: pi-apex-harness
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 26.10.0
+          cache: npm
+          cache-dependency-path: pi-apex-harness/package-lock.json
+      - name: Install locked dependencies
+        id: dependencies
+        run: npm ci
+      - name: Build native bridge
+        id: native
+        run: npm run build:native
+      - name: Typecheck
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npm run typecheck
+      - name: Security canaries
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        run: npm run test:canaries
+      - name: Required Linux confinement
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        run: npm run test:linux
+      - name: Required Tier B integration
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        run: npm run test:tier-b
+      - name: Document sandbox qualification
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        run: npm run test:ring13
