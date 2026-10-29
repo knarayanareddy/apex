@@ -45,24 +45,61 @@ jobs:
       - name: Typecheck
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: npm run typecheck
-      - name: Install Ubuntu bubblewrap binary on disposable runner
+      - name: Provision Ubuntu bubblewrap on disposable runner
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/apex-bubblewrap"
           mkdir -p "$stage"
           cd "$stage"
-          apt-cache policy bubblewrap
-          apt-get download bubblewrap
-          packages=(bubblewrap_*.deb)
-          test "${#packages[@]}" -eq 1
-          test -f "${packages[0]}"
-          sha256sum "${packages[0]}"
-          dpkg-deb -x "${packages[0]}" root
-          test -x "$stage/root/usr/bin/bwrap"
+          if [[ '${{ matrix.os }}' == 'ubuntu-22.04' ]]; then
+            base=https://archive.ubuntu.com/ubuntu/pool/main/b/bubblewrap
+            curl -fsSLO "$base/bubblewrap_0.9.0-1ubuntu0.3.dsc"
+            curl -fsSLO "$base/bubblewrap_0.9.0.orig.tar.xz"
+            curl -fsSLO "$base/bubblewrap_0.9.0.orig.tar.xz.asc"
+            curl -fsSLO "$base/bubblewrap_0.9.0-1ubuntu0.3.debian.tar.xz"
+            printf '%s  %s\n' \
+              c8e38ca3ed20c269fc7e79a069fb329c0928ad7efaca098b07b50f7283599f24 bubblewrap_0.9.0-1ubuntu0.3.dsc \
+              c6347eaced49ac0141996f46bba3b089e5e6ea4408bc1c43bab9f2d05dd094e1 bubblewrap_0.9.0.orig.tar.xz \
+              355568011016d6d5592c13830778a9b06365926f6478ae43e51b2ab5c3bc3c92 bubblewrap_0.9.0.orig.tar.xz.asc \
+              4d6c71db380bb69d19a09501bd5caec92e46bf54c7f505805e75687daf783939 bubblewrap_0.9.0-1ubuntu0.3.debian.tar.xz | sha256sum -c -
+            dpkg-source --require-strong-checksums -x bubblewrap_0.9.0-1ubuntu0.3.dsc source
+            while IFS= read -r patch; do
+              [[ -z "$patch" || "$patch" == \#* ]] && continue
+              grep -Fx "$patch" source/.pc/applied-patches
+            done < source/debian/patches/series
+            mkdir deps
+            apt-get download meson libcap-dev libcap2 libselinux1-dev libselinux1 libsepol-dev libsepol2 libpcre2-dev libpcre2-8-0
+            for package in ./*.deb; do
+              test -f "$package"
+              sha256sum "$package"
+              dpkg-deb -x "$package" deps
+            done
+            export PYTHONPATH="$stage/deps/usr/lib/python3/dist-packages"
+            export PKG_CONFIG_PATH="$stage/deps/usr/lib/x86_64-linux-gnu/pkgconfig"
+            export DEB_BUILD_MAINT_OPTIONS=hardening=+pie,+bindnow
+            export CFLAGS="$(dpkg-buildflags --get CFLAGS) -I$stage/deps/usr/include"
+            export LDFLAGS="$(dpkg-buildflags --get LDFLAGS) -L$stage/deps/usr/lib/x86_64-linux-gnu -L$stage/deps/lib/x86_64-linux-gnu"
+            /usr/bin/python3 "$stage/deps/usr/bin/meson" setup build source --prefix=/usr -Dselinux=enabled
+            ninja -C build bwrap
+            candidate="$stage/build/bwrap"
+          else
+            apt-cache policy bubblewrap
+            apt-get download bubblewrap
+            packages=(bubblewrap_*.deb)
+            test "${#packages[@]}" -eq 1
+            test -f "${packages[0]}"
+            sha256sum "${packages[0]}"
+            dpkg-deb -x "${packages[0]}" root
+            candidate="$stage/root/usr/bin/bwrap"
+          fi
+          test -x "$candidate"
+          help_text="$("$candidate" --help)"
+          [[ "$help_text" == *--size* ]]
           test ! -e /usr/bin/bwrap && test ! -L /usr/bin/bwrap
-          sudo install -m 0755 -o root -g root "$stage/root/usr/bin/bwrap" /usr/bin/bwrap
-          cmp "$stage/root/usr/bin/bwrap" /usr/bin/bwrap
+          sudo install -m 0755 -o root -g root "$candidate" /usr/bin/bwrap
+          cmp "$candidate" /usr/bin/bwrap
+          sha256sum /usr/bin/bwrap
           stat -c '%U:%G %a %n' /usr/bin/bwrap
           /usr/bin/bwrap --version
       - name: Security canaries
