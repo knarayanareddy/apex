@@ -102,6 +102,28 @@ jobs:
           sha256sum /usr/bin/bwrap
           stat -c '%U:%G %a %n' /usr/bin/bwrap
           /usr/bin/bwrap --version
+      - name: Diagnose 24.04 namespace capabilities (not qualification)
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-24.04' && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          for setting in /proc/sys/kernel/apparmor_restrict_unprivileged_userns /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined /proc/sys/kernel/unprivileged_userns_clone /proc/self/attr/current; do
+            if [[ -r "$setting" ]]; then printf '%s=' "$setting"; cat "$setting"; fi
+          done
+          for mode in user user_pid user_net user_pid_net; do
+            args=(--unshare-user)
+            case "$mode" in
+              user_pid) args+=(--unshare-pid) ;;
+              user_net) args+=(--unshare-net) ;;
+              user_pid_net) args+=(--unshare-pid --unshare-net) ;;
+            esac
+            printf 'DIAGNOSTIC_ONLY %s\n' "$mode"
+            if timeout 5s /usr/bin/bwrap --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp "${args[@]}" --die-with-parent --clearenv --setenv PATH /usr/bin:/bin -- /bin/echo BWRAP_DIAGNOSTIC_OK; then
+              printf 'DIAGNOSTIC_ONLY %s exit=0\n' "$mode"
+            else
+              code=$?
+              printf 'DIAGNOSTIC_ONLY %s exit=%s\n' "$mode" "$code"
+            fi
+          done
       - name: Security canaries
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
         run: npm run test:canaries
