@@ -46,6 +46,7 @@ jobs:
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: npm run typecheck
       - name: Provision Ubuntu bubblewrap on disposable runner
+        id: bubblewrap
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
         run: |
           set -euo pipefail
@@ -102,6 +103,26 @@ jobs:
           sha256sum /usr/bin/bwrap
           stat -c '%U:%G %a %n' /usr/bin/bwrap
           /usr/bin/bwrap --version
+      - name: Allow bubblewrap user namespaces on disposable 24.04 runner
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-24.04' && steps.bubblewrap.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          userns_before="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          unconfined_before="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined)"
+          profile="$RUNNER_TEMP/apex-ci-bwrap.apparmor"
+          test ! -e "$profile" && test ! -L "$profile"
+          printf '%s\n' \
+            'abi <abi/4.0>,' \
+            'include <tunables/global>' \
+            'profile apex-ci-bwrap /usr/bin/bwrap flags=(unconfined) {' \
+            '  userns,' \
+            '}' > "$profile"
+          # Add only this profile; never replace an existing policy or change sysctls.
+          sudo apparmor_parser -a "$profile"
+          sudo grep -F 'apex-ci-bwrap' /sys/kernel/security/apparmor/profiles
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "$userns_before"
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined)" = "$unconfined_before"
       - name: Diagnose 24.04 namespace capabilities (not qualification)
         if: ${{ !cancelled() && matrix.os == 'ubuntu-24.04' && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
         run: |
