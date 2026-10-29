@@ -759,10 +759,10 @@ async function main(): Promise<void> {
     }
 
     // =========================================================================
-    // R8-6: Portable `/home/user/pi-apex-v3.8.0-personal.tar.gz` + `--install-vscode` Verification
+    // R8-6: Portable release archive + `--install-vscode` verification
     // =========================================================================
     {
-      const pkgOutDir = process.platform === "darwin" ? path.join(tmpRoot, "pkg-out") : "/home/user";
+      const pkgOutDir = path.join(tmpRoot, "pkg-out");
       fs.mkdirSync(pkgOutDir, { recursive: true });
       const pkgRun = spawnSync(
         "bash",
@@ -849,7 +849,7 @@ async function main(): Promise<void> {
       results.push({
         id: "R8-6",
         detail:
-          "Portable /home/user/pi-apex-v3.8.0-personal.tar.gz + SHA-256 + --install-vscode symlink + v3.8.0 /doctor (schema=1073) verified"
+          "Portable release archive + SHA-256 + --install-vscode symlink + extracted /doctor verified"
       });
     }
 

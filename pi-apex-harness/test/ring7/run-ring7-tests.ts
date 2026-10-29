@@ -14,7 +14,7 @@
  *          preserving `1,073 === 1,073 o200k_base` active schema tokens & `0` prefix drift.
  *  - R7-5: Mission-Control Cockpit v3 live HTTP/SSE (`/api/pr-pipeline`, `/api/handoff`, `/api/presets`,
  *          `/api/browser` live Chromium CDP, `/api/workspaces` multi-repo switch, zero `localhost` literals).
- *  - R7-6: Portable `/home/user/pi-apex-v3.7.0-personal.tar.gz` + `.sha256` + clean extraction & `/doctor`.
+ *  - R7-6: Portable release archive + `.sha256` + clean extraction & `/doctor`.
  */
 
 import assert from "node:assert/strict";
@@ -742,10 +742,10 @@ async function main(): Promise<void> {
     }
 
     // =========================================================================
-    // R7-6: Portable `/home/user/pi-apex-v3.7.0-personal.tar.gz` Release Bundle
+    // R7-6: Portable release bundle in the test-owned temporary directory
     // =========================================================================
     {
-      const pkgOutDir = process.platform === "darwin" ? path.join(tmpRoot, "pkg-out") : "/home/user";
+      const pkgOutDir = path.join(tmpRoot, "pkg-out");
       fs.mkdirSync(pkgOutDir, { recursive: true });
       const pkgRun = spawnSync(
         "bash",
@@ -807,7 +807,7 @@ async function main(): Promise<void> {
       results.push({
         id: "R7-6",
         detail:
-          "Portable /home/user/pi-apex-v3.7.0-personal.tar.gz + SHA-256 checksum + clean extraction, native build & --preset plan /doctor (schema=1073) verified"
+          "Portable release archive + SHA-256 checksum + clean extraction, native build & --preset plan /doctor verified"
       });
     }
 
