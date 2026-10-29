@@ -114,3 +114,7 @@ jobs:
       - name: Document sandbox qualification
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
         run: npm run test:ring13
+      - name: Browser qualification after Linux gates
+        env:
+          PI_APEX_REQUIRE_BROWSER: '1'
+        run: npm run test:browser
