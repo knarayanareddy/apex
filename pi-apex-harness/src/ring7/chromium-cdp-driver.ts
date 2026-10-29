@@ -322,18 +322,28 @@ export class ChromiumCdpSession {
       }
     );
     this.proc = proc;
-    // Chrome can write to stdout before announcing DevTools. An unread pipe
-    // can fill and block the browser before it reaches that announcement.
-    proc.stdout?.resume();
+    // Chrome can write to stdout before announcing DevTools. Drain without
+    // retaining output; keep only a byte count for bounded failure diagnostics.
+    let stdoutBytes = 0;
+    proc.stdout?.on("data", (chunk: Buffer) => { stdoutBytes += chunk.length; });
 
     try {
       const browserWsUrl = await new Promise<string>((resolve, reject) => {
         let stderrBuf = "";
+        let stderrBytes = 0;
         let endpointResolved = false;
         const timer = setTimeout(() => {
+          let activePortFile = false;
+          try {
+            activePortFile = fs.lstatSync(path.join(userDataDir, "DevToolsActivePort")).isFile();
+          } catch {
+            // The file may not exist yet; never include its capability-bearing contents.
+          }
           reject(
             new Error(
-              `CHROMIUM_CDP_TIMEOUT: DevTools endpoint did not start within ${this.connectTimeoutMs}ms. stderr=${stderrBuf.slice(0, 400)}`
+              `CHROMIUM_CDP_TIMEOUT: DevTools endpoint did not start within ${this.connectTimeoutMs}ms. ` +
+              `activePortFile=${activePortFile} stdoutBytes=${stdoutBytes} stderrBytes=${stderrBytes} ` +
+              `exitCode=${String(proc.exitCode)} signalCode=${String(proc.signalCode)} stderr=${stderrBuf.slice(0, 400)}`
             )
           );
         }, this.connectTimeoutMs);
@@ -351,6 +361,7 @@ export class ChromiumCdpSession {
           );
         });
         proc.stderr?.on("data", (chunk: Buffer) => {
+          stderrBytes += chunk.length;
           if (endpointResolved) return;
           const combined = stderrBuf + chunk.toString("utf8");
           const match = combined.match(/DevTools listening on (ws:\/\/[^\s]+)/);
