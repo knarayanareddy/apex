@@ -980,8 +980,11 @@ async function runTierB(): Promise<void> {
     assert.equal(harness.transcriptSyncReceipts[0].fileSynced, true);
     assert.equal(harness.transcriptSyncReceipts[0].dirSynced, true);
     const b4WalRows = harness.stateDb.db
-      .prepare(`SELECT status FROM wal_intents WHERE session_id = ?`)
-      .all(harness.session.sessionManager.getSessionId()) as Array<{ status: string }>;
+      .prepare(`SELECT tool_name, tool_call_id, parent_tool_call_id, status FROM wal_intents WHERE session_id = ?`)
+      .all(harness.session.sessionManager.getSessionId()) as Array<{ tool_name: string; tool_call_id: string; parent_tool_call_id: string | null; status: string }>;
+    if (b4WalRows.length !== 1) {
+      console.error(`[TIER_B_B4_WAL_DIAGNOSTIC] ${JSON.stringify(b4WalRows)}`);
+    }
     assert.equal(b4WalRows.length, 1);
     assert.equal(b4WalRows[0].status, "TRANSCRIPT_APPENDED");
 
