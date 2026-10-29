@@ -91,6 +91,8 @@ async function runBatchBVerification() {
     // Verify expected documentation bytes arrive
     const expectedDocBytes = fs.readFileSync(path.join(getDocsPath(), "codemode.md"), "utf8");
     assert.ok(resultText.length > 500, "Documentation bytes must be populated");
+    assert.ok(resultText.includes("Apex-specific tool-result policy"), "Bundled guide must describe Apex's output budget");
+    assert.ok(resultText.includes(expectedDocBytes), "The complete upstream guide must remain available");
     assert.ok(
       resultText.includes("codemode") || resultText.includes("JavaScript"),
       "Documentation content must match codemode documentation"

@@ -883,6 +883,8 @@ export function readWorkspaceFileSafe(params: {
   candidatePath: string;
   unmaskedExceptions?: readonly string[];
   maxBytes?: number;
+  /** Read at most this prefix length without requiring the whole file to fit. */
+  maxPrefixBytes?: number;
   sessionId?: string;
 }): Buffer {
   const bridge = getLinuxFsBridge();
@@ -971,6 +973,14 @@ export function readWorkspaceFileSafe(params: {
           );
         }
       }
+    }
+    if (params.maxPrefixBytes !== undefined) {
+      if (params.maxBytes !== undefined || !Number.isInteger(params.maxPrefixBytes) || params.maxPrefixBytes < 1 || params.maxPrefixBytes > 1024 * 1024) {
+        throw new RangeError("maxPrefixBytes must be 1–1 MiB and cannot be combined with maxBytes.");
+      }
+      const prefix = Buffer.allocUnsafe(params.maxPrefixBytes);
+      const count = fs.readSync(fd, prefix, 0, prefix.length, 0);
+      return prefix.subarray(0, count);
     }
     if (params.maxBytes !== undefined) {
       if (!Number.isInteger(params.maxBytes) || params.maxBytes < 1 || params.maxBytes > 100 * 1024 * 1024) {
