@@ -322,10 +322,14 @@ export class ChromiumCdpSession {
       }
     );
     this.proc = proc;
+    // Chrome can write to stdout before announcing DevTools. An unread pipe
+    // can fill and block the browser before it reaches that announcement.
+    proc.stdout?.resume();
 
     try {
       const browserWsUrl = await new Promise<string>((resolve, reject) => {
         let stderrBuf = "";
+        let endpointResolved = false;
         const timer = setTimeout(() => {
           reject(
             new Error(
@@ -347,9 +351,12 @@ export class ChromiumCdpSession {
           );
         });
         proc.stderr?.on("data", (chunk: Buffer) => {
-          stderrBuf += chunk.toString("utf8");
-          const match = stderrBuf.match(/DevTools listening on (ws:\/\/[^\s]+)/);
+          if (endpointResolved) return;
+          const combined = stderrBuf + chunk.toString("utf8");
+          const match = combined.match(/DevTools listening on (ws:\/\/[^\s]+)/);
+          stderrBuf = combined.slice(-8192);
           if (match?.[1]) {
+            endpointResolved = true;
             clearTimeout(timer);
             resolve(match[1]);
           }

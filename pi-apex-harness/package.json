@@ -37,7 +37,7 @@
     "test:ring4": "node --experimental-strip-types test/ring4/run-ring4-tests.ts",
     "test:ring5": "node --experimental-strip-types test/ring5/run-ring5-tests.ts",
     "test:ring6": "node --experimental-strip-types test/ring6/run-ring6-tests.ts",
-    "test:ring7": "node --experimental-strip-types test/ring7/navigation-errors.spec.ts && node --experimental-strip-types test/ring7/run-ring7-tests.ts",
+    "test:ring7": "node --experimental-strip-types test/ring7/navigation-errors.spec.ts && node --experimental-strip-types test/ring7/chromium-pipe.spec.ts && node --experimental-strip-types test/ring7/run-ring7-tests.ts",
     "test:ring8": "node --experimental-strip-types test/ring8/run-ring8-tests.ts",
     "test:ring9": "node --experimental-strip-types test/ring9/run-ring9-tests.ts",
     "test:ring10": "node --experimental-strip-types test/ring10/run-ring10-tests.ts",
