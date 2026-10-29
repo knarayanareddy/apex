@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import trace_browser_ci as trace
 from trace_browser_ci import classify_fd, descendants, parse_stat, run_observed, sample_owned_tree
 
 
@@ -14,6 +15,19 @@ class BrowserTraceTests(unittest.TestCase):
         stat = "420 (chrome (worker)) " + " ".join(fields)
         self.assertEqual(parse_stat(stat), (420, 10, "S", 12345))
         self.assertIsNone(parse_stat("broken"))
+
+    def test_cpu_and_io_counters_are_numeric_only(self):
+        fields = ["S", "10"] + ["0"] * 17 + ["12345"]
+        fields[11], fields[12] = "25", "17"
+        parser = getattr(trace, "parse_cpu_ticks", lambda _text: None)
+        self.assertEqual(parser("420 (chrome) " + " ".join(fields)), 42)
+        self.assertIsNone(parser("broken"))
+        fields[9] = "3"
+        parse_faults = getattr(trace, "parse_major_faults", lambda _text: None)
+        self.assertEqual(parse_faults("420 (chrome) " + " ".join(fields)), 3)
+        self.assertIsNone(parse_faults("broken"))
+        parse_io = getattr(trace, "parse_io_counters", lambda _text: {})
+        self.assertEqual(parse_io("rchar: 12\nsyscr: 3\nread_bytes: 8192\nignored: secret\n"), {"rchar": 12, "syscr": 3, "read_bytes": 8192})
 
     def test_descendants_exclude_unrelated_processes(self):
         self.assertEqual(descendants(11, {11: 1, 12: 11, 13: 12, 900: 77}), {11, 12, 13})
@@ -38,6 +52,7 @@ class BrowserTraceTests(unittest.TestCase):
                 (entry / "stat").write_text(f"{pid} ({name}) " + " ".join(fields))
                 (entry / "comm").write_text(name + "\n")
                 (entry / "wchan").write_text("futex_wait\n")
+                (entry / "io").write_text("rchar: 12\nsyscr: 3\nread_bytes: 8192\nignored: synthetic-secret\n")
                 command = b"/usr/bin/node\0" if name == "node" else b"/usr/bin/chromium\0--private=synthetic-secret\0--user-data-dir=" + os.fsencode(profile) + b"\0"
                 (entry / "cmdline").write_bytes(command)
                 (entry / "fd" / "1").symlink_to("/private/path")
@@ -54,6 +69,7 @@ class BrowserTraceTests(unittest.TestCase):
             self.assertEqual([item["pid"] for item in result["browsers"]], [101])
             self.assertEqual(result["browsers"][0]["active_port_file"], True)
             self.assertEqual(result["browsers"][0]["fds"], {"1": "file", "2": "pipe"})
+            self.assertEqual(result["browsers"][0]["io"], {"rchar": 12, "syscr": 3, "read_bytes": 8192})
             encoded = json.dumps(result)
             self.assertNotIn("synthetic-secret", encoded)
             self.assertNotIn("/private", encoded)

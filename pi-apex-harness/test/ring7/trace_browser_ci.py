@@ -25,6 +25,32 @@ def parse_stat(text):
         return None
 
 
+def parse_cpu_ticks(text):
+    try:
+        fields = text[text.rindex(")") + 1:].split()
+        return int(fields[11]) + int(fields[12])
+    except (ValueError, IndexError):
+        return None
+
+
+def parse_major_faults(text):
+    try:
+        fields = text[text.rindex(")") + 1:].split()
+        return int(fields[9])
+    except (ValueError, IndexError):
+        return None
+
+
+def parse_io_counters(text):
+    values = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition(":")
+        value = value.strip()
+        if separator and key in {"rchar", "syscr", "read_bytes"} and value.isdigit() and len(value) <= 20:
+            values[key] = int(value)
+    return values
+
+
 def descendants(root, parents):
     found = {root}
     pending = [root]
@@ -71,7 +97,7 @@ def sample_owned_tree(root_pid, proc=Path("/proc")):
         if item:
             pid, ppid, state, started = item
             parents[pid] = ppid
-            initial[pid] = (ppid, state, started)
+            initial[pid] = (ppid, state, started, parse_cpu_ticks(raw), parse_major_faults(raw))
 
     owned = descendants(root_pid, parents)
     browsers = []
@@ -110,6 +136,8 @@ def sample_owned_tree(root_pid, proc=Path("/proc")):
                 pass
         wait = read_text(root / "wchan")
         wait = re.sub(r"[^a-zA-Z0-9_.-]", "_", wait.strip())[:64] if wait else "unavailable"
+        io_text = read_text(root / "io")
+        io = parse_io_counters(io_text) if io_text is not None else None
         fds = {}
         for number in (1, 2):
             try:
@@ -122,7 +150,8 @@ def sample_owned_tree(root_pid, proc=Path("/proc")):
             continue  # PID disappeared or changed while being sampled.
         browsers.append({
             "pid": pid, "ppid": initial[pid][0], "state": initial[pid][1],
-            "start_ticks": initial[pid][2], "wait_channel": wait, "fds": fds,
+            "start_ticks": initial[pid][2], "cpu_ticks": initial[pid][3],
+            "major_faults": initial[pid][4], "io": io, "wait_channel": wait, "fds": fds,
             "active_port_file": active
         })
     return {"available": True, "owned_process_count": len(owned), "browsers": browsers[:40]}
@@ -141,8 +170,13 @@ def run_observed(command, sampler=sample_owned_tree):
         time.sleep(0.5)
     code = child.returncode
     if code != 0:
+        try:
+            clock_ticks = os.sysconf("SC_CLK_TCK")
+        except (ValueError, OSError):
+            clock_ticks = None
         print("BROWSER_TRACE_FAILURE " + json.dumps({
-            "exit": code, "samples_total": total, "samples_retained": len(samples), "samples": list(samples)
+            "exit": code, "clock_ticks_per_second": clock_ticks, "samples_total": total,
+            "samples_retained": len(samples), "samples": list(samples)
         }, separators=(",", ":")), file=sys.stderr, flush=True)
     else:
         print("BROWSER_TRACE_PASS: qualification passed; no failure snapshot", flush=True)
