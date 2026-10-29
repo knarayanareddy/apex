@@ -507,7 +507,7 @@ export async function runPiApexCli(
     const info = await server.start();
     process.stdout.write(
       `pi-apex v${PI_APEX_VERSION} Mission-Control Cockpit listening on ${info.url} (workspace: ${parsed.cwd})\n` +
-      `Authentication: protected pairing credentials written to .harness/cockpit-pairing.json (mode 0600).\n` +
+      `Authentication: protected pairing credentials written to ${server.pairingFile} (mode 0600).\n` +
       `To authenticate browser session, exchange bootstrap code: ${info.bootstrapToken} (expires in 5m)\n`
     );
     hostOpts?.onWebServerListening?.(info);

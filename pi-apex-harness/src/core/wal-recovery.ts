@@ -1451,6 +1451,25 @@ export function reconcileWalOnStartup(
         committedRow = stateDb.getWalRow(row.idempotency_key)!;
       }
 
+      // Promotion preserves an error result so the effect is never re-run, but
+      // that result must not make malformed raw evidence look like a healthy
+      // replay on this or later startups.
+      let invalidRawDiagnostic = false;
+      try {
+        const result = JSON.parse(committedRow.result_json ?? "null");
+        invalidRawDiagnostic = result?.isError === true &&
+          typeof result.finalText === "string" &&
+          result.finalText.startsWith("[WAL_RECEIPT_INVALID: raw_receipt_json ") &&
+          (!committedRow.raw_receipt_json || !decodeCommittedReceipt(committedRow.raw_receipt_json).ok);
+      } catch {
+        // The normal committed-result validation below classifies malformed JSON.
+      }
+      if (invalidRawDiagnostic) {
+        summary.corruptReceipts.push(committedRow);
+        console.warn(`[WAL_RECOVERY_DIAGNOSTIC] Invalid raw WAL receipt in idempotency_key ${committedRow.idempotency_key}`);
+        continue;
+      }
+
       let receiptIsInvalid = false;
       if (committedRow.status === "EFFECT_COMMITTED") {
         try {

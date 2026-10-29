@@ -127,6 +127,13 @@ npm run test:ring1
 npm run test:tier-a
 ```
 
+Cockpit pairing credentials are stored under the agent directory, outside the
+workspace; the CLI prints their path. The agent directory must not be inside the
+workspace. Legacy `.harness/cockpit-pairing.json` files are not removed
+automatically; review them and rotate any credentials that may have been exposed.
+When a trusted HTTPS proxy origin is configured, all cockpit session cookies are
+`Secure`, including for local HTTP access.
+
 ### Running Autonomous Chaos Benchmarks
 
 ```bash

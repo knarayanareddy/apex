@@ -430,7 +430,9 @@ async function testD5ProcessOwnershipAndRecycling(): Promise<void> {
 
   // Terminate process tree
   const termResult = await terminateProcessTree(child.pid!, identity);
-  assert.equal(termResult.success, true, "All owned descendants must be terminated");
+  assert.equal(termResult.success, false, "A process snapshot cannot establish cleanup of reparented descendants");
+  assert.deepEqual(termResult.survivingPids, [], "Every discovered process must actually be gone");
+  assert.ok(termResult.killedPids.includes(child.pid!), "The owned root must have received a signal");
   assert.equal(termResult.recycledDetected, false);
 
   // Verify none survived
@@ -475,7 +477,7 @@ async function testD5ProcessOwnershipAndRecycling(): Promise<void> {
   assert.ok(elapsed < 2500, `Timeout must resolve promptly without hanging (elapsed: ${elapsed}ms)`);
   assert.ok(chunks.some((c) => c.includes("command timed out")), "Must output timeout notice");
 
-  console.log("  [PASS] D5 verified: Descendants terminated, bounded shutdown, recycled PIDs protected.");
+  console.log("  [PASS] D5 verified: Observed processes terminated, ownership remains unverified, bounded shutdown, recycled PIDs protected.");
 }
 
 async function testD5PtyUnknownCleanup(): Promise<void> {

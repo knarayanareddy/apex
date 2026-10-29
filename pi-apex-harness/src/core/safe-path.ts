@@ -284,39 +284,33 @@ export function scanWorkspaceSecretsAndHardlinks(
  * beneath `workspaceRoot`.
  */
 export function findWorkspaceGitRoots(workspaceRoot: string): string[] {
-  let realWs: string;
-  try {
-    realWs = fs.realpathSync(workspaceRoot);
-  } catch {
-    return [];
-  }
+  const realWs = fs.realpathSync(workspaceRoot);
   const gitRoots: string[] = [];
-  if (fs.existsSync(path.join(realWs, ".git"))) {
-    gitRoots.push(realWs);
-  }
-  const maxDepth = 6;
+  let visited = 0;
   const walk = (dir: string, depth: number) => {
-    if (depth > maxDepth) return;
+    if (depth >= MAX_SECRET_SCAN_DEPTH || ++visited > MAX_SECRET_SCAN_DIRECTORIES) {
+      throw new PathContainmentError(`Incomplete Git repository discovery at '${dir}': scan limit reached`);
+    }
+    let entries: fs.Dirent[];
     try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isSymbolicLink()) continue;
-        if (entry.isDirectory()) {
-          if (entry.name === ".git" || entry.name === ".harness" || entry.name === "node_modules" || entry.name === ".venv") {
-            continue;
-          }
-          const sub = path.join(dir, entry.name);
-          if (fs.existsSync(path.join(sub, ".git"))) {
-            gitRoots.push(sub);
-          }
-          walk(sub, depth + 1);
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      throw new PathContainmentError(`Incomplete Git repository discovery at '${dir}': ${String(err)}`);
+    }
+    for (const entry of entries) {
+      if (entry.name === ".git") {
+        if (!entry.isDirectory() && !entry.isFile()) {
+          throw new PathContainmentError(`Unsafe .git metadata entry at '${dir}'`);
         }
+        gitRoots.push(dir);
+        continue;
       }
-    } catch {
-      // non-fatal
+      // The root control plane is independently hidden by the bwrap mount.
+      if (dir === realWs && entry.name === ".harness") continue;
+      if (entry.isDirectory()) walk(path.join(dir, entry.name), depth + 1);
     }
   };
-  walk(realWs, 1);
+  walk(realWs, 0);
   return gitRoots;
 }
 

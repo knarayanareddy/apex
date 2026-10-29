@@ -120,7 +120,8 @@ async function testBatchC() {
     console.log("--- C1: Credential Protection & Single-Use Bootstrap ---");
 
     // 1. Verify pairing file exists, has mode 0600, contains valid credentials
-    const pairingFile = path.join(ws, ".harness", "cockpit-pairing.json");
+    const pairingFile = server.pairingFile;
+    assert.ok(!path.relative(ws, pairingFile).startsWith(`.${path.sep}`) && path.relative(ws, pairingFile).startsWith(".."), "Pairing credentials must live outside the workspace");
     assert.ok(fs.existsSync(pairingFile), "Protected pairing file must exist");
     const stat = fs.statSync(pairingFile);
     const mode = stat.mode & 0o777;
@@ -149,6 +150,7 @@ async function testBatchC() {
     assert.match(setCookie[0], /apex_session=/, "Cookie must be apex_session");
     assert.match(setCookie[0], /HttpOnly/, "Cookie must be HttpOnly");
     assert.match(setCookie[0], /SameSite=Strict/, "Cookie must be SameSite=Strict");
+    assert.match(setCookie[0], /(?:^|;\s*)Secure(?:;|$)/, "HTTPS proxy bootstrap cookie must be Secure");
     assert.notEqual(setCookie[0].split(";")[0], `apex_session=${info.token}`, "Browser session must not expose the bearer token");
 
     // 4. Replay of single-use bootstrap token MUST fail
@@ -199,6 +201,7 @@ async function testBatchC() {
     assert.equal(logoutRes.status, 200, "Logout must succeed");
     const logoutCookie = logoutRes.headers["set-cookie"];
     assert.ok(logoutCookie && logoutCookie[0].includes("Max-Age=0"), "Logout must expire cookie");
+    assert.match(logoutCookie[0], /(?:^|;\s*)Secure(?:;|$)/, "HTTPS proxy logout cookie must be Secure");
     const closedOnLogout = await streamEnded;
     liveStream.request.destroy();
     assert.equal(closedOnLogout, true, "Logout must close the revoked session's active SSE stream");
@@ -211,6 +214,7 @@ async function testBatchC() {
     const relogin = await runHttpRequest({ url: `${baseUrl}/?token=${info.token}`, method: "GET" });
     assert.equal(relogin.status, 302, "The independent bearer credential remains usable for a new login");
     const proxyCookie = relogin.headers["set-cookie"]?.[0]?.split(";")[0];
+    assert.match(relogin.headers["set-cookie"]![0], /(?:^|;\s*)Secure(?:;|$)/, "Bearer login cookie must be Secure");
     assert.ok(proxyCookie, "New login must issue a browser session");
     assert.notEqual(proxyCookie, cookieHeader, "New login must rotate the browser session");
     const oldAfterRelogin = await runHttpRequest({ url: `${baseUrl}/api/status`, method: "GET", headers: { Cookie: cookieHeader } });
@@ -377,6 +381,30 @@ async function testBatchC() {
     assert.equal(ipv6Bare.status, 200, "Bracketed IPv6 bare host must be accepted");
 
     await server.stop();
+    const bootstrapServer = new MissionControlServer({ controller, workspaceRoot: ws, port: 0, trustedPublicOrigins: [trustedProxyOrigin] });
+    const bootstrapInfo = await bootstrapServer.start();
+    const viaBootstrapGet = await runHttpRequest({
+      url: `http://127.0.0.1:${bootstrapInfo.port}/?bootstrap=${bootstrapInfo.bootstrapToken}`,
+      method: "GET", headers: { "X-Forwarded-Proto": "http" }
+    });
+    assert.equal(viaBootstrapGet.status, 302);
+    assert.match(viaBootstrapGet.headers["set-cookie"]![0], /(?:^|;\s*)Secure(?:;|$)/, "Forwarded headers must not downgrade GET bootstrap cookies");
+    await bootstrapServer.stop();
+    const localServer = new MissionControlServer({ controller, workspaceRoot: ws, port: 0 });
+    const localInfo = await localServer.start();
+    const localLogin = await runHttpRequest({ url: `http://127.0.0.1:${localInfo.port}/?token=${localInfo.token}`, method: "GET" });
+    assert.doesNotMatch(localLogin.headers["set-cookie"]![0], /(?:^|;\s*)Secure(?:;|$)/, "Local HTTP without HTTPS proxy remains supported");
+    await localServer.stop();
+    const outsideCanary = path.join(tmpRoot, "outside-canary");
+    fs.writeFileSync(outsideCanary, "preserve-me", { mode: 0o644 });
+    const originalMode = fs.statSync(outsideCanary).mode & 0o777;
+    fs.renameSync(pairingFile, `${pairingFile}.saved`);
+    fs.symlinkSync(outsideCanary, pairingFile);
+    const symlinkServer = new MissionControlServer({ controller, workspaceRoot: ws, port: 0 });
+    await assert.rejects(() => symlinkServer.start(), /COCKPIT_PAIRING_UNAVAILABLE/);
+    assert.equal(fs.readFileSync(outsideCanary, "utf8"), "preserve-me");
+    assert.equal(fs.statSync(outsideCanary).mode & 0o777, originalMode);
+    assert.ok(fs.lstatSync(pairingFile).isSymbolicLink());
     console.log("  [PASS] C2 verified: Configured public proxy origins, IPv6 handling, and anti-CSRF protections pass.");
 
     console.log("\n=== ALL BATCH C COCKPIT & PROXY TESTS PASSED CLEANLY ===\n");

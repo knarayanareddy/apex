@@ -45,6 +45,9 @@ jobs:
       - name: Typecheck
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
         run: npm run typecheck
+      - name: Check JavaScript inventory
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npm run check:js
       - name: Provision Ubuntu bubblewrap on disposable runner
         id: bubblewrap
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}

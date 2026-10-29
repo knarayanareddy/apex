@@ -27,6 +27,7 @@ import type { ExecutionMode } from "../ring11/execution-mode-controller.ts";
 import { rewindChatAndDiskToLeaf } from "../core/git-rewind.ts";
 import { COMPILED_GUARDRAILS_SHA256, loadVerifiedGuardrails } from "../core/guardrail-pin.ts";
 import { GuardDeniedError } from "../core/monotonic-guard.ts";
+import { getLinuxFsBridge } from "../core/linux-fs-bridge.ts";
 import { countO200kTokens } from "../core/prefix-budget.ts";
 import { isSecretBasename } from "../core/safe-path.ts";
 import { scrubSecretsInfallible } from "../core/spill-store.ts";
@@ -221,7 +222,14 @@ export class MissionControlServer {
     this.bootstrapToken = crypto.randomBytes(24).toString("hex");
     this.bootstrapExpiresAt = Date.now() + 5 * 60 * 1000;
     this.bootstrapUsed = false;
-    this.pairingFilePath = path.join(this.workspaceRoot, ".harness", "cockpit-pairing.json");
+    const agentDir = fs.realpathSync(this.controller.getCurrentHarness().agentDir);
+    const realWorkspace = fs.realpathSync(this.workspaceRoot);
+    const relativeAgentDir = path.relative(realWorkspace, agentDir);
+    if (!relativeAgentDir || (!relativeAgentDir.startsWith(`..${path.sep}`) && relativeAgentDir !== ".." && !path.isAbsolute(relativeAgentDir))) {
+      throw new Error("COCKPIT_PAIRING_UNSAFE: agent directory must be outside the workspace");
+    }
+    const workspaceId = crypto.createHash("sha256").update(realWorkspace).digest("hex");
+    this.pairingFilePath = path.join(agentDir, "cockpit-pairings", `${workspaceId}.json`);
     this.requireAuth = opts.requireAuth ?? true;
     this.allowedHosts = new Set([
       "127.0.0.1",
@@ -260,6 +268,13 @@ export class MissionControlServer {
 
   get pairingFile(): string {
     return this.pairingFilePath;
+  }
+
+  private sessionCookie(value: string, clear = false): string {
+    // If any HTTPS proxy is configured, do not allow an untrusted Host or
+    // forwarded-proto header to downgrade cookies on another request path.
+    const secure = this.trustedPublicOrigins.some((origin) => origin.protocol === "https:");
+    return `apex_session=${value}; HttpOnly; SameSite=Strict; Path=/${secure ? "; Secure" : ""}${clear ? "; Max-Age=0" : ""}`;
   }
 
   private _isAllowedHost(hostHeader?: string): boolean {
@@ -574,7 +589,7 @@ export class MissionControlServer {
           }
           this.bootstrapUsed = true;
           const session = this._newBrowserSession();
-          res.setHeader("Set-Cookie", `apex_session=${session}; HttpOnly; SameSite=Strict; Path=/`);
+          res.setHeader("Set-Cookie", this.sessionCookie(session));
           this._sendJson(res, 200, { ok: true }, req);
           return;
         }
@@ -597,7 +612,7 @@ export class MissionControlServer {
               this.bootstrapUsed = true;
               const session = this._newBrowserSession();
               res.writeHead(302, {
-                "Set-Cookie": `apex_session=${session}; HttpOnly; SameSite=Strict; Path=/`,
+                "Set-Cookie": this.sessionCookie(session),
                 Location: pathname === "/index.html" ? "/index.html" : "/"
               });
               res.end();
@@ -612,7 +627,7 @@ export class MissionControlServer {
           if (tokenParam && timingSafeEqualStr(tokenParam, this.authToken)) {
             const session = this._newBrowserSession();
             res.writeHead(302, {
-              "Set-Cookie": `apex_session=${session}; HttpOnly; SameSite=Strict; Path=/`,
+              "Set-Cookie": this.sessionCookie(session),
               Location: pathname === "/index.html" ? "/index.html" : "/"
             });
             res.end();
@@ -680,7 +695,7 @@ export class MissionControlServer {
               }
             }
           }
-          res.setHeader("Set-Cookie", "apex_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+          res.setHeader("Set-Cookie", this.sessionCookie("", true));
           this._sendJson(res, 200, { ok: true, loggedOut: true }, req);
           return;
         }
@@ -2365,31 +2380,65 @@ export class MissionControlServer {
       });
     });
 
-    // Write protected local pairing credential file with mode 0600
+    // Write an exclusive temporary file relative to an opened private directory,
+    // then atomically replace the name without following a destination symlink.
     try {
-      const harnessDir = path.dirname(this.pairingFilePath);
-      if (!fs.existsSync(harnessDir)) {
-        fs.mkdirSync(harnessDir, { recursive: true });
-      }
-      const pairingPayload = JSON.stringify(
-        {
-          url: `http://${this.host}:${this.boundPort}`,
-          token: this.authToken,
-          bootstrapToken: this.bootstrapToken,
-          createdAt: Date.now(),
-          expiresAt: this.bootstrapExpiresAt
-        },
-        null,
-        2
-      );
-      fs.writeFileSync(this.pairingFilePath, pairingPayload, { mode: 0o600 });
+      const bridge = getLinuxFsBridge();
+      const agentDir = path.dirname(path.dirname(this.pairingFilePath));
+      const agentFd = bridge.openRootDir(agentDir);
+      let pairingFd: number | undefined;
+      let tempName: string | undefined;
+      let tempCreated = false;
       try {
-        fs.chmodSync(this.pairingFilePath, 0o600);
-      } catch {
-        // ignore on platforms where chmod fails
+        const parent = fs.fstatSync(agentFd);
+        if (!parent.isDirectory() || (parent.mode & 0o022) !== 0 || (process.getuid && parent.uid !== process.getuid())) {
+          throw new Error("COCKPIT_PAIRING_UNSAFE: agent directory ownership or permissions");
+        }
+        const entry = bridge.fstatatNoFollow(agentFd, "cockpit-pairings");
+        if (!entry) bridge.mkdiratSingle(agentFd, "cockpit-pairings", 0o700);
+        else if (entry.kind !== "dir") throw new Error("COCKPIT_PAIRING_UNSAFE: pairing directory is not a directory");
+        pairingFd = bridge.openBeneath(agentFd, "cockpit-pairings", fs.constants.O_RDONLY | fs.constants.O_DIRECTORY, 0);
+        const privateDir = fs.fstatSync(pairingFd);
+        if (!privateDir.isDirectory() || (privateDir.mode & 0o077) !== 0 || (process.getuid && privateDir.uid !== process.getuid())) {
+          throw new Error("COCKPIT_PAIRING_UNSAFE: pairing directory ownership or permissions");
+        }
+        const targetName = path.basename(this.pairingFilePath);
+        const target = bridge.fstatatNoFollow(pairingFd, targetName);
+        if (target && target.kind !== "file") throw new Error("COCKPIT_PAIRING_UNSAFE: pairing destination is not a regular file");
+        const pairingPayload = JSON.stringify(
+          {
+            url: `http://${this.host}:${this.boundPort}`,
+            token: this.authToken,
+            bootstrapToken: this.bootstrapToken,
+            createdAt: Date.now(),
+            expiresAt: this.bootstrapExpiresAt
+          },
+          null,
+          2
+        );
+        tempName = `.pairing-${crypto.randomBytes(16).toString("hex")}`;
+        const tempFd = bridge.openBeneath(pairingFd, tempName, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+        tempCreated = true;
+        try {
+          fs.writeFileSync(tempFd, pairingPayload);
+          fs.fsyncSync(tempFd);
+        } finally {
+          fs.closeSync(tempFd);
+        }
+        bridge.renameatSingle(pairingFd, tempName, pairingFd, targetName);
+        tempName = undefined;
+      } finally {
+        if (pairingFd !== undefined) {
+          if (tempName && tempCreated) {
+            try { bridge.unlinkatSingle(pairingFd, tempName, false); } catch { /* preserve the original failure */ }
+          }
+          fs.closeSync(pairingFd);
+        }
+        fs.closeSync(agentFd);
       }
     } catch (err) {
-      console.warn(`[APEX_COCKPIT_WARNING] Could not write pairing file: ${String(err)}`);
+      await this.stop();
+      throw new Error(`COCKPIT_PAIRING_UNAVAILABLE: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return {

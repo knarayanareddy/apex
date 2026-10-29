@@ -279,13 +279,15 @@ export async function terminateProcessTree(
     }
   }
 
-  const success = survivingPids.length === 0 && !unverified;
+  const snapshotCleared = survivingPids.length === 0 && !unverified;
   return {
-    success,
+    // Parent/child enumeration cannot account for already-reparented processes.
+    // Never turn a cleared snapshot into a claim of complete ownership cleanup.
+    success: false,
     killedPids,
     survivingPids,
     recycledDetected,
-    diagnostic: success
+    diagnostic: snapshotCleared
       ? `No survivors observed in the discovered process snapshot (${killedPids.length} signalled); reparented or newly spawned descendants are unverified`
       : `Cleanup unverified or incomplete; ${survivingPids.length} process(es) remain: [${survivingPids.join(", ")}]`
   };

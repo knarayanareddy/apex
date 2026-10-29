@@ -212,13 +212,17 @@ export function resolveGitRepositoryLayout(workspaceRoot: string): ResolvedGitLa
  * nested repositories, linked worktrees) beneath `workspaceRoot`.
  */
 export function resolveAllWorkspaceGitLayouts(workspaceRoot: string): ResolvedGitLayout[] {
-  const roots = findWorkspaceGitRoots(workspaceRoot);
+  let roots: string[];
+  try {
+    roots = findWorkspaceGitRoots(workspaceRoot);
+  } catch (err) {
+    throw new SandboxUnavailableError(`Cannot isolate Git repositories: ${err instanceof Error ? err.message : String(err)}`);
+  }
   const layouts: ResolvedGitLayout[] = [];
   for (const root of roots) {
     const layout = resolveGitRepositoryLayout(root);
-    if (layout.isGitRepo) {
-      layouts.push(layout);
-    }
+    if (!layout.isGitRepo) throw new SandboxUnavailableError(`Cannot resolve Git metadata at '${root}'`);
+    layouts.push(layout);
   }
   return layouts;
 }
@@ -282,6 +286,12 @@ export function buildMinimalBwrapArgv(
     }
   }
 
+  const secretScan = scanWorkspaceSecretsAndHardlinks(ws, cfg.unmaskedSecretExceptions);
+  if (!secretScan.complete) {
+    throw new SandboxUnavailableError(
+      `Cannot execute bubblewrap sandbox with incomplete secret mask coverage: ${secretScan.incompleteReasons.join("; ")}`
+    );
+  }
   const allGitLayouts = resolveAllWorkspaceGitLayouts(ws);
   const gitIsoMode = cfg.isolateGitObjectsMode ?? "always";
 
@@ -330,19 +340,23 @@ export function buildMinimalBwrapArgv(
     }
   }
 
-  // Protect control-plane subpaths (`.harness`) strictly Read-Only
+  // Read-only is not private: hide the entire control plane, including other
+  // sessions' spills and cockpit credentials. Authorized spills use readOps.
   const absHarness = path.join(ws, ".harness");
-  if (fs.existsSync(absHarness)) {
-    args.push("--ro-bind", absHarness, absHarness);
+  let harnessStat: fs.Stats | undefined;
+  try {
+    harnessStat = fs.lstatSync(absHarness);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (harnessStat) {
+    if (!harnessStat.isDirectory()) {
+      throw new SandboxUnavailableError("Cannot mask non-directory or symlink .harness control plane");
+    }
+    args.push("--tmpfs", absHarness);
   }
 
   // Mask workspace secret files & hardlink aliases recursively
-  const secretScan = scanWorkspaceSecretsAndHardlinks(ws, cfg.unmaskedSecretExceptions);
-  if (!secretScan.complete) {
-    throw new SandboxUnavailableError(
-      `Cannot execute bubblewrap sandbox with incomplete secret mask coverage: ${secretScan.incompleteReasons.join("; ")}`
-    );
-  }
   for (const secretPath of secretScan.allMaskedPaths) {
     args.push("--ro-bind", "/dev/null", secretPath);
   }

@@ -279,6 +279,15 @@ async function testA1MissingRawReceipts() {
     const summary = reconcileWalOnStartup(stateDb, spillStore, sessId);
     assert.ok(summary.promotedFromCommittedRaw.includes(keyStartupNull));
     assert.ok(summary.promotedFromCommittedRaw.includes(keyStartupEmpty));
+    for (const key of [keyStartupNull, keyStartupEmpty]) {
+      assert.ok(summary.corruptReceipts.some((r) => r.idempotency_key === key));
+      assert.ok(!summary.replayedCommitted.some((r) => r.idempotency_key === key));
+    }
+    const again = reconcileWalOnStartup(stateDb, spillStore, sessId);
+    for (const key of [keyStartupNull, keyStartupEmpty]) {
+      assert.ok(again.corruptReceipts.some((r) => r.idempotency_key === key));
+      assert.ok(!again.replayedCommitted.some((r) => r.idempotency_key === key));
+    }
 
     // The promoted rows must have been promoted to EFFECT_COMMITTED with isError: true
     const rowNull = stateDb.getWalRow(keyStartupNull)!;

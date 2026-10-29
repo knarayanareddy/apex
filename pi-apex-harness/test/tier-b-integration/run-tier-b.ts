@@ -60,6 +60,9 @@ async function runTierB(): Promise<void> {
 
     const b1Ws = path.join(tmpRoot, "b1-ws");
     fs.mkdirSync(path.join(b1Ws, ".harness"), { recursive: true });
+    fs.writeFileSync(path.join(b1Ws, ".harness", "cockpit-pairing.json"), "synthetic-cockpit-bearer");
+    fs.mkdirSync(path.join(b1Ws, ".harness", "spill", "session-foreign"), { recursive: true });
+    fs.writeFileSync(path.join(b1Ws, ".harness", "spill", "session-foreign", "private"), "synthetic-foreign-spill");
     fs.mkdirSync(path.join(b1Ws, "service"), { recursive: true });
     execFileSync("git", ["init", "-q"], { cwd: b1Ws });
     execFileSync("git", ["config", "user.email", "test@pi-apex.local"], { cwd: b1Ws });
@@ -90,6 +93,15 @@ async function runTierB(): Promise<void> {
     });
     assert.ok(hostDanglingCat.includes("sk_dangling_888888"));
 
+    const deepRepoRel = path.join("deep", "one", "two", "three", "four", "five", "six", "seven");
+    const deepRepo = path.join(b1Ws, deepRepoRel);
+    fs.mkdirSync(deepRepo, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: deepRepo });
+    const deepBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+      cwd: deepRepo, input: "synthetic-deep-git-secret", encoding: "utf8"
+    }).trim();
+    assert.equal(execFileSync("git", ["cat-file", "-p", deepBlob], { cwd: deepRepo, encoding: "utf8" }), "synthetic-deep-git-secret");
+
     // Confirm default `buildMinimalBwrapArgv` (`isolateGitObjectsMode` omitted -> `"always"`) mounts `--tmpfs` over `.git/objects` and `.git/logs`
     const defaultArgv = buildMinimalBwrapArgv("true", b1Ws, { workspaceRoot: b1Ws, mode: "workspace-write" });
     assert.ok(defaultArgv.includes("--tmpfs"));
@@ -117,6 +129,8 @@ async function runTierB(): Promise<void> {
         `python3 -c 'import errno, os, pathlib;`,
         `print("SSH_EXISTS=" + str(pathlib.Path("${fakeSshKeyPath}").exists()));`,
         `print("ENV_LEAK=" + str(os.environ.get("OPENAI_API_KEY", "NONE")));`,
+        `print("PAIRING_HIDDEN=" + str(not pathlib.Path(".harness/cockpit-pairing.json").exists()));`,
+        `print("FOREIGN_SPILL_HIDDEN=" + str(not pathlib.Path(".harness/spill/session-foreign/private").exists()));`,
         `for label, p in [("DOTENV", ".env"), ("NESTED_ENV", "service/.env"), ("HARDLINK_ALIAS", "innocent-alias.txt")]:`,
         `  try:`,
         `    d = open(p).read()`,
@@ -135,6 +149,7 @@ async function runTierB(): Promise<void> {
         `print("EXAMPLE_OK=" + open(".env.example").read().strip());'`,
         `(git cat-file -p HEAD:.env 2>/dev/null && echo "GIT_CAT_SECRET=LEAKED") || echo "GIT_CAT_SECRET=BLOCKED"`,
         `(git cat-file -p ${danglingBlobOid} 2>/dev/null && echo "GIT_DANGLING_SECRET=LEAKED") || echo "GIT_DANGLING_SECRET=BLOCKED"`,
+        `(git -C ${deepRepoRel} cat-file -p ${deepBlob} 2>/dev/null && echo "DEEP_GIT_SECRET=LEAKED") || echo "DEEP_GIT_SECRET=BLOCKED"`,
         `(echo hacked > .git/hooks/pre-commit) 2>/dev/null && echo "HOOK_WROTE=YES" || echo "HOOK_WROTE=BLOCKED_RO"`,
         `python3 -c 'import socket; s=socket.socket(); s.settimeout(1); s.connect(("1.1.1.1", 80))' 2>/dev/null && echo "NET=OPEN" || echo "NET=ISOLATED"`,
         `echo "CLEAN_WRITE" > allowed.txt && cat allowed.txt`
@@ -154,6 +169,9 @@ async function runTierB(): Promise<void> {
 
     assert.ok(bwrapStdout.includes("SSH_EXISTS=False"), `Host SSH key leaked: ${bwrapStdout}`);
     assert.ok(bwrapStdout.includes("ENV_LEAK=NONE"), `Host env leaked: ${bwrapStdout}`);
+    assert.ok(bwrapStdout.includes("PAIRING_HIDDEN=True"), `Cockpit pairing file exposed: ${bwrapStdout}`);
+    assert.ok(bwrapStdout.includes("FOREIGN_SPILL_HIDDEN=True"), `Foreign spill exposed: ${bwrapStdout}`);
+    assert.ok(bwrapStdout.includes("DEEP_GIT_SECRET=BLOCKED"), `Deep Git secret exposed: ${bwrapStdout}`);
     assert.ok(bwrapStdout.includes("DOTENV_BLOCKED=True"), `.env was readable: ${bwrapStdout}`);
     assert.ok(bwrapStdout.includes("NESTED_ENV_BLOCKED=True"), `Untracked service/.env was readable: ${bwrapStdout}`);
     assert.ok(bwrapStdout.includes("HARDLINK_ALIAS_BLOCKED=True"), `Hardlink alias to service/.env was readable: ${bwrapStdout}`);
