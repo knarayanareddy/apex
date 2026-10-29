@@ -982,11 +982,20 @@ async function runTierB(): Promise<void> {
     const b4WalRows = harness.stateDb.db
       .prepare(`SELECT tool_name, tool_call_id, parent_tool_call_id, status FROM wal_intents WHERE session_id = ?`)
       .all(harness.session.sessionManager.getSessionId()) as Array<{ tool_name: string; tool_call_id: string; parent_tool_call_id: string | null; status: string }>;
-    if (b4WalRows.length !== 1) {
-      console.error(`[TIER_B_B4_WAL_DIAGNOSTIC] ${JSON.stringify(b4WalRows)}`);
-    }
-    assert.equal(b4WalRows.length, 1);
-    assert.equal(b4WalRows[0].status, "TRANSCRIPT_APPENDED");
+    assert.equal(b4WalRows.length, 2, "Both successful nested effects must have WAL rows");
+    assert.deepEqual(
+      b4WalRows.map((row) => ({
+        tool_name: row.tool_name,
+        tool_call_id: row.tool_call_id,
+        parent_tool_call_id: row.parent_tool_call_id,
+        status: row.status
+      })).sort((a, b) => a.tool_call_id.localeCompare(b.tool_call_id)),
+      [
+        { tool_name: "mcp_enterprise_op_42", tool_call_id: "cm_turn_1/1", parent_tool_call_id: "cm_turn_1", status: "TRANSCRIPT_APPENDED" },
+        { tool_name: "bash", tool_call_id: "cm_turn_1/4", parent_tool_call_id: "cm_turn_1", status: "TRANSCRIPT_APPENDED" }
+      ],
+      "Every successful nested effect must retain its parent linkage and durable transcript status"
+    );
 
     harness.dispose();
     checks.push(
