@@ -52,12 +52,14 @@ export function isSecretBasename(
 
 export const MAX_SECRET_SCAN_DEPTH = 32;
 export const MAX_SECRET_SCAN_DIRECTORIES = 25000;
+export const MAX_CONTROL_PLANE_SCAN_ENTRIES = 100000;
 
 export interface SecretScanResult {
   realWorkspaceRoot: string;
   allMaskedPaths: string[];
   hardlinkAliasPaths: string[];
   secretInodeKeys: Set<string>;
+  controlPlaneHasHardlinks: boolean;
   complete: boolean;
   incompleteReasons: string[];
 }
@@ -77,6 +79,7 @@ export function scanWorkspaceSecretsAndHardlinks(
       allMaskedPaths: [],
       hardlinkAliasPaths: [],
       secretInodeKeys: new Set(),
+      controlPlaneHasHardlinks: false,
       complete: true,
       incompleteReasons: []
     };
@@ -91,6 +94,8 @@ export function scanWorkspaceSecretsAndHardlinks(
   let complete = true;
   const incompleteReasons: string[] = [];
   let totalDirectoriesVisited = 0;
+  let controlPlaneHasHardlinks = false;
+  let controlPlaneEntries = 0;
 
   const deferredHeavyDirs: string[] = [];
 
@@ -157,6 +162,70 @@ export function scanWorkspaceSecretsAndHardlinks(
   };
 
   walkPass1(realWs, "", 0);
+
+  // Private control-plane data is not named like a conventional secret. Track
+  // linked inodes so workspace aliases cannot bypass session-aware reads.
+  const harnessDir = path.join(realWs, ".harness");
+  let controlPlaneScanStopped = false;
+  const stopControlPlaneScan = (reason: string) => {
+    complete = false;
+    controlPlaneScanStopped = true;
+    incompleteReasons.push(reason);
+  };
+  const scanControlPlane = (dir: string, depth: number) => {
+    if (controlPlaneScanStopped) return;
+    if (depth >= MAX_SECRET_SCAN_DEPTH || ++totalDirectoriesVisited > MAX_SECRET_SCAN_DIRECTORIES) {
+      stopControlPlaneScan(`Control-plane scan limit reached at '${dir}'`);
+      return;
+    }
+    let stream: fs.Dir | undefined;
+    try {
+      stream = fs.opendirSync(dir);
+      while (!controlPlaneScanStopped) {
+        const entry = stream.readSync();
+        if (!entry) break;
+        if (++controlPlaneEntries > MAX_CONTROL_PLANE_SCAN_ENTRIES) {
+          stopControlPlaneScan(`Control-plane entry limit reached at '${dir}'`);
+          break;
+        }
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) scanControlPlane(full, depth + 1);
+        else if (entry.isFile()) {
+          try {
+            const st = fs.lstatSync(full);
+            if (!st.isFile()) throw new Error("file changed during scan");
+            if (st.nlink > 1) {
+              controlPlaneHasHardlinks = true;
+              secretInodeKeys.add(`${st.dev}:${st.ino}`);
+            }
+          } catch (err) {
+            stopControlPlaneScan(`Control-plane file inspection error at '${full}': ${String(err)}`);
+          }
+        } else {
+          stopControlPlaneScan(`Control-plane entry is a symlink or non-regular file: '${full}'`);
+        }
+      }
+    } catch (err) {
+      stopControlPlaneScan(`Control-plane directory read error at '${dir}': ${String(err)}`);
+    } finally {
+      if (stream) {
+        try { stream.closeSync(); }
+        catch (err) { stopControlPlaneScan(`Control-plane directory close error at '${dir}': ${String(err)}`); }
+      }
+    }
+  };
+  try {
+    const st = fs.lstatSync(harnessDir);
+    if (!st.isDirectory()) {
+      complete = false;
+      incompleteReasons.push("Control-plane path is not a directory");
+    } else scanControlPlane(harnessDir, 0);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      complete = false;
+      incompleteReasons.push(`Control-plane inspection error: ${String(err)}`);
+    }
+  }
 
   const walkHeavyDir = (absDir: string, depth: number = 0) => {
     if (depth >= MAX_SECRET_SCAN_DEPTH) {
@@ -274,6 +343,7 @@ export function scanWorkspaceSecretsAndHardlinks(
     allMaskedPaths: Array.from(maskedSet).sort(),
     hardlinkAliasPaths: hardlinkAliases.sort(),
     secretInodeKeys,
+    controlPlaneHasHardlinks,
     complete,
     incompleteReasons
   };

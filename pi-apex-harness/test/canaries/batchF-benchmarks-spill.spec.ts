@@ -259,6 +259,13 @@ async function testF3LiveSessionIsolation(): Promise<void> {
       /cross-session spill read denied/,
       "The live read tool must deny other sessions' spills"
     );
+    const alias = path.join(ws, "foreign-spill-alias.json");
+    fs.linkSync(other.spillPath, alias);
+    await assert.rejects(
+      () => read.execute("read-foreign-alias", { path: alias }, new AbortController().signal, () => {}),
+      /hardlink alias/,
+      "The live read tool must deny a hardlinked alias to another session's spill"
+    );
   } finally {
     h.dispose();
     fs.rmSync(ws, { recursive: true, force: true });

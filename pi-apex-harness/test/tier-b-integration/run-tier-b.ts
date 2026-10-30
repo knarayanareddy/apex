@@ -191,6 +191,18 @@ async function runTierB(): Promise<void> {
     assert.ok(bwrapStdout.includes("NET=ISOLATED"), `--unshare-net did not isolate network: ${bwrapStdout}`);
     assert.equal(fs.readFileSync(path.join(b1Ws, "allowed.txt"), "utf8").trim(), "CLEAN_WRITE");
 
+    const aliasWs = path.join(tmpRoot, "b1-control-hardlink");
+    fs.mkdirSync(path.join(aliasWs, ".harness", "spill"), { recursive: true });
+    const privateFile = path.join(aliasWs, ".harness", "spill", "private");
+    fs.writeFileSync(privateFile, "synthetic-private-spill");
+    fs.linkSync(privateFile, path.join(aliasWs, "public-alias"));
+    const aliasOps = createBwrapBashOperations({ workspaceRoot: aliasWs, mode: "workspace-write", unshareNet: true });
+    await assert.rejects(
+      () => aliasOps.exec("cat public-alias", aliasWs, { onData: () => {}, timeout: 10 }),
+      /control-plane files have hardlinks/,
+      "An actual sandbox execution must fail before a hardlinked private spill can be read"
+    );
+
     // Reviewer #5 Issue #3b Verification: Linked `git worktree` (`.git` pointer file -> external `commonDir/objects`)!
     const linkedWtDir = path.join(tmpRoot, "b1-linked-worktree");
     execFileSync("git", ["worktree", "add", "-q", "-b", "wt-isolated", linkedWtDir, "HEAD"], { cwd: b1Ws });

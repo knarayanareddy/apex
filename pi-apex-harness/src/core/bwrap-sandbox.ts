@@ -292,6 +292,9 @@ export function buildMinimalBwrapArgv(
       `Cannot execute bubblewrap sandbox with incomplete secret mask coverage: ${secretScan.incompleteReasons.join("; ")}`
     );
   }
+  if (secretScan.controlPlaneHasHardlinks) {
+    throw new SandboxUnavailableError("Cannot execute bubblewrap sandbox while control-plane files have hardlinks");
+  }
   const allGitLayouts = resolveAllWorkspaceGitLayouts(ws);
   const gitIsoMode = cfg.isolateGitObjectsMode ?? "always";
 
