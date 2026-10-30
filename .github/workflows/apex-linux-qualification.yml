@@ -151,6 +151,23 @@ jobs:
       - name: Security canaries
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
         run: npm run test:canaries
+      - name: PID namespace leader-exit boundary (diagnostic only)
+        id: pid_leader_diagnostic
+        # One-shot experiment on the next PR commit; later pushes must not retry it.
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-22.04' && steps.bubblewrap.outcome == 'success' && github.event_name == 'pull_request' && github.head_ref == 'fix/apex-safety-recovery' && github.event.pull_request.commits == 24 }}
+        continue-on-error: true
+        run: node --experimental-strip-types test/canaries/linux-pid1-exit.spec.ts
+      - name: Report PID namespace diagnostic outcome
+        if: ${{ !cancelled() && steps.pid_leader_diagnostic.outcome == 'failure' }}
+        run: echo '::warning::PID namespace natural leader-exit diagnostic failed; descendant containment remains unqualified.'
+      - name: Cross-device hardlink boundary (diagnostic only)
+        id: private_device_diagnostic
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-22.04' && github.event_name == 'pull_request' && github.head_ref == 'fix/apex-safety-recovery' && github.event.pull_request.commits == 24 }}
+        continue-on-error: true
+        run: node --experimental-strip-types test/canaries/linux-private-filesystem-probe.spec.ts
+      - name: Report cross-device diagnostic outcome
+        if: ${{ !cancelled() && steps.private_device_diagnostic.outcome == 'failure' }}
+        run: echo '::warning::Cross-device fixture unavailable or failed; private-state isolation remains unqualified.'
       - name: Required Linux confinement
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
         run: npm run test:linux
@@ -173,3 +190,39 @@ jobs:
       - name: Compare installed browser binaries (diagnostic only)
         if: ${{ !cancelled() && steps.browser_qualification.outcome == 'failure' }}
         run: node --experimental-strip-types test/ring7/compare-browser-binaries.ts
+
+  fresh-browser-boundary:
+    name: Fresh-runner browser probe (diagnostic only)
+    # One-shot experiment on PR commit 24; never re-run it on subsequent pushes.
+    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'fix/apex-safety-recovery' && github.event.pull_request.commits == 24 }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, google-chrome]
+    defaults:
+      run:
+        working-directory: pi-apex-harness
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 26.10.0
+          cache: npm
+          cache-dependency-path: pi-apex-harness/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build native bridge
+        run: npm run build:native
+      - name: Verify observer
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 test/ring7/test_trace_browser_ci.py
+      - name: Observe one fresh-runner binary startup (not qualification)
+        env:
+          APEX_COMPARE_REQUIRE_SUCCESS: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 test/ring7/trace_browser_ci.py --compare /usr/bin/${{ matrix.browser }}

@@ -157,7 +157,7 @@ def sample_owned_tree(root_pid, proc=Path("/proc")):
     return {"available": True, "owned_process_count": len(owned), "browsers": browsers[:40]}
 
 
-def run_observed(command, sampler=sample_owned_tree):
+def run_observed(command, sampler=sample_owned_tree, report_always=False):
     child = subprocess.Popen(command)
     samples = collections.deque(maxlen=50)
     total = 0
@@ -169,12 +169,13 @@ def run_observed(command, sampler=sample_owned_tree):
         total += 1
         time.sleep(0.5)
     code = child.returncode
-    if code != 0:
+    if code != 0 or report_always:
         try:
             clock_ticks = os.sysconf("SC_CLK_TCK")
         except (ValueError, OSError):
             clock_ticks = None
-        print("BROWSER_TRACE_FAILURE " + json.dumps({
+        label = "BROWSER_TRACE_FAILURE " if code != 0 else "BROWSER_TRACE_DIAGNOSTIC "
+        print(label + json.dumps({
             "exit": code, "clock_ticks_per_second": clock_ticks, "samples_total": total,
             "samples_retained": len(samples), "samples": list(samples)
         }, separators=(",", ":")), file=sys.stderr, flush=True)
@@ -186,6 +187,12 @@ def run_observed(command, sampler=sample_owned_tree):
 def main():
     if sys.platform != "linux":
         print("BROWSER_TRACE_UNAVAILABLE: Linux /proc is required", file=sys.stderr)
+        return 1
+    if len(sys.argv) == 3 and sys.argv[1] == "--compare" and sys.argv[2] in {"/usr/bin/chromium", "/usr/bin/google-chrome"}:
+        print("Running one browser binary comparison with read-only owned-process observation", flush=True)
+        return run_observed(["node", "--experimental-strip-types", "test/ring7/compare-browser-binaries.ts", sys.argv[2]], report_always=True)
+    if len(sys.argv) != 1:
+        print("BROWSER_TRACE_INVALID_ARGUMENTS", file=sys.stderr)
         return 1
     print("Running npm run test:browser once with read-only owned-process observation", flush=True)
     return run_observed(["npm", "run", "test:browser"])

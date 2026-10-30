@@ -1,8 +1,12 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
+import inspect
+import contextlib
+import io
 from pathlib import Path
 
 import trace_browser_ci as trace
@@ -81,6 +85,61 @@ class BrowserTraceTests(unittest.TestCase):
             result = run_observed([sys.executable, "-c", code, str(marker)], sampler=lambda _pid: {"available": False})
             self.assertEqual(result, 7)
             self.assertEqual(marker.read_text(), "x")
+
+    def test_successful_diagnostic_can_report_samples(self):
+        self.assertIn("report_always", inspect.signature(run_observed).parameters)
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            result = run_observed([sys.executable, "-c", "raise SystemExit(0)"], sampler=lambda _pid: {"available": False}, report_always=True)
+        self.assertEqual(result, 0)
+        self.assertIn("BROWSER_TRACE_DIAGNOSTIC", output.getvalue())
+
+    def test_required_comparison_fails_if_browser_is_missing(self):
+        script = Path(__file__).with_name("compare-browser-binaries.ts")
+        env = dict(os.environ, APEX_COMPARE_REQUIRE_SUCCESS="1")
+        result = subprocess.run(["node", "--experimental-strip-types", str(script), "/nonexistent/apex-synthetic-browser"], env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('"available":false', result.stdout)
+
+    def test_required_comparison_fails_if_browser_exits(self):
+        script = Path(__file__).with_name("compare-browser-binaries.ts")
+        with tempfile.TemporaryDirectory() as directory:
+            browser = Path(directory) / "fake-browser"
+            browser.write_text("#!/bin/sh\nexit 23\n")
+            browser.chmod(0o700)
+            env = dict(os.environ, APEX_COMPARE_REQUIRE_SUCCESS="1")
+            result = subprocess.run(["node", "--experimental-strip-types", str(script), str(browser)], env=env, capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('"ok":false', result.stdout)
+
+    def test_nonrequired_missing_comparison_is_diagnostic(self):
+        script = Path(__file__).with_name("compare-browser-binaries.ts")
+        env = dict(os.environ)
+        env.pop("APEX_COMPARE_REQUIRE_SUCCESS", None)
+        result = subprocess.run(["node", "--experimental-strip-types", str(script), "/nonexistent/apex-synthetic-browser"], env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('"available":false', result.stdout)
+
+    def test_required_comparison_bounds_a_hung_target_request(self):
+        script = Path(__file__).with_name("compare-browser-binaries.ts")
+        with tempfile.TemporaryDirectory() as directory:
+            browser = Path(directory) / "fake-browser"
+            marker = Path(directory) / "request-observed"
+            marker_js = json.dumps(str(marker))
+            browser.write_text(
+                "#!/usr/bin/env node\n"
+                "const http=require('node:http'), fs=require('node:fs');\n"
+                f"const server=http.createServer(() => fs.writeFileSync({marker_js}, 'seen'));\n"
+                "server.listen(0, '127.0.0.1', () => process.stderr.write("
+                "`DevTools listening on ws://127.0.0.1:${server.address().port}/devtools/browser/test\\n`));\n"
+                "setTimeout(() => process.exit(0), 4000);\n"
+            )
+            browser.chmod(0o700)
+            env = dict(os.environ, APEX_COMPARE_REQUIRE_SUCCESS="1", APEX_COMPARE_TIMEOUT_MS="2000")
+            result = subprocess.run(["node", "--experimental-strip-types", str(script), str(browser)], env=env, capture_output=True, text=True, timeout=8)
+            self.assertTrue(marker.exists(), "The synthetic browser must reach the stalled HTTP request")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('"errorCode":"BROWSER_COMPARISON_TIMEOUT"', result.stdout)
 
 
 if __name__ == "__main__":
