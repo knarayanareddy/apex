@@ -288,7 +288,7 @@ export async function createSharedModelRuntime(agentDir: string = getAgentDir())
 
 /**
  * Normalizes machine-dependent absolute filesystem paths in codemode.description
- * so that active tool schema token count is locked to exactly 1,073 tokens across all environments.
+ * so the default active tool schema has a reproducible 1,053-token baseline.
  */
 function createNormalizedCodemodeExtension(options?: Parameters<typeof createCodemodeExtension>[0]): ExtensionFactory {
   const innerFactory = createCodemodeExtension(options);
@@ -592,7 +592,7 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
   sessionRef = session;
 
   // Normalize machine-dependent absolute filesystem paths in tool descriptions (e.g. codemode.md)
-  // to ensure reproducible, machine-invariant o200k schema token counts (1,073) across checkouts.
+  // to ensure the default o200k schema count is reproducible across checkouts.
   for (const t of session.agent.state.tools) {
     if (t.name === "codemode" && t.description) {
       t.description = t.description.replace(
