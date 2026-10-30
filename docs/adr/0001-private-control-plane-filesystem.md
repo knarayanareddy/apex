@@ -24,5 +24,9 @@ Startup must verify the actual workspace/mount topology and fail closed if the
 boundary is missing or exposed. Existing SQLite/WAL, sessions and spills need
 an offline, non-destructive migration and restart verification. `st_dev` checks
 at two directory roots alone do not exclude nested mounts of the private device.
+Mounting the dedicated filesystem at the existing `.harness` pathname may retain
+current session and spill references, but must be verified on both platforms;
+mounting over an existing directory hides its old contents. No live mount or
+migration has been authorized yet.
 Revisit after a verified alternative supplies equivalent kernel isolation and
 durable recovery.

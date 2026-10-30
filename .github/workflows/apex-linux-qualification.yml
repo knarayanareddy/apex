@@ -153,8 +153,8 @@ jobs:
         run: npm run test:canaries
       - name: PID namespace leader-exit boundary (diagnostic only)
         id: pid_leader_diagnostic
-        # One-shot experiment on the next PR commit; later pushes must not retry it.
-        if: ${{ !cancelled() && matrix.os == 'ubuntu-22.04' && steps.bubblewrap.outcome == 'success' && github.event_name == 'pull_request' && github.head_ref == 'fix/apex-safety-recovery' && github.event.pull_request.commits == 24 }}
+        # One corrected peer-identity probe after the earlier /proc permission failure.
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-22.04' && steps.bubblewrap.outcome == 'success' && github.event_name == 'pull_request' && github.head_ref == 'fix/apex-safety-recovery' && github.event.pull_request.commits == 25 }}
         continue-on-error: true
         run: node --experimental-strip-types test/canaries/linux-pid1-exit.spec.ts
       - name: Report PID namespace diagnostic outcome

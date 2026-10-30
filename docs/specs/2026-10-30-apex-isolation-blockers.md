@@ -46,3 +46,11 @@ No host security-policy changes, user data deletion, blind browser retries or
 claim of physical power-loss certification. Roll back code separately from state:
 never discard either legacy or migrated data as part of rollback. Exact volume
 location, durable provisioning, mount topology and migration handoff remain open.
+
+## Entry points that need the storage preflight
+
+The CLI creates or opens its session manager before Ring 0; direct Ring 0 and
+Ring 4 APIs, workspace switches, subagent worktrees, and benchmark workspaces
+also create private state. A check only in the read tool or only after Ring 0
+construction would miss earlier writes. Temporary worktrees must receive their
+own qualified state storage; they must not fall back silently to the workspace.
