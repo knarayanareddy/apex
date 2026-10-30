@@ -19,6 +19,7 @@ import { getDocsPath } from "@earendil-works/pi-coding-agent";
 
 import { createRing0Harness } from "../../src/core/ring0-session.ts";
 import { GuardDeniedError } from "../../src/core/monotonic-guard.ts";
+import { countActiveToolSchemaTokens, countO200kTokens, PrefixMutationError } from "../../src/core/prefix-budget.ts";
 
 async function runBatchBVerification() {
   console.log("=== Running Batch B: Codemode Documentation Delivery & Invariance ===");
@@ -91,6 +92,8 @@ async function runBatchBVerification() {
     // Verify expected documentation bytes arrive
     const expectedDocBytes = fs.readFileSync(path.join(getDocsPath(), "codemode.md"), "utf8");
     assert.ok(resultText.length > 500, "Documentation bytes must be populated");
+    assert.ok(resultText.includes("Apex-specific tool-result policy"), "Bundled guide must describe Apex's output budget");
+    assert.ok(resultText.includes(expectedDocBytes), "The complete upstream guide must remain available");
     assert.ok(
       resultText.includes("codemode") || resultText.includes("JavaScript"),
       "Documentation content must match codemode documentation"
@@ -177,6 +180,17 @@ async function runBatchBVerification() {
       codemodeTool2.description,
       "codemode description must be byte-identical across checkouts (including spaces)"
     );
+
+    const schema = (tools: typeof h1.session.agent.state.tools) => JSON.stringify(tools.map((tool) => ({
+      name: tool.name, description: tool.description ?? "", parameters: tool.parameters ?? null
+    })));
+    assert.deepEqual(h1.session.agent.state.tools.map((tool) => tool.name), ["read", "bash", "edit", "write", "codemode"]);
+    assert.equal(schema(h1.session.agent.state.tools), schema(h2.session.agent.state.tools), "Complete default schemas must match across paths");
+    assert.equal(countO200kTokens(schema(h1.session.agent.state.tools)), 1053, "The pinned default schema baseline is 1053 o200k tokens");
+    assert.equal(countActiveToolSchemaTokens(h1.session.agent.state.tools), 1053);
+    const altered = h1.session.agent.state.tools.map((tool) => tool.name === "read" ? { ...tool, description: `${tool.description} modified` } : tool);
+    assert.notEqual(countActiveToolSchemaTokens(altered), 1053, "The schema measurement must use its supplied live tools");
+    assert.throws(() => h1.prefix.verifyInvariantBeforeRequest(h1.session.systemPrompt, altered), PrefixMutationError, "Changing a tool schema must trip prefix drift detection");
 
     // Verify zero mid-session drift
     assert.doesNotThrow(() => {

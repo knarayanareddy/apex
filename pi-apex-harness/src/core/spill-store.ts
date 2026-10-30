@@ -28,6 +28,29 @@ export function scrubSecretsInfallible(input: string): string {
   }
 }
 
+/** Scrub textual fields and keys without applying text patterns to image bytes. */
+function scrubStructuredValue(value: unknown, ancestors = new WeakSet<object>()): unknown {
+  if (typeof value === "string") return scrubSecretsInfallible(value);
+  if (value === null || typeof value !== "object") return value;
+  if (ancestors.has(value)) throw new Error("CYCLIC_STRUCTURED_CONTENT");
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) return value.map((entry) => scrubStructuredValue(entry, ancestors));
+    const source = value as Record<string, unknown>;
+    const sanitized: Record<string, unknown> = Object.create(null);
+    for (const [key, entry] of Object.entries(source)) {
+      const safeKey = scrubSecretsInfallible(key);
+      if (Object.hasOwn(sanitized, safeKey)) throw new Error("STRUCTURED_KEY_COLLISION");
+      sanitized[safeKey] = source.type === "image" && key === "data" && typeof entry === "string"
+        ? entry
+        : scrubStructuredValue(entry, ancestors);
+    }
+    return sanitized;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
 export interface SpillOptions {
   rootDir: string;
   maxInlineBytes?: number;
@@ -145,7 +168,7 @@ export class PrivateSpillStore {
       const spillFile = path.join(sessionDir, `structured-${Date.now()}-${rand}.json`);
       const fd = fs.openSync(spillFile, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600);
       try {
-        const json = scrubSecretsInfallible(JSON.stringify(content, null, 2));
+        const json = JSON.stringify(scrubStructuredValue(content), null, 2);
         fs.writeFileSync(fd, json, "utf8");
       } finally {
         fs.closeSync(fd);

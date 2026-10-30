@@ -9,6 +9,7 @@ import { GuardDeniedError } from "./monotonic-guard.ts";
 import {
   isSecretBasename,
   mkdirSingleBeneathWorkspace,
+  openParentDirFdBeneath,
   openWorkspaceRootFd,
   PathContainmentError,
   rmdirEmptyBeneathWorkspace,
@@ -892,6 +893,27 @@ function executePendingRewindOps(params: {
 
     // If syscall already took effect right before a previous crash (before SQLite UPDATE committed), promote cleanly!
     if (entryStatesEqual(liveNow, expAfter)) {
+      if (durabilityMode === "power-loss-safe") {
+        const { wsFd: syncRootFd } = openWorkspaceRootFd(realWs);
+        try {
+          if (op.op_kind === "WRITE_BLOB") {
+            const fileFd = getLinuxFsBridge().openBeneath(syncRootFd, op.rel_path, fs.constants.O_RDONLY, 0);
+            try {
+              fs.fsyncSync(fileFd);
+            } finally {
+              fs.closeSync(fileFd);
+            }
+          }
+          const parent = openParentDirFdBeneath({ wsFd: syncRootFd, realWs, relPath: op.rel_path, createMissingDirs: false });
+          try {
+            fs.fsyncSync(parent.parentDirFd);
+          } finally {
+            if (parent.ownsFd) fs.closeSync(parent.parentDirFd);
+          }
+        } finally {
+          fs.closeSync(syncRootFd);
+        }
+      }
       markCompletedStmt.run(Date.now(), txId, op.op_seq);
       if (faultInjectStopAfterOpSeq !== undefined && op.op_seq >= faultInjectStopAfterOpSeq) {
         throw new Error(`FAULT_INJECT_CRASH_AFTER_OP_SEQ_${op.op_seq}`);

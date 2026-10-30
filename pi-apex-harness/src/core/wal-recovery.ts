@@ -410,28 +410,20 @@ export function normalizeWalToolResult<T = unknown>(params: {
       let primaryTextSet = false;
       let primaryDeliveryText: string | undefined;
       finalContent = [];
-      let blockIdx = 0;
       for (const block of rawContent) {
-        blockIdx++;
         if (block.type === "image") {
           finalContent.push(block);
         } else if (block.type === "text") {
-          const rawBlockText = typeof (block as any).text === "string" ? (block as any).text : "";
-          const blockByteLen = Buffer.byteLength(rawBlockText, "utf8");
           if (!primaryTextSet) {
             primaryTextSet = true;
             let deliveryText = spillOut.text;
             if (structSpill.spilled && structSpill.spillPath) {
               deliveryText += `\n[FULL STRUCTURED CONTENT PRESERVED: ${structSpill.spillPath}]`;
+            } else {
+              deliveryText += "\n[FULL STRUCTURED CONTENT UNAVAILABLE: structured spill failed]";
             }
             primaryDeliveryText = deliveryText;
             finalContent.push({ ...block, text: deliveryText });
-          } else {
-            // Secondary text blocks in an oversized result carry explicit omission placeholders with metadata
-            const omissionNotice = structSpill.spilled && structSpill.spillPath
-              ? `[TEXT BLOCK ${blockIdx} OMITTED INLINE: ${blockByteLen} bytes; full block preserved in ${structSpill.spillPath}]`
-              : `[TEXT BLOCK ${blockIdx} TRUNCATED INLINE: spill unavailable (${structSpill.error ?? "ENOSPC"}); total ${blockByteLen} bytes]`;
-            finalContent.push({ type: "text", text: omissionNotice });
           }
         } else {
           finalContent.push(block);
@@ -791,7 +783,7 @@ export function decodeCommittedReceipt(raw: unknown): ReceiptDecodeResult {
         return {
           ok: false,
           code: "WAL_RECEIPT_INVALID",
-          reason: `UNSUPPORTED_CONTENT_BLOCK_TYPE: block at index ${i} has unsupported type '${String(blockObj["type"])}'`
+          reason: `UNSUPPORTED_CONTENT_BLOCK_TYPE: block at index ${i} has an unsupported type`
         };
       }
     }
@@ -855,7 +847,7 @@ export function isReceiptDeliveryCompliant(
     }
 
     const noticeBytes = Buffer.byteLength(cached.finalText, "utf8");
-    if (noticeBytes > maxNoticeBytes) {
+    if (noticeBytes > maxNoticeBytes || aggregateBytes > maxNoticeBytes || aggregateText !== cached.finalText) {
       return false;
     }
 
@@ -1457,6 +1449,25 @@ export function reconcileWalOnStartup(
         finalizeCommittedRawRow(stateDb, spillStore, row);
         summary.promotedFromCommittedRaw.push(row.idempotency_key);
         committedRow = stateDb.getWalRow(row.idempotency_key)!;
+      }
+
+      // Promotion preserves an error result so the effect is never re-run, but
+      // that result must not make malformed raw evidence look like a healthy
+      // replay on this or later startups.
+      let invalidRawDiagnostic = false;
+      try {
+        const result = JSON.parse(committedRow.result_json ?? "null");
+        invalidRawDiagnostic = result?.isError === true &&
+          typeof result.finalText === "string" &&
+          result.finalText.startsWith("[WAL_RECEIPT_INVALID: raw_receipt_json ") &&
+          (!committedRow.raw_receipt_json || !decodeCommittedReceipt(committedRow.raw_receipt_json).ok);
+      } catch {
+        // The normal committed-result validation below classifies malformed JSON.
+      }
+      if (invalidRawDiagnostic) {
+        summary.corruptReceipts.push(committedRow);
+        console.warn(`[WAL_RECOVERY_DIAGNOSTIC] Invalid raw WAL receipt in idempotency_key ${committedRow.idempotency_key}`);
+        continue;
       }
 
       let receiptIsInvalid = false;

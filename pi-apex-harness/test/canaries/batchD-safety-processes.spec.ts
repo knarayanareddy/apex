@@ -48,6 +48,8 @@ import {
   terminateProcessTree
 } from "../../src/core/process-tree.ts";
 import { StateDb } from "../../src/core/state-db.ts";
+import { loadVerifiedGuardrails } from "../../src/core/guardrail-pin.ts";
+import { PtyLeaseManager } from "../../src/ring2/pty-cron-routines.ts";
 
 function createGitRepo(dir: string): void {
   fs.mkdirSync(dir, { recursive: true });
@@ -258,6 +260,46 @@ async function testD3OrderedDurability(): Promise<void> {
   console.log("  [PASS] D3 verified: Operations fsync parent directory before durable completion.");
 }
 
+async function testD3RecoveryRequiresParentSync(): Promise<void> {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "apex-d3-recovery-"));
+  createGitRepo(ws);
+  fs.mkdirSync(path.join(ws, "nested"));
+  const target = path.join(ws, "nested", "file.txt");
+  fs.writeFileSync(target, "checkpoint\n");
+  execFileSync("git", ["add", "."], { cwd: ws, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: ws, stdio: "ignore" });
+  const stateDb = new StateDb(path.join(ws, ".harness", "state.db"), "power-loss-safe");
+  const originalSync = fs.fsyncSync;
+  try {
+    captureTurnCheckpoint({ stateDb, workspaceRoot: ws, sessionId: "sess_d3_recovery", leafId: "leaf_0", turnIndex: 0 });
+    fs.writeFileSync(target, "modified\n");
+    assert.throws(() => rewindChatAndDiskToLeaf({
+      stateDb, workspaceRoot: ws, sessionId: "sess_d3_recovery", fromLeafId: "leaf_1", toLeafId: "leaf_0",
+      durabilityMode: "power-loss-safe", faultInjectStopAfterPhase: "PREPARING"
+    }), /FAULT_INJECT_CRASH_AFTER_PREPARING/);
+    // Model a crash after the target was installed, before its durable completion record.
+    fs.writeFileSync(target, "checkpoint\n");
+    const parent = fs.statSync(path.dirname(target));
+    let failedParentSync = false;
+    fs.fsyncSync = (fd: number) => {
+      const stat = fs.fstatSync(fd);
+      if (stat.dev === parent.dev && stat.ino === parent.ino) {
+        failedParentSync = true;
+        throw new Error("SYNTHETIC_PARENT_FSYNC_FAILURE");
+      }
+      return originalSync(fd);
+    };
+    assert.throws(() => recoverInterruptedRewinds({ stateDb, workspaceRoot: ws, sessionId: "sess_d3_recovery", durabilityMode: "power-loss-safe" }), /SYNTHETIC_PARENT_FSYNC_FAILURE/);
+    assert.equal(failedParentSync, true, "Recovery must sync the modified file's parent before completion");
+    const row = stateDb.db.prepare("SELECT status FROM rewind_ops WHERE rel_path = ?").get("nested/file.txt") as { status: string };
+    assert.equal(row.status, "PENDING", "A failed sync must not be recorded as completed");
+  } finally {
+    fs.fsyncSync = originalSync;
+    stateDb.close();
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+}
+
 // ============================================================================
 // D4: Truthful concurrent-edit contract
 // ============================================================================
@@ -344,6 +386,33 @@ async function testD4ConcurrentEditContract(): Promise<void> {
 async function testD5ProcessOwnershipAndRecycling(): Promise<void> {
   console.log("--- D5: Host-development descendant ownership & recycling protection ---");
 
+  // Never signal a real process during negative identity controls.
+  const originalKill = process.kill;
+  const attemptedSignals: string[] = [];
+  const currentIdentity = recordProcessIdentity(process.pid);
+  assert.ok(currentIdentity.startTime, "The current process identity must be measurable for this control");
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    if (signal === 0) {
+      if (pid === process.pid) return originalKill(pid, 0);
+      const err = new Error("No such process") as NodeJS.ErrnoException;
+      err.code = "ESRCH";
+      throw err;
+    }
+    attemptedSignals.push(`${pid}:${signal}`);
+    return true;
+  }) as typeof process.kill;
+  try {
+    const unknown = await terminateProcessTree(process.pid, { ...currentIdentity, startTime: null });
+    assert.equal(unknown.success, false, "Missing process start identity must not be treated as a successful cleanup");
+    assert.deepEqual(attemptedSignals, [], "An unknown identity must never receive a signal");
+
+    const mismatched = await terminateProcessTree(process.pid + 1000000, currentIdentity);
+    assert.equal(mismatched.success, false, "An identity for a different PID must be rejected");
+    assert.deepEqual(attemptedSignals, [], "A mismatched PID must never receive a signal");
+  } finally {
+    process.kill = originalKill;
+  }
+
   // 1. Descendant cleanup test: spawn a process that creates a background child
   const bashScript = 'sh -c "sleep 60" & sleep 60';
   const child = spawn("/bin/bash", ["-c", bashScript], {
@@ -361,7 +430,9 @@ async function testD5ProcessOwnershipAndRecycling(): Promise<void> {
 
   // Terminate process tree
   const termResult = await terminateProcessTree(child.pid!, identity);
-  assert.equal(termResult.success, true, "All owned descendants must be terminated");
+  assert.equal(termResult.success, false, "A process snapshot cannot establish cleanup of reparented descendants");
+  assert.deepEqual(termResult.survivingPids, [], "Every discovered process must actually be gone");
+  assert.ok(termResult.killedPids.includes(child.pid!), "The owned root must have received a signal");
   assert.equal(termResult.recycledDetected, false);
 
   // Verify none survived
@@ -406,7 +477,84 @@ async function testD5ProcessOwnershipAndRecycling(): Promise<void> {
   assert.ok(elapsed < 2500, `Timeout must resolve promptly without hanging (elapsed: ${elapsed}ms)`);
   assert.ok(chunks.some((c) => c.includes("command timed out")), "Must output timeout notice");
 
-  console.log("  [PASS] D5 verified: Descendants terminated, bounded shutdown, recycled PIDs protected.");
+  console.log("  [PASS] D5 verified: Observed processes terminated, ownership remains unverified, bounded shutdown, recycled PIDs protected.");
+}
+
+async function testD5PtyUnknownCleanup(): Promise<void> {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "apex-pty-unknown-"));
+  const manager = new PtyLeaseManager({ workspaceRoot: ws, guardrails: loadVerifiedGuardrails().config, sandboxMode: "danger-full-access" });
+  const info = manager.start({ command: "sleep 60", leaseMs: 60_000 });
+  const session = (manager as any).sessions.get(info.id);
+  const ownedIdentity = { ...session.procIdentity };
+  assert.ok(ownedIdentity.startTime, "Owned test child must have a measurable identity");
+  session.procIdentity = { ...ownedIdentity, startTime: null };
+  const originalKill = process.kill;
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    if (signal === 0) return originalKill(pid, 0);
+    return true; // Never signal a process in the negative control.
+  }) as typeof process.kill;
+  try {
+    const stopped = manager.stop(info.id, true);
+    assert.notEqual(stopped.status, "exited", "An unverified cleanup must not be reported as exited");
+    await new Promise((resolve) => setImmediate(resolve));
+    const polled = manager.poll(info.id);
+    assert.equal(polled.status, "cleanup_unverified", "Failed ownership verification must remain visible");
+  } finally {
+    process.kill = originalKill;
+    await terminateProcessTree(info.pid, ownedIdentity);
+    manager.dispose();
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+}
+
+async function testD5NaturalLeaderExit(): Promise<void> {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "apex-pty-leader-"));
+  const manager = new PtyLeaseManager({ workspaceRoot: ws, guardrails: loadVerifiedGuardrails().config, sandboxMode: "danger-full-access" });
+  const info = manager.start({ command: "printf 'leader finished'", leaseMs: 10_000 });
+  const child = (manager as any).sessions.get(info.id).proc;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("PTY leader did not close")), 5000);
+      child.once("close", () => { clearTimeout(timer); resolve(); });
+    });
+    const result = manager.poll(info.id);
+    assert.equal(result.status, "leader_exited", "A leader exit is not proof that the workload is empty");
+    assert.equal(result.cleanupStatus, "unverified");
+    assert.equal(result.exitCode, 0);
+    assert.match(result.replay, /leader finished/);
+    const forgotten = manager.stop(info.id, true);
+    assert.equal(forgotten.status, "leader_exited");
+    assert.equal(forgotten.cleanupStatus, "unverified");
+    assert.throws(() => manager.poll(info.id), /PTY_NOT_FOUND/);
+  } finally {
+    manager.dispose();
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+}
+
+async function testD5LeaderExitWithInheritedPipes(): Promise<void> {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "apex-pty-inherited-pipe-"));
+  const manager = new PtyLeaseManager({ workspaceRoot: ws, guardrails: loadVerifiedGuardrails().config, sandboxMode: "danger-full-access" });
+  const info = manager.start({ command: "sleep 2 & exit 0", leaseMs: 10_000 });
+  const child = (manager as any).sessions.get(info.id).proc;
+  let closed = false;
+  const closePromise = new Promise<void>((resolve) => child.once("close", () => { closed = true; resolve(); }));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("PTY leader did not exit")), 5000);
+      child.once("exit", () => { clearTimeout(timer); resolve(); });
+    });
+    assert.equal(closed, false, "The owned background child must still hold the inherited pipes");
+    const result = manager.poll(info.id);
+    assert.equal(result.status, "leader_exited", "Leader exit must be visible before inherited pipes close");
+    assert.equal(result.cleanupStatus, "unverified");
+    assert.equal(result.exitCode, 0);
+    assert.throws(() => manager.writeStdin(info.id, "ignored"), /PTY_EXITED/);
+  } finally {
+    await closePromise;
+    manager.dispose();
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
 }
 
 async function runAllBatchDTests(): Promise<void> {
@@ -414,8 +562,12 @@ async function runAllBatchDTests(): Promise<void> {
   await testD1NestedGitIsolation();
   await testD2CheckpointMetadataAgreement();
   await testD3OrderedDurability();
+  await testD3RecoveryRequiresParentSync();
   await testD4ConcurrentEditContract();
   await testD5ProcessOwnershipAndRecycling();
+  await testD5PtyUnknownCleanup();
+  await testD5NaturalLeaderExit();
+  await testD5LeaderExitWithInheritedPipes();
   console.log("\n=== ALL BATCH D DATA SAFETY & PROCESS OWNERSHIP TESTS PASSED CLEANLY ===\n");
 }
 

@@ -279,6 +279,15 @@ async function testA1MissingRawReceipts() {
     const summary = reconcileWalOnStartup(stateDb, spillStore, sessId);
     assert.ok(summary.promotedFromCommittedRaw.includes(keyStartupNull));
     assert.ok(summary.promotedFromCommittedRaw.includes(keyStartupEmpty));
+    for (const key of [keyStartupNull, keyStartupEmpty]) {
+      assert.ok(summary.corruptReceipts.some((r) => r.idempotency_key === key));
+      assert.ok(!summary.replayedCommitted.some((r) => r.idempotency_key === key));
+    }
+    const again = reconcileWalOnStartup(stateDb, spillStore, sessId);
+    for (const key of [keyStartupNull, keyStartupEmpty]) {
+      assert.ok(again.corruptReceipts.some((r) => r.idempotency_key === key));
+      assert.ok(!again.replayedCommitted.some((r) => r.idempotency_key === key));
+    }
 
     // The promoted rows must have been promoted to EFFECT_COMMITTED with isError: true
     const rowNull = stateDb.getWalRow(keyStartupNull)!;
@@ -467,6 +476,13 @@ async function testA4NoSecretEchoInDiagnostics() {
   // 2. ensureNormalizedCommittedResult check
   const stateDb = new StateDb(dbPath, "power-loss-safe");
   const spillStore = new PrivateSpillStore({ rootDir: spillsDir, maxInlineBytes: 256, maxInlineLines: 10 });
+
+  const unsupportedInput = JSON.stringify({ content: [{ type: secretMarker + "X".repeat(20_000) }] });
+  const unsupportedOutcome = ensureNormalizedCommittedResult({ receipt: unsupportedInput, spillStore, sessionId: sessId });
+  assert.equal(unsupportedOutcome.invalid, true);
+  assert.equal(unsupportedOutcome.result.isError, true);
+  assert.equal(JSON.stringify(unsupportedOutcome).includes(secretMarker), false, "Unsupported discriminators must not leak input");
+  assert.ok(Buffer.byteLength(unsupportedOutcome.result.finalText) < 512, "Invalid receipt diagnostics must remain bounded");
 
   const outcome = ensureNormalizedCommittedResult({
     receipt: malformedJsonWithSecret,

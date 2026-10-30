@@ -1,0 +1,228 @@
+name: Apex Linux qualification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'pi-apex-harness/**'
+      - '.github/workflows/apex-linux-qualification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apex-linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  qualification:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: pi-apex-harness
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 26.10.0
+          cache: npm
+          cache-dependency-path: pi-apex-harness/package-lock.json
+      - name: Install locked dependencies
+        id: dependencies
+        run: npm ci
+      - name: Build native bridge
+        id: native
+        run: npm run build:native
+      - name: Typecheck
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npm run typecheck
+      - name: Check JavaScript inventory
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: npm run check:js
+      - name: Provision Ubuntu bubblewrap on disposable runner
+        id: bubblewrap
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/apex-bubblewrap"
+          mkdir -p "$stage"
+          cd "$stage"
+          if [[ '${{ matrix.os }}' == 'ubuntu-22.04' ]]; then
+            base=https://archive.ubuntu.com/ubuntu/pool/main/b/bubblewrap
+            curl -fsSLO "$base/bubblewrap_0.9.0-1ubuntu0.3.dsc"
+            curl -fsSLO "$base/bubblewrap_0.9.0.orig.tar.xz"
+            curl -fsSLO "$base/bubblewrap_0.9.0.orig.tar.xz.asc"
+            curl -fsSLO "$base/bubblewrap_0.9.0-1ubuntu0.3.debian.tar.xz"
+            printf '%s  %s\n' \
+              c8e38ca3ed20c269fc7e79a069fb329c0928ad7efaca098b07b50f7283599f24 bubblewrap_0.9.0-1ubuntu0.3.dsc \
+              c6347eaced49ac0141996f46bba3b089e5e6ea4408bc1c43bab9f2d05dd094e1 bubblewrap_0.9.0.orig.tar.xz \
+              355568011016d6d5592c13830778a9b06365926f6478ae43e51b2ab5c3bc3c92 bubblewrap_0.9.0.orig.tar.xz.asc \
+              4d6c71db380bb69d19a09501bd5caec92e46bf54c7f505805e75687daf783939 bubblewrap_0.9.0-1ubuntu0.3.debian.tar.xz | sha256sum -c -
+            dpkg-source --require-strong-checksums -x bubblewrap_0.9.0-1ubuntu0.3.dsc source
+            while IFS= read -r patch; do
+              [[ -z "$patch" || "$patch" == \#* ]] && continue
+              grep -Fx "$patch" source/.pc/applied-patches
+            done < source/debian/patches/series
+            mkdir deps
+            apt-get download meson libcap-dev libcap2 libselinux1-dev libselinux1 libsepol-dev libsepol2 libpcre2-dev libpcre2-8-0
+            for package in ./*.deb; do
+              test -f "$package"
+              sha256sum "$package"
+              dpkg-deb -x "$package" deps
+            done
+            export PYTHONPATH="$stage/deps/usr/lib/python3/dist-packages"
+            export PKG_CONFIG_PATH="$stage/deps/usr/lib/x86_64-linux-gnu/pkgconfig"
+            export DEB_BUILD_MAINT_OPTIONS=hardening=+pie,+bindnow
+            export CFLAGS="$(dpkg-buildflags --get CFLAGS) -I$stage/deps/usr/include"
+            export LDFLAGS="$(dpkg-buildflags --get LDFLAGS) -L$stage/deps/usr/lib/x86_64-linux-gnu -L$stage/deps/lib/x86_64-linux-gnu"
+            /usr/bin/python3 "$stage/deps/usr/bin/meson" setup build source --prefix=/usr -Dselinux=enabled
+            ninja -C build bwrap
+            candidate="$stage/build/bwrap"
+          else
+            apt-cache policy bubblewrap
+            apt-get download bubblewrap
+            packages=(bubblewrap_*.deb)
+            test "${#packages[@]}" -eq 1
+            test -f "${packages[0]}"
+            sha256sum "${packages[0]}"
+            dpkg-deb -x "${packages[0]}" root
+            candidate="$stage/root/usr/bin/bwrap"
+          fi
+          test -x "$candidate"
+          help_text="$("$candidate" --help)"
+          [[ "$help_text" == *--size* ]]
+          test ! -e /usr/bin/bwrap && test ! -L /usr/bin/bwrap
+          sudo install -m 0755 -o root -g root "$candidate" /usr/bin/bwrap
+          cmp "$candidate" /usr/bin/bwrap
+          sha256sum /usr/bin/bwrap
+          stat -c '%U:%G %a %n' /usr/bin/bwrap
+          /usr/bin/bwrap --version
+      - name: Allow bubblewrap user namespaces on disposable 24.04 runner
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-24.04' && steps.bubblewrap.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          userns_before="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          unconfined_before="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined)"
+          profile="$RUNNER_TEMP/apex-ci-bwrap.apparmor"
+          test ! -e "$profile" && test ! -L "$profile"
+          printf '%s\n' \
+            'abi <abi/4.0>,' \
+            'include <tunables/global>' \
+            'profile apex-ci-bwrap /usr/bin/bwrap flags=(unconfined) {' \
+            '  userns,' \
+            '}' > "$profile"
+          # Add only this profile; never replace an existing policy or change sysctls.
+          sudo apparmor_parser -a "$profile"
+          sudo grep -F 'apex-ci-bwrap' /sys/kernel/security/apparmor/profiles
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "$userns_before"
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined)" = "$unconfined_before"
+      - name: Diagnose 24.04 namespace capabilities (not qualification)
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-24.04' && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          for setting in /proc/sys/kernel/apparmor_restrict_unprivileged_userns /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined /proc/sys/kernel/unprivileged_userns_clone /proc/self/attr/current; do
+            if [[ -r "$setting" ]]; then printf '%s=' "$setting"; cat "$setting"; fi
+          done
+          for mode in user user_pid user_net user_pid_net; do
+            args=(--unshare-user)
+            case "$mode" in
+              user_pid) args+=(--unshare-pid) ;;
+              user_net) args+=(--unshare-net) ;;
+              user_pid_net) args+=(--unshare-pid --unshare-net) ;;
+            esac
+            printf 'DIAGNOSTIC_ONLY %s\n' "$mode"
+            if timeout 5s /usr/bin/bwrap --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp "${args[@]}" --die-with-parent --clearenv --setenv PATH /usr/bin:/bin -- /bin/echo BWRAP_DIAGNOSTIC_OK; then
+              printf 'DIAGNOSTIC_ONLY %s exit=0\n' "$mode"
+            else
+              code=$?
+              printf 'DIAGNOSTIC_ONLY %s exit=%s\n' "$mode" "$code"
+            fi
+          done
+      - name: Security canaries
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        run: npm run test:canaries
+      - name: PID namespace leader-exit boundary (diagnostic only)
+        id: pid_leader_diagnostic
+        # One corrected peer-identity probe after the earlier /proc permission failure.
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-22.04' && steps.bubblewrap.outcome == 'success' && github.event_name == 'pull_request' && github.head_ref == 'fix/apex-safety-recovery' && github.event.pull_request.commits == 25 }}
+        continue-on-error: true
+        run: node --experimental-strip-types test/canaries/linux-pid1-exit.spec.ts
+      - name: Report PID namespace diagnostic outcome
+        if: ${{ !cancelled() && steps.pid_leader_diagnostic.outcome == 'failure' }}
+        run: echo '::warning::PID namespace natural leader-exit diagnostic failed; descendant containment remains unqualified.'
+      - name: Cross-device hardlink boundary (diagnostic only)
+        id: private_device_diagnostic
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-22.04' && github.event_name == 'pull_request' && github.head_ref == 'fix/apex-safety-recovery' && github.event.pull_request.commits == 24 }}
+        continue-on-error: true
+        run: node --experimental-strip-types test/canaries/linux-private-filesystem-probe.spec.ts
+      - name: Report cross-device diagnostic outcome
+        if: ${{ !cancelled() && steps.private_device_diagnostic.outcome == 'failure' }}
+        run: echo '::warning::Cross-device fixture unavailable or failed; private-state isolation remains unqualified.'
+      - name: Required Linux confinement
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        run: npm run test:linux
+      - name: Required Tier B integration
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        run: npm run test:tier-b
+      - name: Document sandbox qualification
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        run: npm run test:ring13
+      - name: Verify browser observer
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 test/ring7/test_trace_browser_ci.py
+      - name: Browser qualification after Linux gates
+        id: browser_qualification
+        env:
+          PI_APEX_REQUIRE_BROWSER: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 test/ring7/trace_browser_ci.py
+      - name: Compare installed browser binaries (diagnostic only)
+        if: ${{ !cancelled() && steps.browser_qualification.outcome == 'failure' }}
+        run: node --experimental-strip-types test/ring7/compare-browser-binaries.ts
+
+  fresh-browser-boundary:
+    name: Fresh-runner browser probe (diagnostic only)
+    # One-shot experiment on PR commit 24; never re-run it on subsequent pushes.
+    if: ${{ github.event_name == 'pull_request' && github.head_ref == 'fix/apex-safety-recovery' && github.event.pull_request.commits == 24 }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, google-chrome]
+    defaults:
+      run:
+        working-directory: pi-apex-harness
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 26.10.0
+          cache: npm
+          cache-dependency-path: pi-apex-harness/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build native bridge
+        run: npm run build:native
+      - name: Verify observer
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 test/ring7/test_trace_browser_ci.py
+      - name: Observe one fresh-runner binary startup (not qualification)
+        env:
+          APEX_COMPARE_REQUIRE_SUCCESS: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 test/ring7/trace_browser_ci.py --compare /usr/bin/${{ matrix.browser }}
