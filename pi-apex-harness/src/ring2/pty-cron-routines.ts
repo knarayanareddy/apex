@@ -14,8 +14,8 @@
  *    - Cron scheduler (`create | list | pause | resume | remove | tick`), global `pause`/`resume`
  *      emergency stop, misfire catch-up on resume, and durable SQLite job/run ledger.
  * 3. Ring 0 Security Wiring (`SPEC_BIBLE.md` Invariant `I-08`):
- *    - Process-group lease (`detached: true`, `process.kill(-pid, ...)` on lease expiry or teardown)
- *      + sanitized subprocess environment (zero host API keys leaked).
+ *    - Detached lease with best-effort descendant cleanup and explicit unverified status;
+ *      sanitized subprocess environment (zero host API keys leaked).
  *    - Every unattended Cron tick runs strictly under `executionOrigin = "unattended_cron"`
  *      (`DENY_UNATTENDED` fail-closed gate).
  */
@@ -56,7 +56,7 @@ export interface PtyLeaseInfo {
   title: string;
   command: string;
   cwd: string;
-  status: "running" | "exited" | "lease_expired" | "cleanup_pending" | "cleanup_unverified";
+  status: "running" | "leader_exited" | "exited" | "lease_expired" | "cleanup_pending" | "cleanup_unverified";
   /** Snapshot-based only; it does not prove that no reparented descendants exist. */
   cleanupStatus?: "pending" | "snapshot_cleared" | "unverified";
   pid: number;
@@ -281,13 +281,22 @@ export class PtyLeaseManager {
 
     proc.stdout?.on("data", onChunk);
     proc.stderr?.on("data", onChunk);
-    proc.on("close", (code) => {
-      clearTimeout(session.leaseTimer);
+    const markLeaderExited = (code: number | null) => {
       if (session.info.status === "running") {
-        session.info.status = "exited";
+        // A closed leader is not evidence that reparented descendants exited.
+        session.info.status = "leader_exited";
+        session.info.cleanupStatus = "unverified";
       }
       session.info.exitCode = code;
-      if (!session.info.cleanupStatus || session.info.cleanupStatus === "snapshot_cleared") this.recordExitOrder(id);
+    };
+    // `close` can be delayed by inherited pipes after the leader itself exits.
+    proc.on("exit", markLeaderExited);
+    proc.on("close", (code) => {
+      clearTimeout(session.leaseTimer);
+      markLeaderExited(code);
+      if (this.sessions.has(id) && (session.info.status === "leader_exited" || !session.info.cleanupStatus || session.info.cleanupStatus === "snapshot_cleared")) {
+        this.recordExitOrder(id);
+      }
     });
 
     this.sessions.set(id, session);
@@ -354,7 +363,7 @@ export class PtyLeaseManager {
       this.requestCleanup(session, "exited", removeRecord);
     }
     const snap = { ...session.info };
-    if (removeRecord && session.info.status === "exited" && session.info.cleanupStatus !== "unverified") {
+    if (removeRecord && (session.info.status === "leader_exited" || (session.info.status === "exited" && session.info.cleanupStatus !== "unverified"))) {
       this.sessions.delete(id);
       const idx = this.exitOrder.indexOf(id);
       if (idx !== -1) this.exitOrder.splice(idx, 1);

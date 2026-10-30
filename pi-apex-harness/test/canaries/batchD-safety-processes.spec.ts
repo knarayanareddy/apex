@@ -507,6 +507,56 @@ async function testD5PtyUnknownCleanup(): Promise<void> {
   }
 }
 
+async function testD5NaturalLeaderExit(): Promise<void> {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "apex-pty-leader-"));
+  const manager = new PtyLeaseManager({ workspaceRoot: ws, guardrails: loadVerifiedGuardrails().config, sandboxMode: "danger-full-access" });
+  const info = manager.start({ command: "printf 'leader finished'", leaseMs: 10_000 });
+  const child = (manager as any).sessions.get(info.id).proc;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("PTY leader did not close")), 5000);
+      child.once("close", () => { clearTimeout(timer); resolve(); });
+    });
+    const result = manager.poll(info.id);
+    assert.equal(result.status, "leader_exited", "A leader exit is not proof that the workload is empty");
+    assert.equal(result.cleanupStatus, "unverified");
+    assert.equal(result.exitCode, 0);
+    assert.match(result.replay, /leader finished/);
+    const forgotten = manager.stop(info.id, true);
+    assert.equal(forgotten.status, "leader_exited");
+    assert.equal(forgotten.cleanupStatus, "unverified");
+    assert.throws(() => manager.poll(info.id), /PTY_NOT_FOUND/);
+  } finally {
+    manager.dispose();
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+}
+
+async function testD5LeaderExitWithInheritedPipes(): Promise<void> {
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "apex-pty-inherited-pipe-"));
+  const manager = new PtyLeaseManager({ workspaceRoot: ws, guardrails: loadVerifiedGuardrails().config, sandboxMode: "danger-full-access" });
+  const info = manager.start({ command: "sleep 2 & exit 0", leaseMs: 10_000 });
+  const child = (manager as any).sessions.get(info.id).proc;
+  let closed = false;
+  const closePromise = new Promise<void>((resolve) => child.once("close", () => { closed = true; resolve(); }));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("PTY leader did not exit")), 5000);
+      child.once("exit", () => { clearTimeout(timer); resolve(); });
+    });
+    assert.equal(closed, false, "The owned background child must still hold the inherited pipes");
+    const result = manager.poll(info.id);
+    assert.equal(result.status, "leader_exited", "Leader exit must be visible before inherited pipes close");
+    assert.equal(result.cleanupStatus, "unverified");
+    assert.equal(result.exitCode, 0);
+    assert.throws(() => manager.writeStdin(info.id, "ignored"), /PTY_EXITED/);
+  } finally {
+    await closePromise;
+    manager.dispose();
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+}
+
 async function runAllBatchDTests(): Promise<void> {
   console.log("=== Running Batch D: Data Safety & Process Ownership Tests ===");
   await testD1NestedGitIsolation();
@@ -516,6 +566,8 @@ async function runAllBatchDTests(): Promise<void> {
   await testD4ConcurrentEditContract();
   await testD5ProcessOwnershipAndRecycling();
   await testD5PtyUnknownCleanup();
+  await testD5NaturalLeaderExit();
+  await testD5LeaderExitWithInheritedPipes();
   console.log("\n=== ALL BATCH D DATA SAFETY & PROCESS OWNERSHIP TESTS PASSED CLEANLY ===\n");
 }
 

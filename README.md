@@ -134,6 +134,10 @@ automatically; review them and rotate any credentials that may have been exposed
 When a trusted HTTPS proxy origin is configured, all cockpit session cookies are
 `Secure`, including for local HTTP access.
 
+PTY status `leader_exited` means only the launched process exited; descendant
+cleanup remains unverified. Finished leader records use the bounded PTY retention
+policy and do not prove that detached processes were terminated.
+
 ### Running Autonomous Chaos Benchmarks
 
 ```bash
