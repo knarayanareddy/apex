@@ -59,6 +59,8 @@ export interface SecretScanResult {
   allMaskedPaths: string[];
   hardlinkAliasPaths: string[];
   secretInodeKeys: Set<string>;
+  /** Snapshot only; it is not an atomic control-plane ownership boundary. */
+  controlPlaneInodeKeys: Set<string>;
   controlPlaneHasHardlinks: boolean;
   complete: boolean;
   incompleteReasons: string[];
@@ -79,6 +81,7 @@ export function scanWorkspaceSecretsAndHardlinks(
       allMaskedPaths: [],
       hardlinkAliasPaths: [],
       secretInodeKeys: new Set(),
+      controlPlaneInodeKeys: new Set(),
       controlPlaneHasHardlinks: false,
       complete: true,
       incompleteReasons: []
@@ -89,6 +92,7 @@ export function scanWorkspaceSecretsAndHardlinks(
   const maskedSet = new Set<string>();
   const hardlinkAliases: string[] = [];
   const secretInodeKeys = new Set<string>();
+  const controlPlaneInodeKeys = new Set<string>();
   const multiLinkedInodeKeys = new Set<string>();
   let expectedExtraHardlinks = 0;
   let complete = true;
@@ -194,6 +198,7 @@ export function scanWorkspaceSecretsAndHardlinks(
           try {
             const st = fs.lstatSync(full);
             if (!st.isFile()) throw new Error("file changed during scan");
+            controlPlaneInodeKeys.add(`${st.dev}:${st.ino}`);
             if (st.nlink > 1) {
               controlPlaneHasHardlinks = true;
               secretInodeKeys.add(`${st.dev}:${st.ino}`);
@@ -343,6 +348,7 @@ export function scanWorkspaceSecretsAndHardlinks(
     allMaskedPaths: Array.from(maskedSet).sort(),
     hardlinkAliasPaths: hardlinkAliases.sort(),
     secretInodeKeys,
+    controlPlaneInodeKeys,
     controlPlaneHasHardlinks,
     complete,
     incompleteReasons
@@ -1015,10 +1021,17 @@ export function readWorkspaceFileSafe(params: {
     if (!st.isFile()) {
       throw new PathContainmentError(`[guard: non-regular file read denied: ${relPath}]`);
     }
-    if (secretScan.secretInodeKeys.has(`${st.dev}:${st.ino}`)) {
+    const inodeKey = `${st.dev}:${st.ino}`;
+    if (secretScan.secretInodeKeys.has(inodeKey)) {
       throw new PathContainmentError(
         `[guard: hardlink alias to secret file inode denied (read): ${relPath}]`
       );
+    }
+    if (!relPath.startsWith(".harness/") && secretScan.controlPlaneInodeKeys.has(inodeKey)) {
+      throw new PathContainmentError(`[guard: hardlink alias to private control-plane file denied (read): ${relPath}]`);
+    }
+    if (relPath.startsWith(".harness/spill/") && st.nlink > 1) {
+      throw new PathContainmentError(`[guard: hardlinked private spill denied (read): ${relPath}]`);
     }
     if (st.nlink > 1) {
       if (!secretScan.complete) {

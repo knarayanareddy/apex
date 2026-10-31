@@ -160,6 +160,32 @@ jobs:
       - name: Report PID namespace diagnostic outcome
         if: ${{ !cancelled() && steps.pid_leader_diagnostic.outcome == 'failure' }}
         run: echo '::warning::PID namespace natural leader-exit diagnostic failed; descendant containment remains unqualified.'
+      - name: PID1 control-pipe cancellation (diagnostic only)
+        id: pid1_control_diagnostic
+        # One-shot proof on the next PR commit; it is not an ownership qualification.
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-22.04' && steps.bubblewrap.outcome == 'success' && github.event_name == 'pull_request' && github.head_ref == 'fix/apex-safety-recovery' && github.event.pull_request.commits == 28 }}
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          TMPDIR: ${{ runner.temp }}/apex-pid1-proof
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -o pipefail
+          test ! -e "$TMPDIR"
+          test ! -L "$TMPDIR"
+          mkdir -m 700 "$TMPDIR"
+          python3 test/diagnostics/bwrap-pid1-cancel/run.py 2>&1 | tee "$TMPDIR/proof.log"
+      - name: Report PID1 control-pipe diagnostic outcome
+        if: ${{ !cancelled() && steps.pid1_control_diagnostic.outcome == 'failure' }}
+        run: echo '::warning::PID1 control-pipe diagnostic failed; process ownership remains unqualified.'
+      - name: Preserve failed PID1 diagnostic log
+        if: ${{ !cancelled() && steps.pid1_control_diagnostic.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apex-pid1-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/apex-pid1-proof/proof.log
+          if-no-files-found: error
+          retention-days: 7
       - name: Cross-device hardlink boundary (diagnostic only)
         id: private_device_diagnostic
         if: ${{ !cancelled() && matrix.os == 'ubuntu-22.04' && github.event_name == 'pull_request' && github.head_ref == 'fix/apex-safety-recovery' && github.event.pull_request.commits == 24 }}
