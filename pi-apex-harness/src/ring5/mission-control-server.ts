@@ -1582,7 +1582,8 @@ export class MissionControlServer {
                 typeof body["args"] === "object" && body["args"] !== null
                   ? (body["args"] as Record<string, unknown>)
                   : {};
-              const result = await h.mcpHub.callTool({ serverName, toolName, args });
+              const sessionId = h.session.sessionManager.getSessionId();
+              const result = await h.mcpHub.callTool({ serverName, toolName, args, sessionId });
               this._sendJson(res, 200, result);
               return;
             }

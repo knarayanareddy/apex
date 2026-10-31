@@ -93,7 +93,7 @@ export class PrivateSpillStore {
    * NEVER throws: if disk spill fails (e.g. ENOSPC), degrades deterministically to inline head/tail truncation
    * so an already-committed tool effect is never misclassified as aborted.
    */
-  scrubAndMaybeSpill(sessionId: string, rawText: string): SpillOutcome {
+  scrubAndMaybeSpill(sessionId: string | undefined, rawText: string): SpillOutcome {
     const scrubbed = scrubSecretsInfallible(rawText);
     const byteLen = Buffer.byteLength(scrubbed, "utf8");
     const lineCount = scrubbed.split("\n").length;
@@ -107,6 +107,11 @@ export class PrivateSpillStore {
     const tail = scrubbed.slice(-half);
 
     try {
+      if (!sessionId) {
+        const err = new Error("SESSION_IDENTITY_REQUIRED") as NodeJS.ErrnoException;
+        err.code = "SESSION_IDENTITY_REQUIRED";
+        throw err;
+      }
       if (this.simulateWriteFailure) {
         const err = new Error("ENOSPC: no space left on device") as NodeJS.ErrnoException;
         err.code = "ENOSPC";
