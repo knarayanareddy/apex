@@ -54,3 +54,10 @@ Ring 4 APIs, workspace switches, subagent worktrees, and benchmark workspaces
 also create private state. A check only in the read tool or only after Ring 0
 construction would miss earlier writes. Temporary worktrees must receive their
 own qualified state storage; they must not fall back silently to the workspace.
+
+The CLI also accepts explicit `--session-dir` and `--session` paths; checking
+only the default `.harness/sessions` path would not cover those destinations.
+Directly exported `ConfinedMcpHub`, `OmniChannelGateway`, and
+`ExternalPluginHost` constructors create directories under `.harness` without
+requiring Ring 0 startup. Their independent construction paths need equivalent
+admission before mutation, or must require an already verified state capability.
