@@ -2,7 +2,7 @@ name: Apex browser I/O study (diagnostic only)
 
 on:
   pull_request:
-    types: [opened]
+    types: [opened, synchronize]
     paths:
       - '.github/workflows/apex-browser-io-study.yml'
       - '.github/diagnostics/pressure_probe.py'
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   browser-io-study:
-    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'test/browser-io-boundary' }}
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'test/browser-io-boundary' && (github.event.action == 'opened' || (github.event.action == 'synchronize' && github.event.pull_request.commits == 2)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     strategy:

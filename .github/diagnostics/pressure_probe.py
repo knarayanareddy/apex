@@ -122,7 +122,9 @@ def main():
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.worker:
-        return writer(args.worker, 20, 2 * 1024 * 1024 * 1024)
+        # A 2-GiB total cap completed before the first study's browser exited.
+        # File size remains limited to 64 MiB; cap total writes at 8 GiB / 20 s.
+        return writer(args.worker, 20, 8 * 1024 * 1024 * 1024)
     if args.self_test:
         temp = pathlib.Path(tempfile.mkdtemp(prefix="apex-pressure-selftest-"))
         file = temp / "one-block"
