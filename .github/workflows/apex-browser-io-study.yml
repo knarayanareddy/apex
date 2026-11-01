@@ -1,0 +1,61 @@
+name: Apex browser I/O study (diagnostic only)
+
+on:
+  pull_request:
+    types: [opened]
+    paths:
+      - '.github/workflows/apex-browser-io-study.yml'
+      - '.github/diagnostics/pressure_probe.py'
+
+permissions:
+  contents: read
+
+jobs:
+  browser-io-study:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'test/browser-io-boundary' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        condition: [control, pressure]
+        replicate: [1, 2, 3]
+    defaults:
+      run:
+        working-directory: pi-apex-harness
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 26.10.0
+          cache: npm
+          cache-dependency-path: pi-apex-harness/package-lock.json
+      - name: Record revision and runner metadata
+        run: |
+          git rev-parse HEAD
+          uname -sr
+          df -T /usr/bin/chromium "$RUNNER_TEMP"
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build native bridge
+        run: npm run build:native
+      - name: Run one observed Chromium comparison
+        id: comparison
+        env:
+          APEX_COMPARE_REQUIRE_SUCCESS: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -o pipefail
+          python3 ../.github/diagnostics/pressure_probe.py --condition '${{ matrix.condition }}' 2>&1 | tee "$RUNNER_TEMP/apex-browser-io-study.log"
+      - name: Preserve failed diagnostic evidence
+        if: ${{ !cancelled() && steps.comparison.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-io-${{ matrix.condition }}-${{ matrix.replicate }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/apex-browser-io-study.log
+            ${{ runner.temp }}/apex-browser-io-*/pressure.bin
+          if-no-files-found: error
+          retention-days: 7
