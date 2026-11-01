@@ -463,21 +463,18 @@ async function main(): Promise<void> {
     const e2e1 = evalReport.scenarios.find((s) => s.id === "E2E-1")!;
     assert.ok(e2e1 && e2e1.passed);
     assert.equal(e2e1.stagesVerified.length, 6);
-    assert.ok(
-      e2e1.activeSchemaTokens === 1053 ||
-        e2e1.activeSchemaTokens === 1073 ||
-        e2e1.activeSchemaTokens === 1080
-    );
+    assert.equal(e2e1.activeSchemaTokens, 1053, "The default E2E-1 schema must match the pinned baseline");
     assert.equal(e2e1.prefixHashDriftCount, 0);
     results.push({
       id: "R5-4",
       ok: true,
-      detail: `${e2e1.title} passed all 6 stages (${e2e1.elapsedMs} ms, 1,073 schema tokens, 0 drift)`
+      detail: `${e2e1.title} passed all 6 stages (${e2e1.elapsedMs} ms, ${e2e1.activeSchemaTokens} schema tokens, 0 drift)`
     });
 
     const e2e2 = evalReport.scenarios.find((s) => s.id === "E2E-2")!;
     assert.ok(e2e2 && e2e2.passed);
     assert.equal(e2e2.stagesVerified.length, 4);
+    assert.equal(e2e2.activeSchemaTokens, 1053, "The default E2E-2 schema must match the pinned baseline");
     assert.equal(e2e2.prefixHashDriftCount, 0);
     results.push({
       id: "R5-5",

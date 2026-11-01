@@ -47,13 +47,40 @@ console.log("=== Running Maintained JavaScript Static Check (Programme E2) ===")
 
 let checkedCount = 0;
 let failureCount = 0;
+const excludedDirectories = new Set([".git", "node_modules", ".harness", ".venv", "dist", "build", "coverage"]);
+const declared = new Set(Object.values(JS_INVENTORY).flat());
+
+function inspectDirectory(dir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    console.error(`  [FAIL] Cannot inventory ${dir}: ${String(err)}`);
+    failureCount++;
+    return;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory() && !excludedDirectories.has(entry.name)) inspectDirectory(full);
+    else if ((entry.isFile() || entry.isSymbolicLink()) && /\.(?:js|mjs|cjs)$/.test(entry.name)) {
+      const rel = path.relative(REPO_ROOT, full).split(path.sep).join("/");
+      if (!declared.has(rel)) {
+        console.error(`  [FAIL] Unclassified JavaScript file: ${rel}`);
+        failureCount++;
+      }
+    }
+  }
+}
+
+inspectDirectory(REPO_ROOT);
 
 for (const [category, files] of Object.entries(JS_INVENTORY)) {
   console.log(`\n--- Category: ${category} (${files.length} files) ---`);
   for (const rel of files) {
     const fullPath = path.join(REPO_ROOT, rel);
     if (!fs.existsSync(fullPath)) {
-      console.warn(`  [WARN] File declared in inventory not found: ${rel}`);
+      console.error(`  [FAIL] File declared in inventory not found: ${rel}`);
+      failureCount++;
       continue;
     }
 

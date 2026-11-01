@@ -520,6 +520,11 @@ async function runPart3StartupMatrix() {
   const parsed3b = JSON.parse(row3b.result_json!);
   assert.equal(parsed3b.isError, true, "Finalized invalid raw receipt must have isError: true");
   assert.match(parsed3b.finalText, /\[WAL_RECEIPT_INVALID: raw_receipt_json corrupt/);
+  assert.ok(summary.corruptReceipts.some((r) => r.idempotency_key === key3b), "Corrupt raw receipt must be reported as corruption");
+  assert.ok(!summary.replayedCommitted.some((r) => r.idempotency_key === key3b), "Corrupt raw receipt must not be replayed as healthy");
+  const secondSummary = reconcileWalOnStartup(stateDb, spillStore, sessId);
+  assert.ok(secondSummary.corruptReceipts.some((r) => r.idempotency_key === key3b), "Raw corruption must remain visible on later startups");
+  assert.ok(!secondSummary.replayedCommitted.some((r) => r.idempotency_key === key3b));
 
   // Check 3c: Recovered from valid raw_receipt_json
   const row3c = stateDb.getWalRow(key3c)!;

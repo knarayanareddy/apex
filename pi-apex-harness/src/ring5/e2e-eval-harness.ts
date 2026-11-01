@@ -26,7 +26,7 @@ import {
   fauxToolCall
 } from "@earendil-works/pi-ai";
 import { COMPILED_GUARDRAILS_SHA256 } from "../core/guardrail-pin.ts";
-import { countO200kTokens } from "../core/prefix-budget.ts";
+import { countActiveToolSchemaTokens } from "../core/prefix-budget.ts";
 import { createSharedModelRuntime } from "../core/ring0-session.ts";
 import { gitWorktreeList } from "../ring2/worktree-subagent-pool.ts";
 import { createRing4Runtime } from "../ring4/ring4-runtime.ts";
@@ -135,19 +135,8 @@ export async function runMultiRingEvalSuite(params: {
     try {
       const h = ctrl1.getCurrentHarness();
       h.interactionController.setMode("turbo");
-      e1SchemaTokens = countO200kTokens(
-        JSON.stringify(
-          h.session.agent.state.tools.map((t) => ({
-            name: t.name,
-            description: t.description ?? "",
-            parameters: t.parameters ?? null
-          }))
-        )
-      );
-      assert.ok(
-        e1SchemaTokens === 1053 || e1SchemaTokens === 1073 || e1SchemaTokens === 1080,
-        "E2E-1 active schema must equal 1053/1073/1080 o200k tokens"
-      );
+      e1SchemaTokens = countActiveToolSchemaTokens(h.session.agent.state.tools);
+      assert.equal(e1SchemaTokens, 1053, "E2E-1 default active schema must equal 1053 o200k tokens");
 
       // Stage 1 (Ring 1): Read file in Plan Mode -> triggers `.mdc` scoped rule tail + WASM Merkle AST `repo_map`
       faux1.setResponses([
@@ -458,7 +447,7 @@ export async function runMultiRingEvalSuite(params: {
         passed: true,
         elapsedMs: Number((performance.now() - e2Start).toFixed(2)),
         stagesVerified: e2Stages,
-        activeSchemaTokens: 1053,
+        activeSchemaTokens: countActiveToolSchemaTokens(h.session.agent.state.tools),
         prefixHashDriftCount: e2Drift
       });
     } finally {

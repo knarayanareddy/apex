@@ -102,6 +102,24 @@ export interface Ring0HarnessInstance {
   dispose(): void;
 }
 
+interface StoredBashDetails {
+  __apexBashReceipt: {
+    version: 1;
+    exitCode: number;
+    wallTimeSeconds: number;
+    truncated: boolean;
+  };
+  originalDetails?: unknown;
+}
+
+function isStoredBashDetails(value: unknown): value is StoredBashDetails {
+  if (!value || typeof value !== "object") return false;
+  const metadata = (value as StoredBashDetails).__apexBashReceipt;
+  return !!metadata && metadata.version === 1 && Number.isInteger(metadata.exitCode) &&
+    typeof metadata.wallTimeSeconds === "number" && Number.isFinite(metadata.wallTimeSeconds) &&
+    typeof metadata.truncated === "boolean";
+}
+
 function wrapToolDefinitionWithWal(
   tool: ToolDefinition<any, any, any>,
   walContext: {
@@ -206,18 +224,50 @@ function wrapToolDefinitionWithWal(
             .filter((c: any) => c.type === "text")
             .map((c: any) => c.text)
             .join("\n");
+          let details: unknown = res.details;
+          if (tool.name === "bash" && res.structuredContent && typeof res.structuredContent === "object" && !Array.isArray(res.structuredContent)) {
+            const structured = res.structuredContent as Record<string, unknown>;
+            if (typeof structured.output === "string" && Number.isInteger(structured.exit_code) &&
+                typeof structured.wall_time_seconds === "number" && Number.isFinite(structured.wall_time_seconds) &&
+                typeof structured.truncated === "boolean") {
+              details = {
+                __apexBashReceipt: {
+                  version: 1,
+                  exitCode: structured.exit_code,
+                  wallTimeSeconds: structured.wall_time_seconds,
+                  truncated: structured.truncated || structured.output !== rawText || rawText.includes("[OUTPUT_STREAM_OVERFLOW:")
+                },
+                originalDetails: res.details
+              };
+            }
+          }
           return {
             rawText,
             content: res.content,
-            details: res.details,
+            details,
             isError: res.isError
           };
         }
       });
 
+      const storedBash = tool.name === "bash" && isStoredBashDetails(walRes.details) ? walRes.details : undefined;
+      let structuredContent: any;
+      if (storedBash) {
+        structuredContent = {
+          output: walRes.finalText,
+          truncated: storedBash.__apexBashReceipt.truncated || walRes.spilled || walRes.spillFallbackUsed,
+          exit_code: storedBash.__apexBashReceipt.exitCode,
+          wall_time_seconds: storedBash.__apexBashReceipt.wallTimeSeconds
+        };
+      } else if (tool.name === "read" && !walRes.isError) {
+        const text = walRes.content.find((block) => block.type === "text")?.text ?? "";
+        const image = walRes.content.find((block) => block.type === "image");
+        structuredContent = image ? { type: "image", data: image.data, mimeType: image.mimeType, note: text } : text;
+      }
       return {
         content: walRes.content ?? [{ type: "text", text: walRes.finalText }],
-        details: walRes.details,
+        details: storedBash ? storedBash.originalDetails : walRes.details,
+        ...(structuredContent !== undefined ? { structuredContent } : {}),
         ...(walRes.isError !== undefined ? { isError: walRes.isError } : {})
       };
     }
@@ -238,7 +288,7 @@ export async function createSharedModelRuntime(agentDir: string = getAgentDir())
 
 /**
  * Normalizes machine-dependent absolute filesystem paths in codemode.description
- * so that active tool schema token count is locked to exactly 1,073 tokens across all environments.
+ * so the default active tool schema has a reproducible 1,053-token baseline.
  */
 function createNormalizedCodemodeExtension(options?: Parameters<typeof createCodemodeExtension>[0]): ExtensionFactory {
   const innerFactory = createCodemodeExtension(options);
@@ -299,6 +349,7 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     workspaceRoot: opts.workspaceRoot,
     cfg: guardrails,
     durabilityMode,
+    sessionId,
     mode: sandboxMode
   });
 
@@ -541,7 +592,7 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
   sessionRef = session;
 
   // Normalize machine-dependent absolute filesystem paths in tool descriptions (e.g. codemode.md)
-  // to ensure reproducible, machine-invariant o200k schema token counts (1,073) across checkouts.
+  // to ensure the default o200k schema count is reproducible across checkouts.
   for (const t of session.agent.state.tools) {
     if (t.name === "codemode" && t.description) {
       t.description = t.description.replace(

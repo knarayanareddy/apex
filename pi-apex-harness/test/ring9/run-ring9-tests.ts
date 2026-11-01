@@ -978,7 +978,7 @@ async function main(): Promise<void> {
     // R9-6: Portable versioned release archive + SHA-256 + `/doctor`
     // =========================================================================
     {
-      const pkgOutDir = process.platform === "darwin" ? path.join(tmpRoot, "pkg-out") : "/home/user";
+      const pkgOutDir = path.join(tmpRoot, "pkg-out");
       fs.mkdirSync(pkgOutDir, { recursive: true });
       const pkgRun = spawnSync(
         "bash",
@@ -1045,7 +1045,7 @@ async function main(): Promise<void> {
       results.push({
         id: "R9-6",
         detail:
-          `Portable /home/user/pi-apex-v${pkgVersion}-personal.tar.gz + SHA-256 + --install-vscode + v${pkgVersion} /doctor (schema=1073) verified`
+          `Portable pi-apex-v${pkgVersion}-personal.tar.gz + SHA-256 + --install-vscode + extracted /doctor verified`
       });
     }
 

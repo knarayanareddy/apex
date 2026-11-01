@@ -464,6 +464,8 @@ export class ConfinedMcpHub {
     toolName: string;
     args?: Record<string, unknown>;
     toolCallId?: string;
+    /** Trusted caller's active session identity, used only to scope private spills. */
+    sessionId?: string;
   }): Promise<{
     content: Array<TextContent | ImageContent>;
     isError: boolean;
@@ -504,7 +506,7 @@ export class ConfinedMcpHub {
         let safeText = scrubSecretsInfallible(blk.text);
         if (this.spillStore) {
           const spilled = this.spillStore.scrubAndMaybeSpill(
-            `${params.toolCallId ?? "mcp"}_${i}`,
+            params.sessionId,
             safeText
           );
           safeText = spilled.text;

@@ -41,9 +41,13 @@ export function checkAddonBinaryCompatibility(addonPath: string): {
 } {
   try {
     const fd = fs.openSync(addonPath, "r");
-    const buf = Buffer.alloc(4);
-    fs.readSync(fd, buf, 0, 4, 0);
-    fs.closeSync(fd);
+    const buf = Buffer.alloc(64);
+    let length: number;
+    try {
+      length = fs.readSync(fd, buf, 0, buf.length, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
 
     const isElf = buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46; // \x7fELF
     const isMachO =
@@ -54,22 +58,31 @@ export function checkAddonBinaryCompatibility(addonPath: string): {
 
     const detectedFormat = isElf ? "elf" : isMachO ? "macho" : "unknown";
 
+    if (process.arch !== "arm64" && process.arch !== "x64") {
+      return { compatible: false, format: detectedFormat, reason: `Unsupported native addon architecture: ${process.arch}` };
+    }
+
     if (process.platform === "linux") {
-      if (!isElf) {
+      const expectedMachine = process.arch === "arm64" ? 183 : 62;
+      if (!isElf || length < 64 || buf[4] !== 2 || buf[5] !== 1 || buf[6] !== 1 || buf.readUInt16LE(18) !== expectedMachine) {
         return {
           compatible: false,
           format: detectedFormat,
-          reason: `Native addon '${addonPath}' is a ${detectedFormat.toUpperCase()} binary (not Linux ELF). Incompatible platform binary detected.`
+          reason: `Native addon '${addonPath}' is not a compatible 64-bit Linux ELF for ${process.arch}.`
         };
       }
     } else if (process.platform === "darwin") {
-      if (!isMachO) {
+      const expectedCpu = process.arch === "arm64" ? 0x0100000c : 0x01000007;
+      const is64BitLittleEndianMachO = buf[0] === 0xcf && buf[1] === 0xfa && buf[2] === 0xed && buf[3] === 0xfe;
+      if (!is64BitLittleEndianMachO || length < 32 || buf.readUInt32LE(4) !== expectedCpu) {
         return {
           compatible: false,
           format: detectedFormat,
-          reason: `Native addon '${addonPath}' is a ${detectedFormat.toUpperCase()} binary (not macOS Mach-O). Incompatible platform binary detected.`
+          reason: `Native addon '${addonPath}' is not a compatible 64-bit macOS Mach-O for ${process.arch}.`
         };
       }
+    } else {
+      return { compatible: false, format: detectedFormat, reason: `Unsupported native addon platform: ${process.platform}` };
     }
     return { compatible: true, format: detectedFormat };
   } catch (err) {

@@ -25,6 +25,24 @@ export function countO200kTokens(text: string): number {
   return o200k.encode(text).length;
 }
 
+export function serializeActiveToolSchemas(
+  tools: ReadonlyArray<{ name: string; description?: string; parameters?: unknown }>
+): string {
+  return JSON.stringify(tools.map((tool) => ({
+    name: tool.name,
+    description: tool.name === "codemode"
+      ? (tool.description ?? "").replace(/Read \S+?\/docs\/codemode\.md first\./, "Read docs/codemode.md first.")
+      : tool.description ?? "",
+    parameters: tool.parameters ?? null
+  })));
+}
+
+export function countActiveToolSchemaTokens(
+  tools: ReadonlyArray<{ name: string; description?: string; parameters?: unknown }>
+): number {
+  return countO200kTokens(serializeActiveToolSchemas(tools));
+}
+
 export interface BootPinnedPrefix {
   readonly frozenSystemPrompt: string;
   readonly turn1OverflowAgentsAttachment: string | null;
@@ -119,26 +137,6 @@ export function buildBootPinnedPrefix(params: {
 
   let lockedPrefixSha256: string | null = null;
 
-  const serializeSchemas = (
-    tools: ReadonlyArray<{ name: string; description?: string; parameters?: unknown }>
-  ): string =>
-    JSON.stringify(
-      tools.map((t) => {
-        let desc = t.description ?? "";
-        if (t.name === "codemode") {
-          desc = desc.replace(
-            /Read \S+?\/docs\/codemode\.md first\./,
-            "Read docs/codemode.md first."
-          );
-        }
-        return {
-          name: t.name,
-          description: desc,
-          parameters: t.parameters ?? null
-        };
-      })
-    );
-
   return {
     frozenSystemPrompt,
     turn1OverflowAgentsAttachment,
@@ -152,7 +150,7 @@ export function buildBootPinnedPrefix(params: {
     lockToolSchemasAndComputeHash(tools, effectiveBootSystemPrompt) {
       const promptToLock = effectiveBootSystemPrompt ?? frozenSystemPrompt;
       const effectivePromptTokens = countO200kTokens(promptToLock);
-      const serialized = serializeSchemas(tools);
+      const serialized = serializeActiveToolSchemas(tools);
       const schemaTokens = countO200kTokens(serialized);
       if (schemaTokens > params.caps.direct_tool_schemas) {
         throw new PrefixBudgetError(
@@ -172,7 +170,7 @@ export function buildBootPinnedPrefix(params: {
       return { schemaTokens, totalPrefixTokens, prefixSha256: lockedPrefixSha256 };
     },
     verifyInvariantBeforeRequest(effectiveSystemPrompt, tools) {
-      const serialized = serializeSchemas(tools);
+      const serialized = serializeActiveToolSchemas(tools);
       const currentHash = crypto
         .createHash("sha256")
         .update(effectiveSystemPrompt + "\n---TOOLS---\n" + serialized)
