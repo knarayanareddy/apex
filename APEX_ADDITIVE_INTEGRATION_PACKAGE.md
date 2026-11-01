@@ -1,777 +1,521 @@
-# Apex — Additive Integration Reviews (Single-File Package)
+# Apex Additive Integration Package
 
-**Date:** 2026-10-28
-**Purpose:** One self-contained Markdown file covering every external technology reviewed for *additive* integration into the Apex/pi harness: explicit sources, assessments, and how (and whether) each should be integrated.
-**Contents:** Part I is the consolidated index and decision record; Part II embeds, verbatim, the full per-technology feasibility documents and the executable spec-graph spike evidence as Appendices A–G. No external file is needed to read this package.
+- **Fresh consolidated review:** 2026-11-01
+- **Current Apex source reviewed:** [`89fc070f02af3a3a6e5c8a200d182f6dc58ac333`](https://github.com/knarayanareddy/apex/commit/89fc070f02af3a3a6e5c8a200d182f6dc58ac333) (`origin/main`)
+- **Earlier comparison baseline:** `1ef6dd14ae259479206de7504e1669b66b97dd84`
+- **Scope:** all 19 additive-integration candidates reviewed in the three review waves: the October 28 technology assessments (including SoL-Pi and LangExtract), the October 30 Pi-ecosystem assessments, and the DSH Superagent assessment.
 
----
+This is a decision and integration document, not evidence that any external runtime has been merged or qualified as part of Apex. “Integrate” below always means through the stated narrow seam and acceptance gates; it never means installing the upstream product wholesale.
 
+## 1. Executive decision
 
-**Date:** 2026-10-28 · **Scope:** Every external technology reviewed so far for *additive* integration into the Apex/pi harness, with its explicit source, the assessment, and **how** (and whether) it should land. Each item links to its full feasibility doc in this repo.
+Apex should continue to prefer **narrow adaptations over new runtimes**. The strongest additions are:
 
-**Status legend:** `SPIKE PROVEN` = executable proof exists in-repo · `SIDECAR READY` = clean design, PoC not yet built · `OPTIONAL PROFILE` = operator-enabled, off by default · `KNOW-HOW PORT` = ideas/patterns only, no executable reuse · `SKILL/CONTENT` · `GATED EXPERIMENT` · `REFERENCE/REJECTED`.
+1. **Versioned work Mandates and deterministic admission policy** from DSH, joining Ring 8/9 intake to Ring 7 execution without bypassing Ring 11 approvals.
+2. **A durable outbound outbox** for Ring 9, redesigned around Apex’s WAL and explicit `OUTCOME_UNKNOWN` semantics.
+3. **A reproduced, read-only spec-graph pilot** for Ring 3. The earlier package reported a green spike, but its files are absent from current `main`; it must be reconstructed and rerun before promotion.
+4. **A SoL-Pi compatibility spike**, leading only to ObservationPack if Pi 1.4, schema, state-ownership, and recovery checks pass. Action Fusion remains blocked until it uses Apex’s confined/guarded/WAL tool path.
+5. **Low-cost content/policy additions:** OCR’s deterministic per-language rule selection, selected pi-pstack skills, autoharness’s usage/probation/capacity lifecycle, and LangExtract’s grounded-extraction data contract.
+6. **Optional, off-by-default capabilities:** open-ontologies through confined stdio MCP and cached compaction behind a provider-specific Apex adapter.
 
-## 1. Summary table
+Full upstream applications—DSH, Pi-Remote, pi-phone, OpenMausBot, autoharness, OpenBot, and the complete pi-pstack extension—are not additive runtimes for Apex. They either duplicate existing authorities, introduce another security model, or belong as separate products.
 
-| # | Technology | Explicit source | License | Verdict | Where it lands | Status |
-|---|---|---|---|---|---|---|
-| 1 | **ThinkRail `spec-graph`** | github.com/JetBrains/thinkrail, `packages/spec-graph/core` @ `9066aa9f4bb5c0dcb681235b4b936e8be73651f7` | Apache-2.0 | Integrate the core | Ring 3 (living specs) | **SPIKE PROVEN** |
-| 2 | ThinkRail `contracts` / `pi-delegation` / `pi-dag` | same repo | Apache-2.0 | Evaluate, cherry-pick | Ring 5 wire; Ring 2 generalization | Proposed |
-| 3 | **open-ontologies** | github.com/fabio-rovai/open-ontologies v2.1.0 (Rust MCP server) | MIT | Integrate, opt-in sidecar | Ring 6 confined MCP + Ring 3 skill | **SIDECAR READY** |
-| 4 | **open-code-review (OCR)** | github.com/alibaba/open-code-review; npm `@alibaba-group/open-code-review` | Apache-2.0 | Optional review profile + a zero-binary port | Ring 7 profile; Ring 2 rule selector | **OPTIONAL PROFILE** |
-| 5 | **autoharness** | github.com/tigerless-labs/autoharness v0.5.3 | MIT | Do not integrate; port one policy | Ring 3 curator (`lifecycle.evaluate`) | **KNOW-HOW PORT** |
-| 6 | **OpenMausBot** | github.com/milind-soni/OpenMausBot; npm `openmausbot` (Apache OSS only; `enterprise/` excluded) | Apache-2.0 | Do not integrate; mine security patterns | Ring 6 MCP hardening; Ring 0/2 consent | **KNOW-HOW PORT** |
-| 7 | **IBM STAIR** | arXiv:2609.03874 (CC BY 4.0); code github.com/meghanadhpulivarthi/stair-clean (**no license**, CUDA-only) | Paper CC-BY / code none | Reject STAIR; borrow one idea | Ring 13 heading-addressable FTS5/BM25 | **REFERENCE/REJECTED** |
-| 8 | **Huashu Design** | github.com/alchaincyf/huashu-design | MIT | Onboard as sandboxed skill | Ring 3 quarantine → `.agents/skills/` | **SKILL/CONTENT** |
-| 9 | **Karpathy skills** | github.com/multica-ai/andrej-karpathy-skills | **NONE** | Re-author originals; do not copy | `surfaces/` or canonical skill | **SKILL/CONTENT** |
-| 10 | **Agent-Reach** | github.com/Panniantong/Agent-Reach | MIT | Gated experiment only | external CLI, own egress scope, off | **GATED EXPERIMENT** |
-| 11 | **OpenBot** | github.com/nightly-labs/openbot | PolyForm **Noncommercial** | Reject code; UX ideas only | Ring 5 Mission Control reference | **REFERENCE/REJECTED** |
+### Evidence labels used in this package
 
-> Items 1, 8–11 originated from one lead: X/@GitTrend0x status `2114877294892233190` (a promotional post); every repo was independently verified against the live GitHub API before assessment.
+- **Current source** — checked against Apex `89fc070` or the external commit named in the section.
+- **Historical report** — a result from an earlier review whose artifact is not present in current Apex `main`.
+- **Upstream test** — a test of the external project, not an Apex integration test.
+- **Design only** — source/architecture assessment without a live Apex pilot.
+- **Not qualified** — the necessary Apex, platform, security, or live-service evidence does not exist.
 
-## 2. Per-technology assessment and integration instructions
-
-### 1. ThinkRail `spec-graph` — INTEGRATE (highest-confidence item)
-- **Source:** `https://github.com/JetBrains/thinkrail`, Apache-2.0. The pi-free graph core (6 files: `parse/graph/query/validate/store/index.ts`, 960 LOC, only dependency `yaml`) was vendored **unmodified** at commit `9066aa9` into `pi-apex-harness/spikes/spec-graph/core/` — attribution and pinned SHA in `spikes/spec-graph/NOTICE.md`.
-- **Why:** fills a real Ring 3 gap — today's self-evolution memory is flat, token-capped markdown (`EXPERIENCE.md` ≤220 tok, `MEMORY.md` ≤300). Spec-graph gives a multi-file, linked, validated, queryable living-spec model (parent tree + `depends-on`/`references`/`implements` DAG) read on demand, outside the boot prefix. Runs green on Apex's actual runtime: Node 22 `--experimental-strip-types`, **7/7 tests, 0 failures**, no Bun.
-- **How to integrate:** graduate `spikes/spec-graph/core/` into `src/ring3/` **verbatim**; keep `NOTICE.md`, keep the upstream SHA pinned, and re-sync deliberately — never edit vendored files in place (keeps upstream merges mechanical). Specs live in `.agents/specs/`. Add a ring test; the pi-coupled `tools/` layer stays deferred (zero schema tokens) until needed. Declare `yaml` as a direct dependency (it is currently only transitive).
-- **Full doc:** `FEASIBILITY_review_agent-workbench-repos.md` §3.1; spike write-up `pi-apex-harness/spikes/spec-graph/{README,NOTICE}.md`.
-
-### 2. ThinkRail `contracts`, `pi-delegation`, `pi-dag` — EVALUATE NEXT
-- **Source:** same repo, Apache-2.0.
-- **How:** (a) port the strict versioned `packages/contracts` client/host wire to harden Ring 5 Mission Control's ad-hoc HTTP/SSE JSON; (b) evaluate `pi-delegation`/`pi-dag` as a generalization of Ring 2's fixed depth-1 5-role subagent pool. Do **not** take the Bun/Electrobun/React IDE. Watch pi-version drift (thinkrail tracks pi 1.3→1.4; Apex is on 1.4.0) and carry NOTICE attribution.
-
-### 3. open-ontologies — INTEGRATE AS OPT-IN SIDECAR (cleanest additive design)
-- **Source:** `https://github.com/fabio-rovai/open-ontologies` v2.1.0, MIT. "Terraform for ontologies": plan/apply/rollback RDF/OWL changes with blast-radius and machine-checkable proofs; stdio MCP server, **116 tools + 6 prompts**, no LLM, no credentials, no outbound calls in the default build.
-- **Why:** zero capability overlap — formal OWL2/SHACL/SPARQL reasoning that no ring has; composes with Ring 13 (extract → reason).
-- **How (all seams already exist, no core change, no FFI, no harness `package.json` entry):**
-  1. Install the **pinned Linux release binary by `SHASUMS.txt` SHA-256**, outside the workspace; never vendor Rust source.
-  2. Register as an **operator-sourced stdio server in the Ring 6 Confined MCP Hub** (`ConnectStdioMcpParams`, `inheritEnv:false`); the deferred `mcp_hub` tool means all 116 `onto_*` tools cost **+0 active schema tokens**; Ring 6's tool-description poisoning scan still runs.
-  3. Launch under Ring 0 `bwrap` with **`--unshare-net` by default**; `onto_pull/onto_push` fail closed until an operator allow-lists a destination. **stdio only** — disable the HTTP transport (its `serve-http 0.0.0.0` no-token mode is full read/write) and WASM plugins.
-  4. Onboard its `SKILL.md` through Ring 3 `skills-guard-v10` quarantine; treat outputs as untrusted reference content.
-- **Caveat:** native binary can't be JS-scanned — trust rests on MIT + pinned checksum + bwrap + clean env. Single-maintainer bus-factor risk.
-- **Full doc:** `FEASIBILITY_open-ontologies.md` (includes a proposed PoC asserting deferred tools, offline `onto_validate`, and blocked `onto_pull`).
-
-### 4. open-code-review (OCR) — OPTIONAL PROFILE, PLUS A CHEAP ZERO-BINARY PORT
-- **Source:** `https://github.com/alibaba/open-code-review` (~48.8k★, Apache-2.0); npm `@alibaba-group/open-code-review` — a thin Node launcher with per-OS checksum-verified `optionalDependencies` (Go binary; never vendor Go, no Go toolchain in the build).
-- **Reality corrections:** it is **not an offline SAST** — its multi-language "rules" are a deterministic glob→`rule_docs/*.md` prompt map; the LLM always renders the verdict. It is an MCP **client**, not a server; the surface is the CLI + `SKILL.md`.
-- **How — track A (zero-binary, do first, pure TS):** port the `system_rules.json` **glob → rule-doc selection** idea into Ring 2's deterministic `REVIEW_RULES` (attach the matching per-language rule doc to the review prompt per changed file). No binary, no credentials, no egress. Also seed the currently empty default rule library.
-- **How — track B (optional operator profile):** add the npm package as an **`optionalDependency`** (air-gapped/unsupported-platform installs must not break the build); invoke `ocr review --format json` (or SARIF) from a Ring 2/7 adapter **under bwrap, `--unshare-net` except the LLM provider host**, clean env, token injected from the **Ring 10 vault** (`OCR_LLM_URL`/`OCR_LLM_TOKEN`); map JSON/SARIF onto Apex review objects + Ring 14 audit; keep BugBot's deterministic P0/P1 gate and autofix loop as the hard gate, OCR as the semantic second layer; disable its local web viewer (DNS-rebinding surface). Pin versions (359 open issues), telemetry off.
-- **Full doc:** `FEASIBILITY_open-code-review.md`.
-
-### 5. autoharness — DO NOT INTEGRATE; PORT ONE POLICY INTO RING 3
-- **Source:** `https://github.com/tigerless-labs/autoharness` v0.5.3, MIT, pure-Python, Claude-Code-coupled. It is not a standalone sidecar and overlaps Ring 3's skill curator, so running both creates competing curators.
-- **What to take (re-implemented in TypeScript, behind existing Ring 3 gates):**
-  - **`lifecycle.evaluate()` (~40-line pure function) — the clearest win.** Survival = calls ÷ requests since creation; new skills in **probation** (can't be evicted before maturity); graduates go dormant only on zero-use **and** zero-view, and are evicted only on **capacity contention**, lowest rate first, deterministic hash tiebreak. More principled than Ring 3's age-only staleness. Map it onto the Ring 3 SQLite skill ledger (probation/capacity fields) with a ring test.
-  - Secondarily: the propose→intent-queue→**deterministic promoter** separation (LLM only proposes, a separate gate validates), and compare-first distillation discipline; its injection-guard/redaction ruleset also informs the missing Python scanner rules (see #8).
-- **Reject:** `--dangerously-skip-permissions` child sessions (conflicts with fail-closed/`DENY_UNATTENDED`), the Claude hooks/`.claude` packaging, and any Python sidecar runtime.
-- **Full doc:** `FEASIBILITY_autoharness.md`.
-
-### 6. OpenMausBot — DO NOT INTEGRATE; MINE ITS SECURITY PLUMBING
-- **Source:** `https://github.com/milind-soni/OpenMausBot` (~6k★, Apache-2.0) and npm `openmausbot` (a standalone Node ≥24 **server/CLI**, no library surface; Electron/React desktop app). **Exclude `enterprise/`** (source-available, non-Apache). Its default runs CLIs with user privileges behind a consent broker — weaker isolation than Apex's bwrap, so it must never regress Ring 0.
-- **What to take (Apache-2.0 TypeScript, re-implemented):**
-  1. **Ring 6 MCP hardening** — its large tested `server/mcp-*` surface: result budgets, strict handshake, schema validation, per-call timeouts, OAuth store/discovery, remote proxy, read-only/`openWorldHint` annotations. It even ships a **pi MCP extension** (`server/drivers/pi-mcp-extension.ts`, typebox, `-e`-loaded) — a near-direct reference for Apex's pi+MCP ring.
-  2. **Ring 0/2 consent model** — capability-token/per-turn capabilities + permission cards + read-only tool annotations (`shared/approval-mode.ts`, `server/admission.ts`, `agent-tool-policy.ts`), layered *inside* existing confinement, never replacing it.
-  3. Optional later: per-agent local **Docker VM with noVNC** (local only — never the paid boat.dev cloud path).
-- **Reject:** Electron/UI, PostHog analytics, cloud-computer integration, Node ≥24 runtime assumptions, and the known-unclosed loopback route documented in its `SECURITY.md`.
-- **Full doc:** `FEASIBILITY_openmausbot.md`.
-
-### 7. IBM STAIR — REJECT; BORROW ONE RETRIEVAL IDEA (and prefer Docling)
-- **Source:** paper arXiv:2609.03874 (CC BY 4.0); reference code `github.com/meghanadhpulivarthi/stair-clean` — **no LICENSE**, unmaintained, CUDA-only fine-tuning, per-corpus weights. Conflicts with Apex's local, deterministic, CPU-only, fail-closed model and largely duplicates Ring 1's AST retrieval for code.
-- **The one borrowable idea:** heading-addressable retrieval that returns a human-verifiable section path instead of an opaque chunk id. Re-implement **without any fine-tuning**: persist Ring 13's existing `DocumentSectionSpec { heading, sections[] }` tree into the SQLite **FTS5** store and use **BM25 over headings + body** (the paper itself shows BM25 beats zero-shot LLM heading picking, 59.5 vs 45.6 R@1).
-- **Better IBM move if document intelligence is the theme:** **Docling (MIT)** to upgrade Ring 13's parse layer (currently `officeparser`+`pdf-lib`); the STAIR-inspired heading retriever is phase two. STAIR itself goes on a watchlist, reconsidered only if Apex ever gains local-GPU/LoRA and a document-Q&A line.
-- **Full doc:** `FEASIBILITY_stair-ibm-rag.md`.
-
-### 8. Huashu Design — SANDBOXED SKILL ONBOARDING (best plug-and-play feature)
-- **Source:** `https://github.com/alchaincyf/huashu-design`, MIT. HTML/deck/PPTX/MP4/infographic generation — a real gap since Ring 13 only parses; already uses `pdf-lib` which Apex vendors.
-- **How:** onboard through the standard Ring 3 **quarantine → promotion** flow into `.agents/skills/`; execute only inside **bwrap with egress off**; it needs `playwright` + native `sharp` + `python3`, so first **extend `skills-guard-v10` with Python rules** (subprocess/eval/urllib/pickle — the current guard is JS/shell-oriented); localize the Chinese `SKILL.md`.
-
-### 9. Karpathy skills — RE-AUTHOR, NEVER COPY
-- **Source:** `https://github.com/multica-ai/andrej-karpathy-skills` — **no LICENSE (all rights reserved)**; third-party repo trading on Karpathy's name, no official endorsement.
-- **How:** the four principles (think-first, simplicity, surgical changes, goal-driven verification) are ideas, not copyrightable expression — write an equivalent **original canonical skill or `surfaces/` entry**. Do not copy prose. Low novelty (Apex already enforces most of it) but high signal-to-noise.
-
-### 10. Agent-Reach — GATED EXPERIMENT, OFF BY DEFAULT
-- **Source:** `https://github.com/Panniantong/Agent-Reach`, MIT, Python scraping CLI for ~14 social platforms.
-- **Why gated:** login-wall scraping needs broad egress + session cookies, ToS/legal exposure, and the project is monetized via residential-proxy/anti-bot sponsors — directly opposed to Ring 0 default-deny (3-host allowlist).
-- **How (if ever):** wrap as an explicitly opt-in **external CLI/MCP outside the default bwrap ring** with its own egress scope; cookies in the **Ring 10 vault** with masking; prefer **official APIs** for the low-risk subset (YouTube transcripts, GitHub, public Reddit). No default-install path.
-
-### 11. OpenBot — REJECT CODE; UX REFERENCE ONLY
-- **Source:** `https://github.com/nightly-labs/openbot`, **PolyForm Noncommercial 1.0.0** (blocks commercial reuse), and it runs agents with `danger-full-access` + `approvalPolicy: never` — the inverse of Ring 0. ~90% feature overlap.
-- **How:** borrow only interaction ideas for Ring 5 Mission Control — FIFO queue lifecycle (pause/resume/reassign/archive), single-owner shared channel, per-agent workspace panel. No code, no dependency.
-
-## 3. Cross-cutting integration rules (apply to every item)
-
-1. **Never weaken Ring 0.** Everything runs under bwrap/openat2 fail-closed, `network_egress: default-deny`; egress is opened per host, explicitly, and off by default. Reject anything requiring permission-skipped agents (autoharness, OpenBot).
-2. **Secrets only via Ring 10 vault** (0600, masked, never in env inheritance, argv, logs, or SSE) — OCR tokens, Agent-Reach cookies.
-3. **Third-party skills/code enter through Ring 3 `skills-guard-v10` quarantine**; extend the guard with Python rules before any Python-bearing skill (Huashu); native binaries can't be JS-scanned, so their trust chain is license + **pinned SHA-256** + bwrap + clean env + Ring 6 description scan (open-ontologies, OCR).
-4. **Prefer existing seams over new runtimes:** stdio MCP + deferred `mcp_hub` (+0 schema tokens) for sidecars; no Python/Go/Electron in the harness build; no new harness `package.json` hard dependency — use `optionalDependency` where a binary is unavoidable.
-5. **License hygiene:** Apache-2.0/MIT are usable with NOTICE/attribution and pinned commits; **no-license (Karpathy, STAIR code) and PolyForm-NC (OpenBot) are never copied**; OpenMausBot `enterprise/` is off-limits.
-6. **Pin and re-sync deliberately:** vendored files stay unmodified with upstream SHA recorded (spec-graph NOTICE model); external engines get pinned versions given their open-issue load.
-7. **Deterministic gates stay local and hard; LLM/network capabilities stay optional and advisory.** OCR and any scraping are operator-enabled profiles, never part of Tier-A/B ring tests.
-
-## 4. Recommended priority
-
-1. **Now:** graduate the **spec-graph spike → Ring 3** (proof already green); do the **OCR zero-binary glob→rule selector** and seed the empty `REVIEW_RULES.md`; re-author the **Karpathy-style canonical skill**.
-2. **Next, low-risk builds:** **open-ontologies Ring 6 sidecar PoC**; **autoharness `lifecycle.evaluate` → Ring 3** TS port; **Huashu** skill after the Python scanner upgrade.
-3. **Design work:** OpenMausBot-derived **Ring 6 MCP hardening + consent broker** backlog; ThinkRail `contracts` wire for Ring 5; Ring 13 **FTS5/BM25 heading retriever** (+ Docling parse upgrade).
-4. **Optional/heavy:** OCR binary Ring 7 profile; `pi-delegation`/`pi-dag` Ring 2 generalization; local Docker-VM computer use.
-5. **Gated/avoided:** Agent-Reach (egress-scoped experiment only); no code from OpenBot, STAIR, or OpenMausBot-as-product; no autoharness/OpenMausBot sidecars.
-
-## 5. Source documents in this repo (all embedded in Part II)
-- `FEASIBILITY_review_agent-workbench-repos.md` — ThinkRail, Agent-Reach, Karpathy, Huashu, OpenBot → **Appendix A**
-- `FEASIBILITY_stair-ibm-rag.md` — IBM STAIR (+ Docling note) → **Appendix B**
-- `FEASIBILITY_autoharness.md` — tigerless-labs/autoharness → **Appendix C**
-- `FEASIBILITY_open-ontologies.md` — fabio-rovai/open-ontologies → **Appendix D**
-- `FEASIBILITY_open-code-review.md` — alibaba/open-code-review → **Appendix E**
-- `FEASIBILITY_openmausbot.md` — milind-soni/OpenMausBot → **Appendix F**
-- `pi-apex-harness/spikes/spec-graph/{README,NOTICE}.md` — executable spec-graph port evidence → **Appendix G**
-
-> In this single-file package every document above is included verbatim in Part II, so the file is fully self-contained. The original files remain in the repository unchanged.
-
----
----
-
-# Part II — Full Source Reviews (Appendices)
-
-The documents referenced in Part I, Section 5 are embedded here in full.
-
+Promotional posts were lead sources only. Performance, cost, security, and productivity claims are not treated as independent evidence.
 
 ---
 
-## Appendix A — Five trending "agent workbench" repos (ThinkRail, Agent-Reach, Karpathy skills, Huashu, OpenBot)
+## 2. Current Apex review
 
+### 2.1 What changed since the earlier baseline
 
-**Date:** 2026-10-28 · **Source:** X/@GitTrend0x status 2114877294892233190 (promotional post; sponsor/referral links)
-**Method:** Each repo was verified against the live GitHub API (existence, license, language, activity, tree) and its README/key docs/source layout were inspected. Star figures below are **current API values**, not the post's "daily gain" framing.
+Current `main` advanced from `1ef6dd1` to `89fc070`. The changes primarily harden isolation, recovery, Mission Control authentication, MCP spill handling, browser qualification, packaging, and CI. The principal integration seams used by the earlier recommendations remain present.
 
-## 1. Verified snapshot
-
-| # | Repo | Stars (live) | Lang | License | Last push | One-liner |
-|---|------|-------------:|------|---------|-----------|-----------|
-| 1 | `JetBrains/thinkrail` | 3,967 | TypeScript (Bun/Turbo monorepo) | **Apache-2.0** | 2026-10-27 | Real IDE/host built **in-process on the same `pi` engine Apex uses**; living specs, subagents, DAGs, typed client/host wire |
-| 2 | `Panniantong/Agent-Reach` | 104,906 | Python (CLI, `requests`) | MIT | 2026-10-25 | One CLI to read/search Twitter, Reddit, YouTube, GitHub, Bilibili, Xiaohongshu, etc., incl. login-walled content, "zero API fee" |
-| 3 | `multica-ai/andrej-karpathy-skills` | 225,483 | Markdown only | **NONE (all-rights-reserved)** | 2026-04-20 | Single `CLAUDE.md` of 4 behavioral principles; ships `SKILL.md` + `.cursor/.mdc` |
-| 4 | `alchaincyf/huashu-design` | 27,728 | HTML skill + Python/Node scripts | MIT | 2026-10-23 | Design-generation **skill**: HTML prototypes, decks, editable PPTX, MP4/GIF animation, infographics; self-evolving taste ledger |
-| 5 | `nightly-labs/openbot` | 2,398 | TypeScript/Electron | **PolyForm Noncommercial 1.0.0** | 2026-10-27 | Desktop workspace: per-agent workspaces, FIFO queues, embedded browser, agent-to-agent chat; **dev preview, `danger-full-access`** |
-
-All five are real, active, and fast-growing. The post itself is marketing (Chinese-language, proxy/scraping sponsors), so treat its framing as hype even though the repos are legitimate.
-
-## 2. What Apex already covers (the novelty baseline)
-
-Most themes in the post are **already implemented** in Apex's rings:
-
-| Theme in the post | Apex today |
-|---|---|
-| Multi-workspace isolation | Ring 2 disjoint `git worktree` pool; Ring 9 multi-workspace cockpit |
-| Reusable skills + quarantine | Ring 3 `.agents/skills/SKILL.md` curator + `skills-guard-v10`; Ring 9 QuickJS plugin host |
-| Living specs / self-evolution / memory | `surfaces/` (SYSTEM/TOOL_GUIDANCE/MEMORY/EXPERIENCE), Ring 3 Harness² evolver + dreaming, Ring 2 plan/trust artifacts |
-| Subagents, delegation, DAG/swarm | Ring 2 5-role depth-1 pool; Ring 9 orchestrator (`dag`/`supervisor`/`debate`/`map_reduce`) + blackboard |
-| Background commands / scheduling | Ring 2 PTY leases + `DENY_UNATTENDED` cron |
-| Browser / computer control | Ring 7 Chromium CDP; Ring 2 agent-browser; Ring 3 approval-gated CUA |
-| Agent-to-agent messaging | Ring 9 omni-channel gateway + blackboard |
-| Documents | Ring 13 **ingestion/parsing** (PDF/DOCX/XLSX/PPTX/HTML/OCR) — read side only |
-| Behavioral discipline | Plan mode, trust artifacts, ThreeStrikeLoopGuard, scoped `.mdc` rules |
-
-Genuine **gaps** these repos could fill: (a) a *queryable graph* of living specs rather than flat markdown; (b) a *versioned typed wire* for the cockpit; (c) design/*content generation*; (d) broad web/social data access; (e) a compact canonical "behavior rules" doc; (f) polished FIFO queue / multi-agent desktop UX.
-
-## 3. Per-repo feasibility
-
-### 1) ThinkRail — **most strategically relevant; cherry-pick, don't fork**
-- **Why it fits:** runs `createAgentSession` in-process on the same `@earendil-works/pi` engine (its docs cite the same pi PRs/catalog as Apex). Explicitly ships **portable packages**: `spec-graph` (`spec_*` tools + a pi-free graph read model = *living specs as a graph*), `pi-delegation`, `pi-dag`, `pi-subagents`, `pi-background-commands`, plus a strict versioned **`packages/contracts`** client/host wire and `ask-user-question`/`visualize` extensions.
-- **New vs Apex:** spec-graph and the typed wire are real upgrades (Apex specs are flat `.md`; Mission Control is ad-hoc HTTP/SSE JSON). Delegation/DAG generalize Apex's fixed depth-1 pool.
-- **Effort/risk:** Medium. Pull individual portable packages, align to **pi 1.4.0**, do **not** take the Bun/Electrobun/React IDE. Apache-2.0 requires NOTICE/attribution. Watch pi-version drift (thinkrail tracks pi 1.3→1.4 catalog changes).
-- **Verdict: NOTEWORTHY — best source for the "living specs moat" and a hardened cockpit contract.**
-
-### 2) Agent-Reach — **fills a real gap but fights the security model; opt-in subset only**
-- **What it is:** ~14 per-platform `channels/*` scrapers (twitter, reddit, youtube transcript, bilibili, xiaohongshu, linkedin, instagram, github, …) behind one Python CLI; deps are light (`requests`).
-- **Conflict with Apex:** Ring 0 is `network_egress: default-deny` with a 3-host allowlist. Login-wall scraping needs **broad egress + session cookies**, carries ToS/legal exposure and fragility, and the project is monetized via residential-proxy/anti-bot sponsors (Bright Data, stealth/captcha vendors). "Zero API fee" = scraping, not a safe primitive.
-- **How to do it safely (if at all):** wrap as an **explicitly opt-in external CLI/MCP** outside the default bwrap ring, with its own egress scope; route any cookies through the Ring-10 0600 vault + masking; prefer **official APIs** for the low-risk subset (YouTube transcripts, GitHub, public Reddit).
-- **Verdict: NOTEWORTHY but high operational/legal risk — curated, egress-scoped, off by default.**
-
-### 3) Karpathy skills — **cheap content win, but re-author; no license**
-- Four principles (think-first, simplicity, surgical changes, goal-driven verification). Mechanically a perfect match for Apex conventions (`SKILL.md`, `.mdc` scoped rules, `AGENTS.md`).
-- **Blocker:** the repo has **no LICENSE** → default "all rights reserved"; copying the prose is not legally safe. The *ideas* aren't copyrightable, so re-write an equivalent canonical rule surface/skill. Third-party repo trading on Karpathy's name (no official endorsement).
-- **Novelty:** low (Apex already enforces most of this operationally), but high signal-to-noise; the post's own top comment argues "rules before eyes/workbenches."
-- **Verdict: do it as a small original-content addition to `surfaces/` or a bundled canonical skill — not a dependency.**
-
-### 4) Huashu Design — **strongest plug-and-play feature add (uses the existing skill pipeline)**
-- **What it adds:** design *generation* — a gap, since Ring 13 only parses. Outputs high-fidelity HTML prototypes, 1920×1080 decks, timeline animation/MP4/GIF, editable PPTX (`pptxgenjs`), infographics, with a 6-thumbnails→3-directions workflow and a self-evolving preference/lesson ledger (conceptually a domain-specific EXPERIENCE.md). Already depends on **`pdf-lib`, which Apex already vendors**.
-- **Fit:** installs through Apex's quarantine→promotion skill flow (`.agents/skills/`); MIT is clean.
-- **Costs/hardening:** needs `playwright` + native `sharp` + `python3`; `SKILL.md` is Chinese (localize). Apex's scanner **does read/hash `.py` files and refuses symlinks**, but its threat rules are JS/shell-oriented with **no Python-specific patterns** — so execute only inside bwrap with egress off, and extend `skills-guard-v10` with Python rules (subprocess/eval/urllib/pickle).
-- **Verdict: NOTEWORTHY — best immediate feature; onboard sandboxed, then harden the scanner.**
-
-### 5) OpenBot — **do not integrate code; UX reference only**
-- **License:** PolyForm **Noncommercial** — blocks reuse in anything potentially commercial.
-- **Security:** explicitly runs agents with `danger-full-access` + `approvalPolicy: never` after one consent — the opposite of Apex's fail-closed Ring 0; the post itself flags it ⚠️.
-- **Overlap:** ~90% already exists (workspaces, queues, browser, CUA, compaction, agent messaging). Electron desktop shell + telemetry/accounts add weight.
-- **Borrow only ideas:** FIFO queue lifecycle (pause/resume/reassign/archive), shared channel chat with a single task owner, per-agent workspace panel.
-- **Verdict: skip code; reference for Mission-Control UX.**
-
-## 4. Recommended sequencing
-
-1. **Now / low-cost:** re-author the Karpathy-style rules as an original canonical skill/surface (3); prototype **Huashu** onboarding behind bwrap + a Python-aware scanner (4).
-2. **Strategic spike:** port ThinkRail **`spec-graph`** and the **`contracts`** typed wire into Rings 3/5; evaluate `pi-delegation`/`pi-dag` as a generalization of Ring 2 (1).
-3. **Cautious/optional:** an opt-in, egress-scoped Agent-Reach wrapper using official APIs where possible (2).
-4. **Avoid:** pulling OpenBot code (license + insecure defaults) (5).
-
-## 5. Cross-cutting cautions
-- **License hygiene:** Apache-2.0 (thinkrail) and MIT (reach/huashu) are usable with attribution; **no-license (karpathy) and PolyForm-NC (openbot) are not** copyable.
-- **Security-first framing:** any scraping (2) or script-bearing skill (4) must stay behind the existing fail-closed confinement, default-deny egress, secret vault, and quarantine scan — not weaken them.
-- **Localization:** 2–4 are Chinese-first; budget English localization of prompts/docs.
-- **Don't trust the hype:** validate maintenance/issue load (thinkrail 224 open issues, openbot 221) and pin versions; treat these as inputs to Apex's roadmap, not guaranteed-stable dependencies.
-
----
-
-## Appendix B — IBM STAIR (ToC-based generative RAG)
-
-
-**Date:** 2026-10-28 · **Context:** follow-up to the 5-repo agent-workbench feasibility review
-**Sources:** arXiv:2609.03874 (CC BY 4.0), the authors' GitHub/Hugging Face links, GitHub API metadata, and the Apex codebase.
-
-## 1. What STAIR actually is
-
-**STAIR = STructure Aware Information Retriever**, an IBM Research paper (Kumar, Pulivarthi, Kumar, Sen, Bhat, Joshi; arXiv v2 2026-10-13). The lead author notes "work done while at IBM, currently at Amazon."
-
-- **Idea:** instead of splitting documents into fixed-size chunks, fine-tune an LLM so that, given a query **plus the document's Table of Contents**, it *generates* the specific ToC leaf heading that answers the query (constrained decoding over valid headings). There is **no vector database** — the corpus index lives in the fine-tuned weights ([arXiv abstract](https://arxiv.org/abs/2609.03874)).
-- **Method:** Stage 1 synthetic QA generation from the document → Stage 2 LoRA fine-tune (Mistral-7B-Instruct-v0.2, LoRA r=16/α=32, **up to 200 epochs**, 14k-token input) → Stage 3 constrained inference to valid ToC nodes.
-- **Results on SearchTome** (18 books, 6 domains — education/finance/law/med/natsci/socsci): Recall@1 **82.6%** vs DSI 76.9%, DPR 68.7%, BM25 59.5%, zero-shot Mistral 13.8%; claimed hallucination **<0.05%**.
-- Important nuance from the paper's own table: a strong modern LLM asked to just *pick* a heading with no fine-tuning (Claude Haiku 4.5) reaches only **45.6% R@1** — the fine-tuning is what carries the quality, not the ToC idea alone.
-
-## 2. Availability & maturity reality check
-
-| Artifact | Reality |
-|---|---|
-| Paper | arXiv 2609.03874, CC BY 4.0 (ideas usable with attribution) |
-| "Official" code | `github.com/meghanadhpulivarthi/stair-clean` — **personal repo, not an IBM org**; **no LICENSE** (all-rights-reserved); 6 stars; 66 commits; no pushes since 2026-09-30; README states training **"requires a local CUDA GPU — the vendored trainer has no CPU fallback"** (vendored FSDP trainer, Python 3.12/`uv`) |
-| Dataset | Hugging Face `meghanadh/SearchTome` (18 books) |
-| Third-party reimpl. | `Eyna-A/STAIR-ToC-RAG` (MIT, 7 stars) — but it uses **Qdrant + embeddings**, i.e. it abandons STAIR's core "index in weights" premise; effectively a ToC-aware *vector* RAG |
-| IBM production RAG stack | **Docling** (`docling-project/docling`, MIT, ~69.7k stars, daily commits) for parsing; **InspectorRAGet** (`IBM/`, Apache-2.0, active) for RAG evaluation; **Blended-RAG** (89 stars, NOASSERTION, notebooks, stale since May 2025); **OpenRAG** framework (Langflow+Docling+OpenSearch, described on ibm.com) |
-
-**Verdict on maturity:** STAIR is a ~6-week-old research paper with effectively unmaintained, unlicensed reference code and a tiny benchmark — not a dependency candidate. IBM's *maintained* RAG assets are Docling and InspectorRAGet, not STAIR.
-
-## 3. Fit with Apex — the full approach is a poor match
-
-Apex's codebase currently contains **zero** embedding/vector/fine-tuning/training code (verified by grep). Its retrieval is Ring 1 Tree-sitter Merkle AST + PageRank/BM25, FTS5 episodic memory, and LSP — all local, deterministic, CPU-friendly.
-
-| STAIR requirement | Apex constraint | Conflict |
+| Area | Current-source finding | Consequence for additive integrations |
 |---|---|---|
-| Per-corpus LoRA fine-tuning of a 7B model, CUDA/FSDP, no CPU fallback | Local-first, SQLite/WASM, runs on laptops & locked-down Linux; offline deterministic test suite | **Hard.** No GPU story; non-deterministic; can't be exercised by any current test ring |
-| Download multi-GB base weights; long training jobs | Ring 0 `bwrap` default-deny egress, 3-host allowlist, fail-closed confinement | Training/weights don't fit the confinement model; would have to live entirely outside Ring 0 |
-| One fine-tuned model per corpus, retrained as docs change | Ephemeral worktrees/sessions, immutable prefix budgets, skill quarantine | No lifecycle for model artifacts; `.safetensors`/checkpoints are outside `skills-guard-v10`'s threat model (pickle/checkpoint supply-chain risk) |
-| Targets long structured **prose** (textbooks, manuals, contracts, reports) | Apex's center of gravity is **code**, whose "ToC" is the AST — already exploited by Ring 1's Merkle repo map (rank #1 retrieval in the brownfield benchmark) | STAIR solves a problem Ring 1 largely already handles for code; overlap is mainly Ring 13 documents |
-| Unlicensed reference code | Apex vendors only MIT/Apache-clean dependencies | Cannot legally copy `stair-clean`; paper ideas are CC-BY but code is not |
+| Ring 0 / Ring 2 execution | Process ownership, sandboxing, path handling, and unattended-execution code changed. | No external executor, shell shim, or consent broker may replace Apex’s boundary. External processes require a qualified execution boundary; an unverified host fallback is not acceptable. |
+| Private control-plane state | `docs/adr/0001` and `docs/specs/2026-10-30-apex-isolation-blockers.md` remain explicit about unfinished private-state separation and migration requirements. | Mandates, outbox receipts, and sidecar state must use Apex’s verified state ownership path. Do not add a parallel database or silently create private state under a workspace. |
+| WAL and recovery | Receipt validation and spill behavior changed; fail-closed `OUTCOME_UNKNOWN` handling remains. | External effects need durable intent, stable idempotency, recovery tests, and explicit ambiguity resolution. Blind at-least-once replay is insufficient. |
+| Prefix and active tool schemas | Schema serialization was refactored, while per-request prefix verification remains. | New tools should remain deferred. No candidate may mutate the live pinned prefix or silently add active schema tokens. |
+| Ring 5 Mission Control | Browser-session cookies, logout, SSE session ownership, and pairing-file protections were strengthened. | Remote UI ideas must compose with the current authenticated control plane rather than adding a parallel unauthenticated panel. |
+| Ring 6 MCP | MCP result spills are now scoped using the trusted caller’s session identity. | The confined stdio MCP seam remains appropriate, but adapters must preserve session-scoped spill behavior and clean-environment execution. |
+| Rings 1 and 13 | Compaction and document-ingestion source files are unchanged from the earlier baseline. | The review seams remain available, but Apex must retain one compaction policy owner; grounded extraction should extend rather than replace document parsing. |
+| Rings 3, 7, 8, 9, 11 | Ring 3, `autonomous-pr-pipeline.ts`, `github-issue-bridge.ts`, `messaging-gateway.ts`, and Ring 11 are unchanged from the earlier baseline. | The proposed spec/skill, autonomous PR, GitHub intake, outbound delivery, and per-action approval seams remain source-compatible. |
 
-## 4. The borrowable idea (cheap, and Apex already holds the raw material)
+### 2.2 Current verification position
 
-The *concept* — structure-aware, **heading-addressable retrieval that returns a human-verifiable section path instead of an opaque `chunk_0417`** — aligns strongly with Apex's provenance/trust-artifact ethos. And Ring 13 already parses documents into `DocumentSectionSpec { heading, sections[] }` hierarchies (≤50 sections, validated), so no new parser is needed.
+- GitHub Actions run [`41338519955`](https://github.com/knarayanareddy/apex/actions/runs/41338519955), on `89fc070`, completed successfully on **Ubuntu 24.04 and Ubuntu 22.04**. The required steps include dependency installation, native build, typecheck, JavaScript inventory, security canaries, Linux confinement, Tier B integration, Ring 13 document sandboxing, and browser qualification.
+- This is strong current CI evidence, not blanket live-feature certification. A single green browser run does not by itself close the documented intermittent-startup or isolation concerns.
+- The workflow provisions Node `26.10.0`. Its green result is not direct qualification of Apex’s declared Node `>=22.19.0` floor.
+- `pi-apex-harness/research/2026-11-01-live-feature-verification.md` is explicitly **partial** and tested `00c7566`, not the final `89fc070` merge. It reports controlled CLI/model read, memory, and Obsidian checks; MCP, ACP, plugins, and remaining features were still pending.
+- This consolidation reviewed the current source and CI evidence. It did not rerun the complete Apex suite locally and does not claim physical power-loss, macOS containment, unrestricted-agent, or external-service qualification.
 
-A pragmatic **no-training "STAIR-inspired" retriever** could be:
-1. Persist Ring 13's heading tree + section bodies into the existing SQLite **FTS5** store.
-2. Backbone retrieval with **BM25/FTS over headings and body** (the paper shows BM25 alone already beats zero-shot LLM heading picking: 59.5 vs 45.6 R@1).
-3. Add an optional **constrained LLM step** via Apex's existing model providers: feed the ToC + query, force the output to one of the valid heading IDs (JSON-enum tool-call style), return the heading path as a cited trust artifact.
-4. Keep it deterministic-testable with the `faux/faux-1` pattern used across existing rings.
+### 2.3 Correction to the previous package
 
-This captures STAIR's verifiability/provenance benefit without GPUs, weights, or license risk — at the cost of not matching its fine-tuned 82.6% R@1 (honest expectation: BM25-class performance plus LLM reranking). If document Q&A becomes a real product surface, evaluate it with **InspectorRAGet** (Apache-2.0) rather than inventing metrics.
+The previous package said that six standalone `FEASIBILITY_*.md` documents and `pi-apex-harness/spikes/spec-graph/` remained in the repository. Those paths are absent from both current `main` and the earlier `1ef6dd1` baseline.
 
-## 5. If Apex wants RAG seriously, these IBM assets beat STAIR
+Accordingly:
 
-- **Docling (MIT, ~70k★, actively maintained):** industry-grade PDF/DOCX/PPTX/HTML structural parsing. Ring 13 currently uses `officeparser` + `pdf-lib`; Docling would be a direct, license-clean upgrade to the *parse* layer and emits exactly the heading hierarchy a ToC-retriever needs.
-- **InspectorRAGet (Apache-2.0, IBM org, active):** RAG/trace evaluation platform — useful as the verification harness for any retrieval feature, consistent with Apex's canary/ring testing discipline.
-- **OpenRAG / Blended-RAG:** reference only. Blended-RAG is stale notebooks with an unclear license; OpenRAG is a heavyweight Langflow/OpenSearch platform mismatched with Apex's embedded, local-first shape.
-
-## 6. Verdict & priority
-
-**STAIR itself: do not integrate.** Research-stage, unlicensed, CUDA-only, per-corpus training, prose-domain — it conflicts with Apex's local-first, deterministic, fail-closed architecture and its code-retrieval strengths. Put it on a **watchlist**; reconsider only if Apex ever gains a local-GPU/LoRA capability (e.g., via Ollama-adjacent tooling) and a document-Q&A product line.
-
-**Adopt the idea, not the implementation:** a Ring-13-native structural retriever (FTS5/BM25 over the heading tree + constrained heading selection + cited provenance) is a small, testable, in-architecture feature.
-
-**Relative to the earlier five repos:** lower priority than ThinkRail `spec-graph` (strategic) and Huashu (plug-and-play skill); roughly on par with Agent-Reach as a "gated experiment," and clearly above OpenBot-style code reuse. If document intelligence is the theme, **Docling for Ring 13 parsing is the highest-ROI IBM move**, with a STAIR-inspired heading retriever as a natural phase two.
+- This file is now the self-contained consolidated review record.
+- The spec-graph **7/7 historical spike report is retained as history**, not described as a currently reproducible in-repo proof.
+- Two additional pre-existing worktree reviews, `FEASIBILITY_sol-pi.md` and `FEASIBILITY_langextract.md`, are incorporated as A12 and A13. They were not present in the old package, are not claimed to be on current `main`, and were left unchanged; this package does not depend on reading them.
+- No recommendation below relies on a nonexistent local appendix or artifact.
 
 ---
 
-## Appendix C — tigerless-labs/autoharness
+## 3. Consolidated decision matrix
 
-
-**Date:** 2026-10-28 · **Question:** Is it a good addition to Apex, and is it *additive*?
-**Method:** Inspected the live repo via GitHub API (manifest, hooks, `src/`, agents, lifecycle/guard/redaction internals, tests). No clone (small repo, ~980 KB).
-
-## 1. Snapshot
-
-| Attribute | Finding |
-|---|---|
-| What it is | "Self-learning skill layer for Claude Code" — distills skills from real sessions, merges same-scenario ones, prunes by real usage. **No daemon, no benchmark on the active path.** |
-| License / deps | **MIT**; **pure Python 3.11+, zero third-party dependencies** (stdlib only; no `pyproject`/`requirements`) |
-| Packaging | A **Claude Code plugin**: `.claude-plugin/plugin.json` + `hooks/hooks.json` (SessionStart/Stop/PreToolUse/SessionEnd) + a stdio MCP server `stage_skill` |
-| Engine | Two Haiku subagents — **reflector** (episode → skill intents) and **curator** (umbrella consolidation) — that only *propose*; a deterministic **promoter** validates and lands; a pure **lifecycle** module archives by usage |
-| Maturity | ~10.4k★, 630 forks, 50 open issues, v0.5.3 (pre-1.0), single org (Tigerless Labs), pushed 2026-10-27; Linux/macOS only; **40+ pytest files**, rigorous concurrency/atomicity tests |
-| Evidence | Claims CORE-Bench **42% → 78%**, citing the HAL paper (arXiv:2510.11977, "Big Model vs Big Harness"). Single, vendor-run benchmark — directional, not independent proof |
-| Default posture | Local, stdlib-only; no outbound calls except an opt-in, fail-open notifier (argv, not shell; redacted; timeout-bounded) |
-
-## 2. The decisive integration fact: it is not a standalone sidecar
-
-Unlike `open-ontologies` (a generic stdio MCP server that any MCP client can spawn), autoharness's MCP server is **only an append-only intent queue** (`stage_skill` "never touches any skill tree"). The actual behavior is inseparable from **Claude Code itself**:
-
-- Hook events are Claude Code's lifecycle (`hooks.json` → a Python dispatcher keyed off `hook_event_name`).
-- Reflection **shells out to the Claude CLI** — `spawn.py` builds `[claude_bin, "-p", "--agent", agent, "--dangerously-skip-permissions"]` (and a `--resume --fork-session` mode), with a `CHILD_SESSION_ENV` recursion guard. Tests inject a fake reflector "in place of the real claude."
-- Skills/state paths are Claude's (`.claude/skills/`, `~/.claude/autoharness/`, `${CLAUDE_PLUGIN_ROOT}`).
-
-Apex runs on `@earendil-works/pi-coding-agent`, not Claude Code. There is therefore **no "register this MCP server and you get the feature" path**; adopting the system means re-hosting its triggers, subagent launch, and storage on pi primitives.
-
-## 3. Overlap with Apex Ring 3 is large — it is not additive as a *system*
-
-Ring 3 already implements the same conceptual loop, so running both would create two competing curators over the same skill directory.
-
-| Capability | Apex Ring 3 today | autoharness |
-|---|---|---|
-| Distill lessons from sessions | Quarantine-first skill distiller | Reflector subagent + compare-first intents |
-| Merge / umbrella consolidation | Curator with `absorbedInto` umbrella guard (#29912) | Curator folds narrow skills, `absorbed_into` provenance |
-| Pruning | **Time-based**: 14d stale → 30d archived; zero-use protection | **Usage-rate-based**: probation → maturity → capacity eviction |
-| Static safety scan | `skills-guard-v10` (Hermes-derived, JS/TS-oriented) | Independent 6-family Python guard, **injection-first** |
-| Secret/redaction | Two-pass learned-token scrub; spill scrub | ReDoS-aware `redaction_rules.toml` (AWS/PEM/GitHub/Slack/bearer/PII) |
-| Recall | `memory_recall` FTS5, explicitly **on-demand, never auto-injected** | Session-start grouped index **auto-injection** (with kill-switch + char budget) |
-| Trust boundary | `canonical` vs `community` source kinds | `created_by:agent` markers; only ever edits its own skills |
-| Provenance | Hash-chained self-learning ledger (Ring 9); skill ledger | Per-skill evidence ledger + pre-run snapshots |
-| Trigger | On-demand/scheduled; cron behind `DENY_UNATTENDED` | Event cadence every N tool calls via hooks; no daemon |
-| Skill subfiles | `references/templates/scripts/assets` allowlist | Same three + `assets`, with package-integrity folding |
-
-## 4. What *is* genuinely additive (portable, MIT, host-agnostic)
-
-The value is in the **deterministic policies and data artifacts**, which are plain Python/stdlib and re-implementable in TypeScript — not the plugin.
-
-1. **Usage-rate fitness model (the clearest win).** `lifecycle.evaluate()` is a ~40-line pure function: survival = calls ÷ requests-since-creation (adherence, not wall-clock); new skills sit in **probation** (denominator below a maturity threshold → can't be evicted); at graduation, zero-use **and** zero-view means dormancy; graduates die only by **capacity contention**, evicting lowest rate with a deterministic hash tiebreak. This is more principled than Ring 3's age-only staleness and is directly portable to the Ring 3 curator/SQLite counters.
-2. **Propose → intent-queue → deterministic promoter.** The LLM subagents can only append proposals; an independent deterministic gate validates schema, security, and membership before any write, across separate processes with drain locks. This is the same trust philosophy as Apex's Harness² 4-gate validator, applied end-to-end to skills — a good reference design for hardening the Ring 3 distiller.
-3. **Injection-first guard + redaction ruleset.** Its `skills_guard.py` explicitly models the SKILL.md body as an indirect-injection vehicle (six families: exfiltration/injection/destructive/persistence/network/obfuscation) and calls its threat model stronger than the Hermes scanner Apex's guard descends from. The `redaction_rules.toml` is careful about ReDoS (possessive quantifiers, bounded backtracking). Both are useful to **strengthen Apex's JS scanner — including the missing Python-specific rules flagged in the Huashu review — and its secret scrubbing**, as MIT reference material.
-4. **Compare-first distillation discipline.** "Patch the loaded skill → patch a class skill → subfile → only then create a class-level umbrella," plus mandatory contradiction reconciliation before adding a rule. A concrete prompt/policy upgrade for Ring 3 distillation that targets the near-duplicate accretion problem.
-5. **Evidence/undo mechanics.** Intent ledger, `absorbed_into` merge provenance ("a merge is never mistaken for a death"), and N pre-run snapshots for the one operation a single atomic rename can't undo.
-
-## 5. What to reject or heavily adapt
-
-- **`--dangerously-skip-permissions` autonomous child sessions.** This directly conflicts with Apex's fail-closed, approval-gated, `DENY_UNATTENDED` posture. Any native version must run reflection through the **Ring 2 worktree subagent pool with normal approval/confinement**, never a permission-skipped child.
-- **Session-start index auto-injection.** It fights Apex's zero-static-prefix-drift invariant and the explicit "recall is not automatic" design in `TOOL_GUIDANCE.md`. If wanted, expose it as a **deferred/budgeted** tool rather than a per-session prompt injection.
-- **Global + project two-layer management.** Apex is workspace-scoped with out-of-workspace vault separation; a global auto-managed layer broadens blast radius and should stay opt-in/project-only initially.
-- **The Claude hook/CLI/MCP packaging and `.claude` paths** — not reusable; re-host on pi session events, Ring 0/2/3 primitives, and `.agents/skills/`.
-- Treat the CORE-Bench number as motivation, not a spec; validate any port against Apex's own deterministic ring tests.
-
-## 6. Effort and verdict
-
-- **As a drop-in component: do not integrate.** Hard Claude-Code/CLI coupling, large functional overlap with Ring 3, a permission-skipping child-process model, and auto-injection that tensions with prefix discipline make wholesale adoption (or side-by-side running) a poor fit. A Python sidecar would also sit awkwardly in a TypeScript, bwrap-confined harness and add a runtime the core doesn't otherwise need.
-- **As a policy source: selectively mine the deterministic core.** A focused Ring 3 enhancement could port, in TypeScript, behind the existing quarantine/approval gates:
-  1. the **rate/probation/capacity lifecycle** (replaces age-only pruning) — small, pure, high value;
-  2. the **intent-queue + deterministic promoter** separation for the distiller;
-  3. selected **injection-family and Python-aware guard patterns + redaction rules**;
-  4. the **compare-first/umbrella authoring policy**.
-
-**Bottom line:** *not additive as a product, but additive as know-how.* It is best treated as a well-tested, MIT-licensed reference implementation for the specific Ring 3 policy upgrades above — most immediately the usage-rate lifecycle, which Apex currently lacks. It ranks below `spec-graph` (a portable, directly runnable core) and `open-ontologies` (a clean confined MCP sidecar) on integration ease, because none of autoharness's executable surface is reusable without re-architecting it onto pi.
-
-### Suggested next step
-A small design note mapping `lifecycle.evaluate` onto Ring 3's SQLite skill ledger (probation/capacity fields + a deterministic `evaluate` TS port with a ring test), kept behind the existing curator gates — no Python, no hooks, no autonomous child processes.
+| # | Candidate | License position at reviewed source | Decision | Apex destination / boundary |
+|---:|---|---|---|---|
+| 1 | ThinkRail `spec-graph` | Apache-2.0 | **Reproduce, then read-only pilot** | Ring 3; deferred tools; `.agents/specs/`; no live-prefix mutation |
+| 2 | ThinkRail `contracts` / delegation / DAG | Apache-2.0 | **Evaluate selectively** | Ring 5 typed wire first; Ring 2 delegation later; no IDE runtime |
+| 3 | open-ontologies | MIT | **Optional sidecar, deployment-gated** | Ring 6 stdio MCP + Ring 3 skill; qualified confinement; network off |
+| 4 | open-code-review (OCR) | Apache-2.0 | **Port rule selection; optional binary profile** | Ring 2/7 review; vault and explicit provider egress for binary |
+| 5 | autoharness | MIT | **Know-how port only** | Ring 3 lifecycle and deterministic promotion policies |
+| 6 | OpenMausBot | Apache-2.0 OSS; `enterprise/` excluded | **Security-design reference only** | Ring 6 MCP hardening; Ring 0/2 consent concepts |
+| 7 | IBM STAIR | Paper CC BY 4.0; reference code unlicensed | **Reject code; optional retrieval idea** | Ring 13 heading-addressable FTS5/BM25; no training runtime |
+| 8 | Huashu Design | MIT | **Quarantined skill candidate** | Ring 3; Python scanning and confined execution required first |
+| 9 | Karpathy skills | No license | **Re-author; never copy** | Original Apex surface or canonical skill |
+| 10 | Agent-Reach | MIT | **Gated external experiment only** | Separate CLI/profile; curated egress; prefer official APIs |
+| 11 | OpenBot | PolyForm Noncommercial | **Reject code; UX reference only** | Ring 5 interaction ideas; no dependency |
+| 12 | NVlabs SoL-Pi | MIT | **Compatibility spike; ObservationPack only if green** | Ring 0/session projection; Action Fusion blocked pending confined WAL path |
+| 13 | Google LangExtract | Apache-2.0 | **Port data contract; optional sidecar later** | Ring 13 grounded extraction; Python/model runtime off by default |
+| 14 | pi-cached-compaction | MIT declared in `package.json`; no standalone `LICENSE` at pin | **Off-by-default adapted pilot** | Apex session/compaction path; byte-prefix proof and fallback required |
+| 15 | pi-ampersand | MIT | **Display-only opt-in observer only** | Ring 5 presentation; no model feedback, tools, or authority |
+| 16 | Pi-Remote | MIT | **External companion only, conditional on qualification** | Keep separate from Apex; borrow reconnect/mobile/auth ideas |
+| 17 | pi-phone | MIT plus recorded upstream licenses | **Separate platform/client** | Public-API coexistence; no wholesale vendoring |
+| 18 | pi-pstack | MIT with upstream notices | **Selected content through quarantine** | Ring 3 skills; no full extension/auto-loop/authority import |
+| 19 | DSH Superagent | MIT research prototype | **Adapt three narrow features; reject runtime** | Mandates, Ring 9 outbox, Ring 5 attention taxonomy |
 
 ---
 
-## Appendix D — fabio-rovai/open-ontologies
+## 4. Cross-cutting acceptance contract
 
+Every proposed pilot must satisfy all applicable rules below before it can be called Apex-integrated.
 
-**Date:** 2026-10-28 · **Question:** Is it a good Apex integration, and is it *additive*?
-**Method:** Inspected the live repo via GitHub API (metadata, `Cargo.toml`, `.mcp*`, `SKILL.md`, `SECURITY.md`, release assets). No clone — the repo is ~232 MB (its `benchmark/` alone is referenced as ~23 GB).
-
-## 1. Snapshot
-
-| Attribute | Finding |
-|---|---|
-| Purpose | "Terraform for ontologies": **plan → apply → roll back** semantic changes to production RDF/OWL, with blast-radius reports, conservativity checks, and **machine-checkable proofs** |
-| License | **MIT** (engine "stays MIT"; a hosted platform is the commercial layer) — no license blocker |
-| Language / shape | **Rust, single self-contained binary**, no JVM, in-memory **Oxigraph** triple store, bundled `rusqlite` |
-| MCP | stdio MCP server (`open-ontologies serve`, `rmcp` 1.4); `.mcp/server.json` reports **116 tools + 6 prompts** (108 in default build; 8 behind optional Cargo features) |
-| Security posture | Local engine, **no LLM, no credentials, no outbound calls in a default build**; explicit `SECURITY.md` threat model; fail-closed "undetermined" verdicts |
-| Distribution | Per-OS release binaries + `SHASUMS.txt` (923 B) and a GHCR OCI image; also a Python `open_ontologies_lite` MCP server (pyoxigraph wheel) |
-| Maturity | ~1.85k★, 227 forks, **10 open issues**, pushed 2026-10-26, v2.1.0; effectively single-maintainer (`fabio-rovai` / Tesseract Semantics) — bus-factor risk |
-| Heavy extras (optional) | Lean4/Isabelle/Dafny/Rocq/Aeneas proof toolchain; ONNX embeddings (`tract-onnx`/`tokenizers`), DuckDB, Postgres, WASM plugins (`wasmi`, fuel-metered) |
-
-## 2. Is it additive? — **Yes, on both axes, but niche and opt-in**
-
-### 2.1 Capability: genuinely net-new (zero overlap)
-No Apex ring does semantic/ontology reasoning or formal verification:
-
-| Apex today | open-ontologies adds |
-|---|---|
-| Ring 1 — code AST / PageRank / BM25 over *source* | OWL2/SHACL/SPARQL reasoning, SHIQ tableaux satisfiability, conservativity/blast-radius over *RDF data* |
-| spec-graph spike — markdown frontmatter DAG of code decisions (no reasoner) | A real inference engine that **derives** consequences and refuses forged edges with an independently re-checkable Lean certificate |
-| Ring 13 — document/table **extraction** (CSV/XLSX/Parquet in) | Consumes the same tabular/serialized inputs to **model, validate and govern** them — complementary (extract → reason), not replacement |
-| Rings 0–15 — no knowledge-graph / description-logic / theorem-proving surface | All of it, plus audit-grade proof artifacts |
-
-It is **not** a retrieval system (different from IBM STAIR) and **not** a code-intent graph (different layer from ThinkRail spec-graph). It occupies an empty slot.
-
-### 2.2 Architecture: the *cleanest* kind of additive — a sidecar, not a dependency
-It integrates as an **external stdio MCP server + a skill**, requiring **no changes to Apex core, no FFI, and no new entry in the harness `package.json`**:
-
-- Apex **Ring 6 Confined MCP Hub** already speaks stdio MCP (`McpClient` + `StdioTransport`), spawns third-party servers with `inheritEnv: false`, runs a prompt-injection/tool-poisoning scan over server instructions and tool descriptions (`SkillVerdict`, `safeTools`/`poisonedTools`), and exposes everything behind the **deferred `mcp_hub` tool**.
-- Because it is deferred, all **116 `onto_*` tools add +0 active schema tokens** — an important property given the exact-token-count brittleness found in the earlier review. Agents discover them on demand via `codemode` instead of paying prefix cost.
-- The shipped `SKILL.md` is well-formed agent metadata (it self-declares the required MCP server, binaries, and outbound network direction), which routes naturally through Ring 3's `skills-guard-v10` quarantine.
-
-So it extends Apex's *capability catalog* without touching the confinement spine or the boot-pinned prefix.
-
-## 3. Target integration design (fits existing primitives)
-
-**Install (out-of-band, never build at runtime):**
-- Fetch the pinned platform binary (e.g. `open-ontologies-x86_64-unknown-linux-gnu`, ~81 MB) from Releases, verify against `SHASUMS.txt`, place in a trusted bin path **outside the workspace** (same pattern as the `.pi/agent/bin` native tools). Do **not** use `cargo install --git` inside a session (build weight + egress). Optionally consume the GHCR OCI image if the deployment already runs containers.
-
-**Register as an operator-sourced stdio server in Ring 6** (`ConnectStdioMcpParams`):
-
-```jsonc
-// operator-trusted MCP profile (not workspace-config, which fails closed on untrusted repos)
-{
-  "name": "open-ontologies",
-  "command": "/home/user/.local/bin/open-ontologies",
-  "args": ["serve"],
-  "source": "operator"            // Ring 6 runs inheritEnv:false + tool-poisoning scan
-}
-```
-
-**Confinement & egress:**
-- Launch under the Ring 0 `bwrap` profile with `--unshare-net` by default. Their default build makes **no** outbound calls, so local validate/query/diff/proof work fully offline; `onto_pull`/`onto_push` then fail closed unless the operator explicitly allow-lists a destination — matching the tool's own "user-provided URL only" design.
-- Apply the existing memory/timeout limits and the 128 MB SIGKILL ceiling to the reasoner (their `SECURITY.md` explicitly treats crafted Turtle/RDF-XML/SHACL as attacker-controlled and parser DoS as in-scope).
-
-**Skill & content trust:**
-- Onboard `SKILL.md` through Ring 3 quarantine; present ontology text and MCP results as **untrusted reference content**, consistent with `skill_access`.
-- **Use stdio only.** Their `SECURITY.md` warns `serve-http` on `0.0.0.0` without a token grants full read/write; stdio under Ring 6 has no listening socket at all.
-- Leave the **WASM `plugins` feature off** unless individually vetted — the project itself states fuel metering "bounds runtime, it does not sandbox intent."
-
-**Effort:** low-to-moderate for a local, read-only ontology profile (install/verify script + Ring 6 profile + quarantined skill). Egress-enabling `pull/push`, the HTTP transport, plugins, or the Lean/prover certificate pipeline are separate, larger phases.
-
-## 4. Risks and caveats
-
-1. **Domain-specific.** It pays off only on ontology / knowledge-graph / semantic-data / data-governance tasks. It should ship as an **optional MCP profile**, never a default dependency — for ordinary code work it is dead weight.
-2. **Native binary supply chain.** A Rust binary can't be meaningfully scanned by the JS-oriented `skills-guard-v10`. Trust must come from MIT + pinned SHA-256 + bwrap confinement + clean env + Ring 6's tool-description scan. This is a weaker static-assurance path than an in-process TS module.
-3. **Single-maintainer / commercial sponsor.** High individual bus factor; the hosted platform is the business. MIT licensing and a pinned binary mitigate lock-in, but track abandonment and pin versions deliberately.
-4. **Footprint & toolchain.** ~80 MB native binary per platform; the formal-proof re-check story additionally needs Lean4 (and friends) for full certificate verification, though the core reasoner/SHACL/SPARQL is all in the one binary and a proof is independently re-checkable offline.
-5. **Their own version/doc drift.** `SKILL.md` says 110 tools while `.mcp/server.json` says 116; versions diverge across `SKILL.md` (0.5.1), `Cargo.toml` (2.1.0) and `server.json` (0.1.9). Expect to pin and validate against the actual binary, not the docs.
-6. **Don't vendor the source** (232 MB repo, 23 GB benchmark data) — consume releases only.
-7. **Optional embedding/vector features** (`tract-onnx`, `instant-distance`) are feature-gated off in the default build; keep them off to avoid overlapping/confusing the retrieval story and widening the attack surface.
-
-## 5. Verdict
-
-**Additive: yes — and unusually cleanly.** It introduces a capability Apex entirely lacks (formal ontology reasoning with auditable proofs) while integrating through the exact extension seam Apex already hardened for untrusted third-party tools (Ring 6 confined stdio MCP, deferred `mcp_hub` for +0 schema tokens, Ring 3 skill quarantine, Ring 0 egress/resource confinement). The project's local-default, credential-free, fail-closed security model is well aligned with Apex, and MIT removes licensing friction.
-
-It is **not** a candidate for the core/default install: it is a specialized, opt-in MCP profile whose adoption should be gated on (a) checksum-pinned binary installation outside the workspace, (b) stdio-only with network namespaced off unless explicitly opened, (c) the HTTP and WASM-plugin surfaces disabled by default, and (d) a Ring 3-quarantined skill. Under those conditions it is a low-risk, high-value addition *for semantic-data workstreams*, and it composes with — rather than competes with — Ring 13 extraction, the spec-graph spike, and the rest of the rings.
-
-### Suggested next step
-A short proof-of-concept mirroring the spec-graph spike: pin the Linux release binary by `SHASUMS.txt`, register it in a Ring 6 operator stdio profile on a sample `.ttl`, and assert (i) the 116 tools stay deferred with zero active-schema-token change, (ii) `onto_validate`/SPARQL work with `--unshare-net`, and (iii) `onto_pull` is blocked until an egress allow-list entry is added.
+1. **Preserve the execution boundary.** No permission-skipped agent, prompt-only sandbox, OS-user shell shim, or consent UI is a substitute for Ring 0/2 enforcement. Where process ownership or platform confinement is unqualified, execution remains refused or explicitly outside the Apex qualification claim.
+2. **Keep authority deterministic.** Sender authentication, work authorization, path/tool scope, merges, and per-action approvals are host decisions. A model may classify inside those permissions but may never broaden them.
+3. **Make effects durable and ambiguous outcomes explicit.** Persist intent before an external effect, use stable idempotency keys, and preserve `OUTCOME_UNKNOWN` after a crash when success cannot be proven. Do not blindly replay an external send or mutation.
+4. **Use the owned private-state path.** New records belong in Apex-owned StateDb/state capabilities with migration, retention, scrubbing, and restart behavior. Do not create a second session store or assume `.harness` is already a verified private filesystem.
+5. **Maintain prefix discipline.** Prefer deferred discovery and on-demand reads. Active schema-token changes require an explicit budget review. Prompt or tool defaults may change only at a new session or outside the pinned prefix.
+6. **Treat all external content as untrusted.** Scan complete skill bundles through Ring 3 quarantine, including scripts and referenced assets. Issue comments, messages, MCP descriptions, observer text, and retrieved documents are data, never authority.
+7. **Default-deny secrets and egress.** Credentials come from Ring 10 or an equivalent owned vault path, not inherited environment or logs. Third-party endpoints are off by default, explicitly allow-listed, and covered by data-leaving-machine disclosure.
+8. **Pin provenance and honor licenses.** Record exact commits, checksums, copyright, and notices. No-license and noncommercial code is not vendored. A top-level license does not eliminate the need to audit bundled third-party material.
+9. **Match the actual runtime.** Apex currently targets Node `>=22.19.0` and Pi `1.4.0`. Avoid wildcard peer assumptions, Bun/Electron/Android/runtime replacement, and duplicate agent loops.
+10. **Qualify the actual integration.** Require unit and ring tests, negative authority tests, secret/egress tests, crash/restart cases, prefix/schema checks, and platform-specific evidence. Upstream green tests and promotional benchmarks are supporting evidence only.
 
 ---
 
-## Appendix E — alibaba/open-code-review (OCR)
+## 5. Recommended sequence
 
+### Wave 1 — narrow, high-value design and content work
 
-**Date:** 2026-10-28 · **Question:** Does it fit the Apex *build*, and is it additive?
-**Method:** Inspected the live repo via GitHub API (manifest, `cmd/`, `internal/`, npm launcher, rules, assurance case, docs). No clone (56 MB, ~1,125 blobs).
+1. Specify the **DSH-inspired Mandate** as an Apex-owned record and deterministic gate; begin proactive inference in `observe` mode.
+2. Specify the **Ring 9 outbox** with pre-send scrubbed receipts and `OUTCOME_UNKNOWN` reconciliation; test it independently of autonomous execution.
+3. Port **OCR’s glob-to-rule-document selection** without its binary or provider dependency.
+4. Select **pi-pstack content** for Ring 3 quarantine and re-author the small Karpathy-style behavioral surface without copying unlicensed prose.
+5. Extend the existing Mission Control attention projection with **delivery / answer / review / blocked / failed** autonomous-work states.
+6. Reconstruct the **spec-graph spike**, rerun its tests on current Apex, and only then consider a read-only Ring 3 pilot.
+7. Define LangExtract’s **grounded-extraction contract** in pure TypeScript, without its Python runtime.
+8. Run the **SoL-Pi Pi 1.4 compatibility/schema spike**; only ObservationPack may advance if it passes, with Action Fusion still blocked.
 
-## 1. Snapshot
+### Wave 2 — optional pilots after their gates are met
 
-| Attribute | Finding |
-|---|---|
-| What it is | Alibaba's internal AI code-review assistant (2 yrs, tens of thousands of developers), open-sourced. Reads git diffs and emits precise line-level review comments via an LLM agent with tool-use |
-| License | **Apache-2.0** (NOTICE required); OpenSSF **Gold** badge; ships a written `ASSURANCE_CASE.md` with an explicit threat model |
-| Language / runtime | **Go 1.26.9**, single CLI binary `ocr` (Bubble Tea TUI); separate `acp/` Go module (Agent Client Protocol, stdio) |
-| Distribution | npm package **`@alibaba-group/open-code-review`** — a thin Node launcher + per-OS **optionalDependencies** (`@alibaba-group/ocr-{os}-{arch}`), HTTPS-only fetch with redirect cap + **sha256 verification**; GitHub Action; raw release binaries |
-| Commands | `review`, `scan` (whole-file audit), `delegate`, `session`, `rules`, `config`, `auth`, `llm`, `viewer`, `completion`; outputs text/JSON/**SARIF**; `--preview` lists files offline |
-| LLM | **Required** for any finding — Anthropic, OpenAI Chat/Responses, AWS Bedrock, ChatGPT auth, or any OpenAI-compatible gateway |
-| Telemetry | OpenTelemetry, **disabled by default** (`OCR_ENABLE_TELEMETRY=1` to opt in) — compatible with default-deny egress |
-| MCP | OCR is an **MCP *client*** (consumes external MCP tools to enrich review). There is **no MCP server** command; the only stdio server is the separate ACP adapter, which pi does not natively speak |
-| Maturity | ~48.8k★, 3.6k forks, 359 open issues, active (pushed 2026-10-22); very large Go test suite; benchmark "AACR-Bench" (50 repos, 200 PRs, 10 languages, 1,505 engineer-annotated issues) |
+- open-ontologies stdio MCP profile.
+- LangExtract local sidecar, only if a document-extraction workstream justifies its Python/model weight.
+- Provider-specific cached-compaction adapter, off by default.
+- autoharness lifecycle policy and selected guard/redaction ideas.
+- Huashu content after Python-aware scanning and confined runtime evidence.
+- ThinkRail’s versioned wire, then delegation/DAG evaluation.
+- STAIR-inspired heading retrieval without STAIR code or training.
+- OpenMausBot-derived MCP result-budget, schema, timeout, and consent patterns.
 
-## 2. Two corrections to the headline description
+### External or reference only
 
-1. **It is not an offline static analyzer.** The "built-in multi-language ruleset (NPE, thread-safety, XSS, SQLi)" is `internal/config/rules/system_rules.json`: a deterministic **glob → `rule_docs/<lang>.md` map** (50+ languages). The engineering guarantees are *process* constraints — exact file selection, smart file bundling into isolated sub-agents, deterministic rule matching to focus attention, and separate comment-positioning/reflection modules. The **verdict itself is always the LLM**. Only `ocr rules` (which rule matches a path) and `--preview` (which files would be reviewed) run without a model.
-2. **It is not an MCP server.** The realistic integration surface is the **CLI + its agent `SKILL.md`** (which already drives `ocr review …` through a shell), not the Ring 6 MCP hub.
-
-## 3. Build-fit for Apex (the core question)
-
-OCR does **not** enter the TypeScript compile/typecheck/lint/test graph and needs no Go toolchain in the Apex build — it is consumed as an external, checksummed native binary, the same category as the harness's existing `fd`/`rg` native tools (and the open-ontologies pattern), but with a more polished delivery story.
-
-Recommended packaging:
-
-- Add **`@alibaba-group/open-code-review` as an `optionalDependency`**, not a hard one, so an unsupported platform or an air-gapped `npm install` never breaks the harness build. The platform binary then arrives through `registry.npmjs.org` — already an allow-listed egress domain in `GUARDRAILS.yaml` — and the launcher verifies sha256; the GitHub-release fallback uses `github.com`, also allow-listed. Never vendor the Go source.
-- Invoke the resolved `ocr` binary from a Ring 2/7 adapter **under Ring 0 `bwrap`**: `--unshare-net` by default, opening egress only to the configured LLM host; run with a clean env and inject the provider token from the **Ring 10 vault** (`OCR_LLM_URL`/`OCR_LLM_TOKEN`), never from the inherited environment.
-- Consume machine-readable output only (`--format json` / SARIF via `--output`) so findings map deterministically onto Apex review objects, the Ring 14 audit trail, and the existing PR gate — never parse the TUI.
-- Onboard the Apache-2.0 `SKILL.md` through **Ring 3 quarantine** (`skills-guard-v10`) like any other skill; its shell invocations still pass the shell AST gate and bwrap.
-- Treat it as a **PR/CI-gate only** tool (reviews run sub-agents, concurrency 8, multi-minute timeouts), never a per-turn call; apply the existing timeout/128 MB kill discipline.
-
-This is a cleaner supply-chain story than a manual binary drop: optional platform packages, checksum, signal-correct launcher (it maps signal deaths to `128+signo` rather than exiting 0), HTTPS-only, telemetry off.
-
-## 4. Is it additive? — *Yes, but as a mature upgrade in an occupied category, not a new capability*
-
-Apex already has code review (Ring 2 BugBot `REVIEW_RULES.md` + Codex `ReviewOutputEvent` with `mergeBase...HEAD`, and the Ring 7 autonomous PR pipeline with a P0 gate and CI autofix). So unlike open-ontologies (empty category), OCR overlaps an existing ring. Its genuine deltas:
-
-| Gap in Apex today | OCR adds |
-|---|---|
-| LLM-driven review with markdown rules; quality sensitive to prompt drift | Deterministic **review orchestration**: exact file selection, related-file bundling into isolated concurrent sub-agents, template rule matching, independent **positioning** and **reflection** modules that specifically kill "cut corners / line drift / unstable quality" |
-| One generic rule surface | **50+ language rule libraries** (`rule_docs/*.md`) with glob-accurate selection, incl. `ts_js_tsx_jsx.md`, Java, Go, Rust, Solidity, Terraform… |
-| Comments only | **SARIF** + JSON output, whole-file `scan` (no-diff audits), resume/session, `--preview` dry-run |
-| No external benchmark | AACR-Bench: higher Precision/F1 than generic Claude Code at **~1/9 the tokens**, deliberately precision-biased (lower recall, fewer false alarms) |
-| Single-shot posting | Incremental, non-destructive PR comments with sticky summary (the GitHub Action) |
-| Ring 1 LSP diagnostics (per-file, semantic) | Repo-level, cross-file, rule-guided review that complements rather than replaces LSP |
-
-### A zero-binary additive path
-The `rule_docs/*.md` content and the `system_rules.json` glob→rule map are plain Apache-2.0 markdown/JSON. Apex could adopt the **per-language rule-selection idea** directly into Ring 2's `REVIEW_RULES` (deterministically attach the matching rule doc to the review prompt per changed file) with no Go, no new credentials, and no extra process — a small, in-architecture improvement even if the binary is never adopted.
-
-## 5. Risks and constraints
-
-1. **LLM dependency = egress, credentials, spend.** Unlike the offline tools, every review calls a model. Needs an explicit egress allow-list entry for the provider host and a vault-managed token; double model configuration unless pointed at Apex's own OpenAI-compatible router. Cost is claimed low (~1/9 tokens) but non-zero.
-2. **Two-reviewer conflict.** Running OCR alongside BugBot/Codex risks duplicate/contradictory comments and gate confusion. Pick a division: e.g. OCR as the **precision diff gate**, keep BugBot for the bounded **autofix** loop, and de-duplicate findings before posting.
-3. **Native binary outside static scanning.** A Go binary can't be meaningfully inspected by the JS-oriented `skills-guard`; trust rests on Apache-2.0 + checksum + OpenSSF Gold + bwrap confinement + clean env (same model as open-ontologies, slightly stronger provenance).
-4. **Git ≥ 2.41 and diff-based operation** — fine for Ring 2 worktrees/Ring 7 branches, but a host prerequisite to verify; adversarial diffs are explicitly in its threat model (LLM responses validated before use).
-5. **Weight and pace.** Heavyweight vs. the fast ring tests; cannot be part of Tier-A/B. Resource behavior under bwrap (process groups, the optional local web viewer's DNS-rebinding surface) needs a validation pass; keep the viewer disabled.
-6. **359 open issues and rapid iteration** — pin a version and treat updates deliberately, as with any external engine.
-
-## 6. Verdict
-
-**Build-compatible: yes, cleanly — via the checksummed npm optional-dependency binary driven under bwrap, with no Go in the Apex build and telemetry off by default. Additive: moderately — it strengthens an existing ring rather than opening a new one.**
-
-It is a high-quality, scale-proven, supply-chain-conscious review engine whose orchestration discipline, language coverage, SARIF output and measured precision/token efficiency are real improvements over Apex's current LLM-only review. But it is LLM-required, overlaps Ring 2/7, and brings a native process + provider egress, so it should land as an **optional, operator-enabled Ring 7 review profile** (not a default/core dependency), with an explicit split of responsibilities versus BugBot.
-
-### Ranking against the earlier candidates
-- Below **spec-graph** (the only source-level, directly runnable TS core) on integration depth.
-- Comparable to **open-ontologies** in sidecar mechanics, but OCR needs live LLM egress/credentials while open-ontologies runs offline; OCR has the more polished npm delivery but sits in an already-occupied category (lower novelty).
-- Above **autoharness** (whose executable surface is Claude-coupled and non-portable).
-
-### Suggested next step
-Two-track, cheapest first:
-1. **No-binary spike:** port the `system_rules.json` glob→`rule_docs` selection into a Ring 2 deterministic rule-attachment step with a ring test (pure TS, uses Apex's existing model).
-2. **Binary spike (optional profile):** pin the Linux npm package by checksum, wire `ocr review --format json` into a Ring 7 PR-gate action under `--unshare-net` with vault-injected provider env, and assert deferred registration (+0 active schema tokens), SARIF/JSON parsing, and egress blocked until the provider host is explicitly allow-listed.
+Pi-Remote, pi-phone, Ampersand, Agent-Reach, OpenBot, complete DSH, complete autoharness, complete OpenMausBot, and complete pi-pstack remain outside Apex’s runtime.
 
 ---
 
-## Appendix F — milind-soni/OpenMausBot
+## 6. Review wave A — October 28 technology assessments
 
+### A1. ThinkRail `spec-graph` — reproduce the evidence, then pilot read-only
 
-**Date:** 2026-10-28 · **Question:** Is it an additive integration for Apex?
-**Canonical repo:** `milind-soni/OpenMausBot` (the ~6k★ original). The search returns ~80 similarly named repos/forks, many unlicensed or low-quality — only the canonical Apache-2.0 project is considered here.
-**Method:** GitHub API inspection (manifest, workspaces, `server/`, `shared/`, `electron/`, `skills/`, security docs, npm registry). No clone (~312 MB).
+**Source:** [`JetBrains/thinkrail`](https://github.com/JetBrains/thinkrail), `packages/spec-graph/core` at `9066aa9f4bb5c0dcb681235b4b936e8be73651f7`; Apache-2.0.
 
-## 1. Snapshot
+**Additive finding.** Apex’s living-spec and self-evolution material is primarily flat, token-capped Markdown. Spec-graph offers a multi-file, linked, validated, queryable model with parent relationships and `depends-on` / `references` / `implements` edges. Its pi-free core was assessed as the portable portion; the Bun/Electrobun/React product is not an integration target.
 
-| Attribute | Finding |
-|---|---|
-| What it is | Open-source "Grok Bot alternative": a **messaging-app-style roster of AI agents** as an Electron/React 19 desktop app + a local harness server on `127.0.0.1` |
-| Engines | Drives real external CLIs — `claude`, `codex`, `grok`, ACP agents (Kimi/Hermes), and **`pi`** (it ships `server/drivers/pi-mcp-extension.ts`) — using existing logins; no model proxy |
-| Per-agent "computer" | Cloud Linux desktop (**boat.dev**, paid third party), isolated **Local VM (Docker)** with noVNC takeover, or opt-in host control (macOS/Ubuntu Xorg) |
-| License | **Apache-2.0** for OSS, with an open-core carve-out: `enterprise/` is source-available under a separate license (production needs a key) and must be excluded from any reuse |
-| Packaging | Repo root is `private: true`, no `main`/library. npm `openmausbot@0.1.130` is a **standalone server/CLI** (`bin: openmausbot`, **Node ≥24**, native deps `@duckdb/node-api`, `@resvg/resvg-js`, `@1password/sdk`) — a runnable product, not an importable module |
-| Stack | pnpm monorepo: Electron + React 19 + ag-grid + mermaid + DuckDB + PostHog; large `server/` (admission, MCP broker/gate/oauth/proxy, drivers) and `electron/` IPC layer |
-| Maturity | ~6.0k★, 993 forks, **497 open issues**, single maintainer (security contact is a Gmail address), created 2026-08 (~2.5 months), pushed daily |
+**Current evidence correction.** The earlier review reported that six core files, about 960 LOC, were vendored unchanged and passed **7/7 Node strip-types tests**. Current `main` contains neither `pi-apex-harness/spikes/spec-graph/` nor its test. Therefore the current status is **historical report / reproduction required**, not `SPIKE PROVEN`.
 
-## 2. Build-fit for Apex — **not an embeddable component**
+**Integration path.**
 
-- **No library surface.** The repo is a private application and the npm artifact is a server you run and pair devices to, with no `main` and a Node **≥24** requirement (Apex targets ≥22.19 and is validated on 22.x). There is no `npm i` path that yields callable modules for the harness.
-- **Stack mismatch.** Electron/React desktop + heavy UI/native dependencies vs Apex's headless pi harness with a lightweight web cockpit. Pulling it in would drag in Electron, ag-grid, mermaid, DuckDB, PostHog and a ~300 MB footprint.
-- Realistic options are therefore limited to: **(a)** run it as a separate product (coexistence, not integration), or **(b)** cherry-pick Apache-2.0 TypeScript *patterns/functions* into Apex (never from `enterprise/`), or **(c)** re-implement a design in Apex's own style. There is no clean version-pinned dependency path, so any borrowed code is a maintenance fork.
+1. Re-vendor or re-implement the small core with its Apache notice and pinned upstream SHA.
+2. Add `yaml` as a direct Apex dependency rather than relying on transitive hoisting.
+3. Store specs under `.agents/specs/`; build only a derived, on-demand index.
+4. Begin with deferred read tools: `spec_get`, `spec_graph`, `spec_grep`, and `spec_validate`.
+5. Route any later write tools through Apex safe-path, approval, and content-scanning gates.
+6. Reprove traversal/symlink refusal, graph validation, deterministic output, zero surface drift, and zero unexpected active-schema growth on current `main`.
 
-## 3. Additive? — **Mostly overlapping; a few specific, valuable deltas**
+**Decision:** strategically valuable, but **do not graduate it from the old document alone**.
 
-Much of OpenMausBot is a productized, UX-first expression of capabilities Apex already has as rings:
+### A2. ThinkRail contracts, delegation, and DAG — evaluate narrow protocols
 
-| OpenMausBot feature | Apex equivalent today |
-|---|---|
-| Multi-agent roster, agent-to-agent threads | Ring 9 orchestrator (`dag/supervisor/debate/map_reduce`) + blackboard, Ring 2 subagent pool |
-| Chat cockpit / approval cards | Ring 5 Mission Control (HTTP/SSE, plan & steer) |
-| Browser / computer use | Ring 7 Chromium CDP, Ring 3 approval-gated CUA, Ring 2 agent-browser |
-| Permission/approval modes | Ring 0 approval policy + Plan/Trust artifacts |
-| MCP client hub | Ring 6 confined MCP hub |
-| Skills | Ring 3 skill library + `skills-guard-v10` |
-| Provider keys / OAuth | Ring 10 vault (0600, masked), Ring 12 provider manager |
-| Messaging channels | Ring 9 omni-channel gateway |
+**Source:** same ThinkRail repository; Apache-2.0.
 
-The genuinely additive parts are concentrated in **security plumbing and isolation design**, not features:
+The versioned client/host contracts are a candidate for hardening Mission Control’s HTTP/SSE wire. Delegation and DAG packages are possible references for generalizing Ring 2’s fixed subagent topology.
 
-1. **Capability-token consent broker (strongest borrow).** Per-launch and narrow **per-turn capabilities**, explicit permission cards, read-only tool annotations (`agent-tool-policy.ts`), and "Full access" treated as a standing, clearly-scoped grant — with a documented rule that it must never silently broaden credential/routine/skill confirmations. Apex's approval model is coarser; this is a concrete target design, largely pure TypeScript (`shared/approval-mode.ts`, `server/admission.ts`, `call-consent.ts`, `harness-mcp-token.ts`).
-2. **Deeper MCP hardening than Ring 6.** A large, well-tested MCP surface: strict handshake, schema validation, **result budgets**, output trimming, OAuth store/discovery, remote HTTP proxy, directory/catalog, per-call timeouts, gate config, and read-only/`openWorldHint` annotations. Most directly useful: it already includes a **pi MCP extension** (`pi-mcp-extension.ts`, typebox, `-e` loaded, mounts MCP servers as pi tools with scope gating and an `ask_user` tool) — a near-direct reference for Apex's own pi+MCP ring.
-3. **Per-agent Local VM (Docker) with visual noVNC takeover.** A fuller desktop-isolation/computer-use model than bwrap process confinement. Conceptually additive for "give an agent a whole machine," but heavy; the cloud variant depends on boat.dev (paid, outbound) and should be avoided under Apex's local-first/default-deny model.
-4. **Multi-engine driver + permission mapping.** A pure `supportsApprovalMode(driver, mode)` matrix across claude/codex/grok/ACP/pi and a provider-switch guard — useful input for Ring 12 routing.
+**Integration path:** evaluate `packages/contracts` first, with explicit protocol versioning and compatibility tests against current authenticated Mission Control. Only later compare delegation/DAG with Ring 2 and Ring 9’s existing orchestrators. Do not import ThinkRail’s IDE, Bun runtime, React shell, or a second session owner. Realign all Pi APIs to `1.4.0` and retain notices.
 
-The bundled `skills/` (three skills) and the chat UI itself offer little Apex doesn't already have.
+**Decision:** design evaluation, not an approved dependency.
 
-## 4. Security and posture conflicts
+### A3. open-ontologies — useful optional MCP sidecar, not a default dependency
 
-- **Weaker default isolation than Apex.** OpenMausBot runs real CLIs **with the user's privileges**, gated by a consent broker; the strong isolation is an opt-in separate VM. Apex's default is kernel `bwrap`/`openat2` fail-closed confinement. Borrowing patterns must not regress Ring 0 — the broker is a *complement* to confinement, not a substitute.
-- **Telemetry and cloud egress.** PostHog product analytics (anonymous, toggleable) and boat.dev cloud computers (paid, data leaves the machine) conflict with default-deny egress; both would be off/absent in an Apex port.
-- **Not airtight.** `SECURITY.md` openly documents an unresolved route where a bot's shell can reach Full-access threads; useful honesty, but a reason to treat the broker as a reference rather than trusted code.
-- **Open-core boundary.** Anything under `enterprise/` is not Apache-licensed; exclude it.
-- **Supply-chain noise.** Single maintainer, very young project, 497 open issues, and dozens of no-license fork-clones. Only the canonical repo should be referenced, with pinned commits and NOTICE attribution.
-- **Runtime gap.** Node ≥24 vs Apex's 22.x line; borrowed modules must be back-ported and re-tested, not installed.
+**Source:** [`fabio-rovai/open-ontologies`](https://github.com/fabio-rovai/open-ontologies), reviewed at v2.1.0; MIT.
 
-## 5. Verdict
+**Additive finding.** Formal RDF/OWL ontology validation, SHACL/SPARQL reasoning, change blast radius, and proof artifacts are net-new relative to Apex’s code retrieval, spec graph, and document extraction. The default architecture was assessed as local and credential-free.
 
-**Not additive as a component or sidecar; additive as a design reference.** OpenMausBot occupies the same problem space Apex already covers across Rings 2/3/5/6/7/9/10/12, wrapped as a standalone Electron product that cannot be imported and whose default (user-privilege CLI + consent broker) is less confined than Apex's kernel sandbox. It is a better citizen than the similar `nightly-labs/openbot` (Apache-2.0 vs PolyForm Noncommercial, and a far more mature, tested, documented permission/MCP model), but it still belongs in the "reference, do not integrate" bucket.
+**Integration path.**
 
-Where it can materially improve Apex, in priority order:
-1. **Ring 6 MCP hardening** — port the result-budget, strict-handshake, schema-validation, timeout and OAuth patterns, guided by the existing **pi MCP extension** (highest relevance, same engine).
-2. **Ring 0/2 permission redesign** — adopt the capability-token/per-turn consent model and read-only tool annotations as a layer inside the existing confinement, never replacing it.
-3. **Optional Docker-VM computer-use** — evaluate a per-agent Local VM with noVNC only if a product need emerges; keep it local, never the boat.dev cloud path.
+- Consume a pinned release binary outside the workspace; verify the published SHA-256. Do not vendor its large source/benchmark tree.
+- Register an operator-sourced **stdio** server through Ring 6 with `inheritEnv: false` and deferred `mcp_hub` discovery.
+- Run only under a qualified confined profile with network disabled by default. `pull`/`push` requires a separate explicit destination grant.
+- Disable the unauthenticated HTTP transport and WASM plugins.
+- Onboard its skill through Ring 3 and treat ontology/MCP content as untrusted.
+- Preserve current session-scoped MCP spill behavior.
 
-### Ranking against earlier candidates
-Below **spec-graph** (a runnable, pi-compatible TS core) and **open-ontologies** (a clean, offline, confined MCP sidecar) on component fit; comparable in category to **OpenBot** but with stronger, license-clean reference material; clearly ahead of OpenBot for actual code-pattern reuse. Treat any takeaway as a pinned-commit, Apache-2.0-attributed, re-tested port into the relevant ring — not a dependency.
+**Constraints:** niche domain, native-binary supply chain, and maintainer concentration. Current Apex process-ownership/private-state blockers also mean “clean design” is not equivalent to “qualified deployment.”
 
-### Suggested next step
-A focused Ring 6 hardening note: diff OpenMausBot's `server/mcp-*` (budget, gate, schema, timeout, oauth) and `pi-mcp-extension.ts` against Apex's `mcp-confined-hub.ts`, and produce a backlog of pure-TS, pi-compatible improvements with ring tests — no Electron, no PostHog, no cloud, no `enterprise/` code.
+**Decision:** optional profile after a small offline proof; never a required core dependency.
 
----
+### A4. open-code-review — take the deterministic selector first
 
-## Appendix G — spec-graph spike evidence (ThinkRail → Apex Ring 3)
+**Source:** [`alibaba/open-code-review`](https://github.com/alibaba/open-code-review); Apache-2.0.
 
-### G.1 Spike README
+**Corrections to the headline.** OCR is not an offline SAST: an LLM renders findings. Its deterministic advantage is review orchestration and a glob-to-language-rule-document mapping. It is an MCP client, not an MCP server for Ring 6.
 
+**Track A — preferred, zero binary.** Port the per-language rule-selection concept into Ring 2/7 so each changed file receives the appropriate reviewed rule document. Use Apex’s existing model and audit objects, preserve Apache notices, and test exact glob selection. This adds review focus without credentials, egress, Go, or a new runtime.
 
-**Date:** 2026-10-28 · **Status:** Spike — proven portable, not yet wired into the product
-**Upstream:** JetBrains/thinkrail `packages/spec-graph` @ `9066aa9` (Apache-2.0), see [NOTICE.md](NOTICE.md)
+**Track B — optional external profile.** If the full engine is later justified, pin its checksum-verified binary as an optional dependency, invoke JSON/SARIF output from Ring 7 under qualified confinement, inject provider credentials from Ring 10, allow only the provider endpoint, disable telemetry/viewer, and deduplicate against existing BugBot/Codex findings.
 
-## 1. Verdict
+**Decision:** Track A is a small additive improvement; Track B remains off by default because it overlaps existing review and adds provider spend and external process risk.
 
-**Feasible and low-risk to adopt the core; medium effort for the full tool surface.**
-ThinkRail's spec-graph is split into a **pi-free `core/` (960 LOC, only `yaml` + Node built-ins)**
-and a thin pi-coupled `tools/` layer. The core was vendored **unmodified** into `./core` and runs
-green on Apex's actual runtime (Node 22 `--experimental-strip-types`, no Bun):
+### A5. autoharness — port lifecycle policy, not the Claude plugin
 
-```bash
-node --experimental-strip-types --test spikes/spec-graph/spec-graph.spike.test.ts
-# 7 tests, 0 failures (~0.2s)
-```
+**Source:** [`tigerless-labs/autoharness`](https://github.com/tigerless-labs/autoharness), reviewed at v0.5.3; MIT.
 
-It fills a genuine Ring 3 gap: today's self-evolution knowledge is **flat, token-capped markdown**
-(`EXPERIENCE.md` ≤220 tokens, `MEMORY.md` ≤300). Spec-graph adds a **multi-file, linked, queryable,
-validated living-spec model** (parent tree + `depends-on`/`references`/`implements` DAG) that lives
-on disk and is read on demand — outside the boot-pinned prefix.
+Autoharness is coupled to Claude Code hooks, CLI children, paths, and lifecycle events. Running it beside Ring 3 would create competing skill curators, so it is not a drop-in MCP sidecar.
 
-## 2. What the proof establishes
+**Useful additions.**
 
-| # | Property proven | Evidence in `spec-graph.spike.test.ts` |
-|---|---|---|
-| 0 | **Portability** — no `Bun`/`bun:` import; runs under Node strip-types | static scan of every vendored file |
-| 1 | **Graph model** — parent tree + three typed edge kinds + forward/reverse adjacency, `pathForId` | sample 4-node DAG |
-| 2 | **Query** — bounded `graphSlice` (subtree/ancestors/neighbors) and metadata-filtered `grepSpecs` | slice + grep assertions |
-| 3 | **Validation** — dangling links, duplicate ids, and parent cycles are distinct, detected findings | temp fixtures incl. a `b↔c` cycle |
-| 4 | **Containment** — `resolveSpecPath` refuses `../`, absolute, non-`.md`, and symlink paths | traversal/symlink probes |
-| 5 | **Prefix safety** — index is derived/in-memory/read-only; `surfaces/` and the spec workspace are byte-identical before/after | sha256 dir hashes |
-| 6 | **Determinism** — two independent `SpecIndex` instances produce identical node/edge signatures | pure `buildGraph` |
+- `lifecycle.evaluate()` concepts: usage-rate fitness, probation before maturity, dormancy only after zero use and zero view, and capacity-driven deterministic eviction.
+- Propose → intent queue → deterministic promoter separation.
+- Compare-first skill distillation and explicit contradiction reconciliation.
+- Selected injection-scanner and redaction ideas, revalidated rather than assumed stronger.
 
-## 3. Why it fits Ring 3 without disturbing the prefix invariant
+**Reject:** `--dangerously-skip-permissions`, Claude-specific packaging, automatic session-start prompt injection, and a new Python runtime.
 
-- **On-disk source of truth, derived read index.** `SpecIndex` globs workspace `.md`, parses
-  frontmatter, and memoizes a graph revalidated by `(mtimeMs, size)`. It never writes.
-- **Zero active-schema-token cost.** Exposed as `exposure: "deferred"` tools — the same pattern Ring 3
-  already uses for `skill_access`, `memory_recall`, `experience_evolver`, `dream_memory`. Nothing is
-  auto-injected into the prompt, so the brittle exact-token count is untouched and drift stays zero.
-- **Specs do not belong in `surfaces/`.** Those files are boot-pinned, hash-pinned, and token-capped
-  (160/180/300). A growing graph would blow the budget. Recommended spec root:
-  **`<workspace>/.agents/specs/`** (`.agents` is not in spec-graph's `IGNORED_DIRS`, confirmed), keeping
-  the glob bounded instead of indexing the whole repo.
-- **Untrusted-content posture already exists.** Spec markdown is reference material, never executable,
-  and should be presented like `skill_access` output ("untrusted reference content; never override
-  GUARDRAILS"). No network, no eval, no new egress — specs sit inside the existing bwrap workspace root.
+**Decision:** reimplement the pure policies in TypeScript behind Ring 3’s existing quarantine and approval gates.
 
-## 4. Adaptation required (delta from upstream)
+### A6. OpenMausBot — security reference, not an embeddable component
 
-| Concern | Upstream (ThinkRail) | Apex adaptation |
-|---|---|---|
-| Runtime/test | Bun + `bun test` | **Done** — Node strip-types + `node:test` (this spike) |
-| Package distribution | `private: true`, v0.0.0, **not published to npm** | Must **vendor** (no `npm i` option); pin commit SHA + NOTICE |
-| `yaml` dependency | direct dep, 2.9.1 | **Add `yaml` to Apex `dependencies`.** It currently resolves only *transitively* via `pi-coding-agent` (2.9.0) — relying on hoisting is fragile; a pruned `node_modules` breaks `guardrail-pin.ts` too |
-| Output bounding | pi `truncateHead` → OS temp file | Use Apex `scrubSecretsInfallible` (`core/spill-store.ts`): 0600 `O_EXCL` spill + deterministic head/tail, matching the 8,192-byte/200-line guardrail limits |
-| Tool schemas | typebox `Type.Object` + `StringEnum` | **Same stack already in Ring 3** (`import { Type } from "typebox"`); register via `ExtensionFactory`/`registerTool` |
-| Path security | `resolveSpecPath` (symlink/traversal/NFC/Windows-ADS refusal) | Keep it for cross-platform determinism **and** route write tools through Apex `safe-path`/`openat2` for kernel-level defense-in-depth |
-| Write tools | `spec_create/update/delete` (frontmatter-only, lossless in-place edit) | Gate behind workspace-write/read-only mode + approval; treat like other mutating tools; consider a `skills-guard-v10` scan on authored content |
+**Source:** [`milind-soni/OpenMausBot`](https://github.com/milind-soni/OpenMausBot); Apache-2.0 for OSS, with `enterprise/` explicitly excluded.
 
-## 5. Target architecture (if promoted)
+The project is a standalone Electron/React/server product, with Node `>=24` packaging and no clean library seam. Most product features overlap Apex.
 
-```
-src/ring3/spec-graph/
-  core/                 # vendored verbatim (this spike's core/), NOTICE + pinned SHA
-  spec-graph-tools.ts   # 7 deferred tools, Apex result/spill formatting
-  spec-graph-index.ts   # per-workspace SpecIndex cache keyed by realpath of .agents/specs
-src/ring3/ring3-extension.ts
-  # register spec_get/spec_graph/spec_grep/spec_validate (read) first;
-  # spec_create/spec_update/spec_delete behind the write gate in a later phase
-test/ring3/             # port upstream core.test.ts + tools.test.ts to node:test
-```
+**Borrow selectively.** MCP result budgets, strict handshake/schema validation, per-call timeouts, OAuth handling, read-only/open-world annotations, and its Pi MCP extension are useful Ring 6 references. Capability-token and per-turn consent ideas may inform Ring 0/2, but only inside Apex’s confinement.
 
-Tool registration sketch (mirrors an existing Ring 3 deferred tool):
+**Reject:** Electron, PostHog, cloud-computer integration, `enterprise/`, user-privileged CLI execution as a security model, and any known-unclosed authorization route. A local Docker/noVNC computer would require a separate product need and isolation review; it is not implicitly approved.
 
-```ts
-pi.registerTool({
-  name: "spec_validate",
-  label: "Validate living-spec graph",
-  description: "Check .agents/specs for dangling links, duplicate ids, and parent cycles.",
-  parameters: Type.Object({}),
-  exposure: "deferred",                 // +0 active schema tokens, zero prefix drift
-  async execute() {
-    const report = validateGraph(getSpecIndex(workspaceRoot).graph());
-    const text = JSON.stringify({ valid: isValid(report), ...report });
-    return { content: [{ type: "text", text: scrubSecretsInfallible(text).text }], details: report };
-  },
-});
-```
+**Decision:** pinned, attributed design references only; no product or sidecar import.
 
-The seven upstream tools map 1:1: `spec_grep`, `spec_get`, `spec_graph` (read),
-`spec_validate` (read), `spec_create`, `spec_update`, `spec_delete` (write; frontmatter-only, prose is
-edited with normal write/edit tools).
+### A7. IBM STAIR — reject implementation, retain heading provenance idea
 
-## 6. Phased plan & effort
+**Sources:** [arXiv:2609.03874](https://arxiv.org/abs/2609.03874), CC BY 4.0; `meghanadhpulivarthi/stair-clean`, assessed as unlicensed reference code.
 
-- **Phase 0 — spike (done):** vendored core + 7 node:test proofs; typecheck unaffected (`spikes/` is
-  outside the `tsconfig` include, so no schema-token or build regression).
-- **Phase 1 — read-only, ~2–3 days:** add direct `yaml` dep; move `core/` to `src/ring3/spec-graph/core`;
-  port upstream unit tests; ship the four **read** deferred tools + `.agents/specs` root. No mutation
-  surface, minimal security review.
-- **Phase 2 — authoring, ~2–3 days:** the three write tools behind read-only/workspace-write gates and
-  `safe-path` containment; Mission Control read-only viewer; bundle the upstream `SKILL.md` guidance
-  (localized) so agents treat specs as ground truth and update them in the same change as the code.
-- **Phase 3 — workflow, ~2 days:** link validation into Plan/Trust Artifacts and the Harness² evolver;
-  optional Ring 15 "frontier parity" framing.
+STAIR’s per-corpus CUDA/LoRA training and weight-resident index conflict with Apex’s local, deterministic, CPU-friendly retrieval. The unlicensed code is not copyable, and code retrieval already has a structural AST representation.
 
-## 7. Risks & non-goals
+**Optional idea.** Ring 13 can expose human-verifiable heading paths by persisting its existing section hierarchy into FTS5 and using BM25 over headings and body. A later constrained model step may select only from valid heading IDs and return cited provenance, but it is optional and must not be represented as reproducing STAIR’s fine-tuned benchmark results.
 
-- **Not semantic/vector RAG.** It is structural + keyword retrieval (graph traversal, content grep),
-  complementing Ring 1's AST/PageRank/BM25 for *code*; it targets prose decisions/contracts. Do not
-  conflate with the IBM STAIR direction (which needs per-corpus fine-tuning).
-- **Vendoring drift.** 960 LOC to maintain; mitigate with the pinned SHA + verbatim policy in NOTICE and
-  mechanical re-syncs. The pi-free boundary makes this cheap.
-- **Trust.** Authoring tools create workspace content; reuse the existing quarantine/scan and approval
-  machinery rather than inventing a new trust path.
-- **Scope discipline.** Keep specs lean (the upstream `SKILL.md` enforces intent-over-inventory,
-  say-each-thing-once) to avoid recreating an unstructured wiki.
+**Decision:** no STAIR code, model weights, or training runtime. A small Ring 13 retrieval experiment is permissible. Docling or other parsers require their own review rather than being implicitly approved here.
 
-## 8. Reproduction
+### A8. Huashu Design — content-generation skill with execution prerequisites
 
-```bash
-cd pi-apex-harness
-npm install                       # ensures transitive yaml is present
-node --experimental-strip-types --test spikes/spec-graph/spec-graph.spike.test.ts
-```
+**Source:** [`alchaincyf/huashu-design`](https://github.com/alchaincyf/huashu-design); MIT.
 
-Sample graph: [`samples/specs/`](samples/specs) — four specs exercising `parent`, `depends-on`,
-`references`, `implements`, `tags`, and nested directories.
+HTML, deck, PPTX, infographic, and animation generation complements Ring 13’s read-side document parsing.
 
-### G.2 Third-party attribution (NOTICE)
+**Integration path:** onboard only through Ring 3 quarantine, localize operator-facing instructions, scan every script/reference, and execute under qualified confinement with egress off. Its Playwright/native Sharp/Python requirements remain optional dependencies, not core build requirements.
 
-# Third-party attribution — spec-graph core
+**Gate:** Apex’s historical scanner assessment found JS/shell-oriented rules but insufficient Python-specific coverage. Add and test Python rules for subprocess, evaluation, network, serialization, and obfuscation before enabling script-bearing use.
 
-The files under `./core/` are **verbatim, unmodified copies** of the pi-free
-`packages/spec-graph/core/` directory from the ThinkRail project.
+**Decision:** useful content candidate, not approved for unconfined execution.
 
-- Upstream: https://github.com/JetBrains/thinkrail
-- Path upstream: `packages/spec-graph/core/{parse,graph,query,validate,store,index}.ts`
-- Vendored from commit: `9066aa9f4bb5c0dcb681235b4b936e8be73651f7` (branch `main`)
-- License: Apache License 2.0 (ThinkRail repository `LICENSE`)
-- Sole runtime dependency: `yaml` (ThinkRail pins 2.9.1; Apex currently resolves 2.9.0 transitively)
+### A9. Karpathy skills — original re-authoring only
 
-No `@earendil-works/*`, `@thinkrail/*`, or Bun-only API is imported by `core/` —
-this is the property that makes the module portable to Apex's Node
-`--experimental-strip-types` runtime, as demonstrated by `spec-graph.spike.test.ts`.
+**Source:** [`multica-ai/andrej-karpathy-skills`](https://github.com/multica-ai/andrej-karpathy-skills); no license at review.
 
-If this spike graduates into `src/`, retain this notice, keep the upstream commit
-SHA pinned, and re-sync deliberately rather than editing the vendored files in
-place (so future upstream merges stay mechanical).
+Think-first, simplicity, surgical change, and goal-driven verification are useful ideas, but the repository’s prose may not be copied without permission. There is also no basis to treat a third-party repository as officially endorsed by its namesake.
 
+**Decision:** write an original Apex canonical skill or surface using independent wording. No dependency and no copied text.
+
+### A10. Agent-Reach — high-risk external data experiment
+
+**Source:** [`Panniantong/Agent-Reach`](https://github.com/Panniantong/Agent-Reach); MIT.
+
+Broad social/login-wall scraping fills a data-access gap but conflicts with default-deny networking and introduces cookies, platform terms, fragility, and legal/operational exposure.
+
+**Decision:** if ever evaluated, use a separate explicitly enabled CLI/profile with its own narrow egress scope and vault-managed credentials. Prefer official APIs for GitHub, YouTube transcripts, and public Reddit. Never make scraping part of the default install or Tier A/B qualification.
+
+### A11. OpenBot — no code; limited UX inspiration
+
+**Source:** [`nightly-labs/openbot`](https://github.com/nightly-labs/openbot); PolyForm Noncommercial 1.0.0 at review.
+
+The license blocks commercial reuse, while `danger-full-access` and `approvalPolicy: never` conflict with Apex’s authority model. Most workspaces, queues, browser, and messaging features already exist.
+
+**Decision:** no code or dependency. Only general interaction ideas—queue lifecycle, single-owner shared channels, and per-agent workspace presentation—may inform original Ring 5 design.
+
+### A12. NVlabs SoL-Pi — strong architectural match with a hard tool-boundary blocker
+
+**Source:** [`NVlabs/SoL-Pi`](https://github.com/NVlabs/SoL-Pi) at `219568034fa54ed121ede80961655e33dfb9d0e3` (v0.1.1); MIT. This is the canonical NVIDIA repository. The npm name `sol-pi` was assessed as unrelated; do not install it from npm.
+
+**Additive finding.** SoL-Pi is a public-API Pi extension on the same Node floor as Apex, with opt-in mechanisms and no third-party runtime dependency beyond Pi/typebox. Its four mechanisms have very different integration positions:
+
+- **ObservationPack** replaces older large observations at the model-projection layer with stable handles and exact-page recall while retaining stored history. This is adjacent to Apex’s spill store but offers a distinct cross-turn paging model.
+- **Evidence-Preserving Reducer** permits model compression only when retained quotations match an archived source, leaving the original result untouched on failure. It still creates model/egress cost and secret exposure.
+- **Online Context Compact** adds plan/economic compaction policy and overlaps Ring 1’s existing two-stage compaction. Apex must have one owner for this policy.
+- **Action Fusion** appends validation commands to mutations. Its upstream construction creates replacement edit/write/bash tools without Apex’s injected confinement, shell guard, and WAL wrapping.
+
+**Hard blocker.** Loading the upstream extension unchanged could give the model a second shell/mutation path outside Ring 0’s `BashOperations`, monotonic shell gate, read-only admission, and WAL. Action Fusion is therefore disqualified until its command path is explicitly adapted into the exact Apex-owned tool path and denial canaries pass.
+
+**Integration sequence.**
+
+1. Vendor a pinned source snapshot with MIT/NOTICE for a compatibility-only spike. Run typecheck, the upstream suite, and `check-pi-compat.mjs --strict` against **Pi 1.4.0**; upstream development dependencies still target 1.3.0.
+2. Measure active schemas with every mechanism off and again for each enabled mechanism. Do not assume the historical 1,073-token baseline remains valid with new tools.
+3. If green, pilot **ObservationPack only**, off by default. Reuse or deliberately compose with Apex’s session-scoped SpillStore/private-state capability rather than accepting upstream writes to an arbitrary session directory.
+4. Prove handle/recall fidelity, history immutability, compaction/resume behavior, secret scrubbing, output bounds, and crash recovery.
+5. Keep Reducer off until its provider/egress policy is explicit. Keep Online Context Compact off while Ring 1 or another compaction adapter owns policy.
+6. Consider Action Fusion only after confined operations, shell-guard, WAL, read-only, missing-sandbox, and interference-check tests all pass.
+
+**Decision:** potentially one of the best native fits, but currently **design/compatibility-spike only**. No Pi 1.4 or Apex integration suite was run during this consolidation.
+
+### A13. Google LangExtract — adopt grounded-extraction semantics before adopting Python
+
+**Source:** [`google/langextract`](https://github.com/google/langextract), reviewed release v1.7.1 at tag commit `a4c0aa4c1be98f441ffc7e1d0f85b1067748e1f3`; Apache-2.0.
+
+**Additive finding.** Ring 13 parses documents but does not semantically extract typed entities grounded to exact source character intervals. LangExtract’s combination of verbatim extraction text, source offsets, explicit ungrounded results, and alignment warnings matches Apex’s provenance model.
+
+**Preferred zero-runtime phase.** Define an Apex-owned TypeScript extraction contract containing typed entities, verbatim text, `char_interval`, grounded/ungrounded state, and alignment diagnostics. Validate that every grounded interval exactly matches the source and filter or explicitly mark ungrounded output. This creates a stable Ring 13 interface for any future extractor without adding Python, a model, or egress.
+
+**Optional later sidecar.** If a real document workstream justifies it:
+
+- Pin a minimal, checksum-verified Python environment outside the workspace and invoke an Apex-owned JSON adapter under qualified confinement.
+- Start with local Ollama and network disabled except the explicitly approved loopback endpoint. Cloud providers require separate operator consent, vault credentials, endpoint allow-listing, and document-egress disclosure.
+- Onboard the first-party skill through Ring 3, but do not execute arbitrary examples.
+- Treat extraction as advisory data; never auto-mutate the workspace or parse the HTML visualization as an authority.
+- Run batch/document workflows, not per-turn multi-pass extraction.
+
+The reviewed third-party TypeScript and MCP ports were stale and are not approved shortcuts. The default Python dependency tree is heavy even for local use and needs a separate resolved-tree audit.
+
+**Decision:** the grounded data contract is a good small addition; the full library is an optional document-intelligence sidecar, not a core dependency. No live extraction or sidecar test was performed.
 
 ---
 
-*End of package. Individual source documents remain available separately in the repository; this file is the authoritative single-file bundle as of 2026-10-28.*
+## 7. Review wave B — October 30 Pi-ecosystem assessments
+
+Lead post: [`X/@GitTrend0x status 2116062652250112427`](https://x.com/GitTrend0x/status/2116062652250112427). Its cost and capability claims were not accepted as independent proof.
+
+### B1. pi-cached-compaction — promising mechanism, Apex-specific pilot only
+
+**Current source recheck:** [`nicobailon/pi-cached-compaction`](https://github.com/nicobailon/pi-cached-compaction) at `e1e20de0a7e433070414602f1105cdcac258ef4f` (v0.2.0). `package.json` declares MIT; no standalone `LICENSE` file was present at this pin, so clear license text must be retained or obtained before copying code.
+
+**Additive finding.** The extension attempts to reuse a provider’s cached conversation for compaction and lets the summarizer see full tool output rather than short excerpts. This is potentially useful for long Apex sessions, but its savings are provider- and workload-specific. The author’s 667k-session cost comparison is not an Apex benchmark.
+
+**Why direct installation is inappropriate.** Apex has stricter pinned-prefix, receipt, unattended-execution, and recovery invariants than an ordinary Pi extension assumes. Full tool output can also carry secrets or untrusted instructions. Automatic compaction before cache expiry must not become an unapproved background mutation.
+
+**Required adaptation.**
+
+- Off by default behind a provider-capability matrix.
+- Prove the cached request’s prefix byte-for-byte using Apex-owned serialization/hash checks; otherwise fall back to existing compaction without sending.
+- Keep pinned system/tool state unchanged and test model switches, edits, tree navigation, overflow, and other extensions.
+- Define secret scrubbing and untrusted-content handling for full tool output.
+- Route any expiry-triggered behavior through the existing unattended/approval policy.
+- Test checkpoint receipts, restart/recovery, read/modified-file lists, and summary quality on Apex workloads.
+- Report measured cache share, quality, latency, and cost separately; never promise the promotional percentage.
+
+**Current upstream verification:** typecheck passed and **18/18 tests passed** at the pin above. No live provider cost or Apex compaction test was performed.
+
+**Decision:** adapted, gated pilot only.
+
+### B2. pi-ampersand — display-only observer, with upstream feedback removed
+
+**Current source recheck:** [`y0usaf/pi-ampersand`](https://github.com/y0usaf/pi-ampersand) at `7893ced32b2d4ee740c9a6c5634a3b99c6f5b65e`; MIT.
+
+Ampersand observes user and assistant text and normally remains silent. It does not receive tool calls or file edits, but it sends clipped conversation text to a third-party service and requires an API key.
+
+**Critical boundary.** Upstream uses `pi.sendMessage(..., display: true)`, and its README explicitly says observer messages reach Pi’s model on the next turn. Therefore upstream is **not** merely a display observer: its text can influence subsequent tool-using behavior.
+
+**Apex-safe shape.**
+
+- Render observer output only in Mission Control, outside model-visible session history and outside the pinned prefix.
+- No observer tools, action authority, approvals, or automatic steering.
+- Explicit per-session opt-in, off by default and unavailable in unattended/print modes unless separately approved.
+- Vault-managed key, endpoint allow-list, secret scrubbing, data-egress disclosure, size/retention limits, and failure isolation.
+- Treat even display text as untrusted and sanitize its rendering.
+
+**Verification:** the reviewed repository has no test script; no live service was contacted.
+
+**Decision:** the “quiet second opinion” idea is optional UX; the upstream extension should not be installed unchanged.
+
+### B3. Pi-Remote — separate companion, never a second Apex control plane
+
+**Current source recheck:** [`Xpropel/Pi-Remote`](https://github.com/Xpropel/Pi-Remote) at `7a1abf13329c36dc50f3bcf8ed2486996fbcd979` (v2.1.10); MIT.
+
+Pi-Remote combines an in-process Pi extension, relay, and web UI for session mirroring and remote commands. It overlaps Mission Control and can remotely inject messages, change models, compact, and optionally run bash. Its own documentation describes personal single-user use rather than a multi-user authorization model.
+
+**Decision.** Keep it as an external companion for ordinary Pi, not an Apex dependency. Do not bridge its remote command authority into Ring 0 or create a parallel Apex relay.
+
+**Reusable ideas.** Reconnect/catch-up behavior, mobile presentation, separate device/viewer credentials, explicit connection lifetime, and delivery receipts may inform future Mission Control work. Any such work must use current Apex browser sessions, logout, pairing protections, approvals, and origin/host controls.
+
+**Qualification gate.** The earlier review did not approve it because its qualification suite was not green. The fresh `npm test` run at the current pin was also not green: **2,326 passed, 13 failed, 44 cancelled, and 11 skipped**. Failures included executable-bit assertions and cancelled asynchronous tests. No UI build, real relay, or remote-command qualification was performed. Even a green upstream suite would not by itself qualify its relay or remote-command model for Apex.
+
+### B4. pi-phone — coexist as a separate Android/platform product
+
+**Current source recheck:** [`picassio/pi-phone`](https://github.com/picassio/pi-phone) at `0084cb5e96b503237d77c3d8b512b747f2bc34df`; MIT, with `LICENSE-pi-pocket` and an upstream provenance ledger.
+
+Pi-phone is an Android application carrying a Linux userland and running Pi Durable, with a large server/tool/UI surface. It is not a Pi extension or an additive Apex module.
+
+**License update.** The earlier review required upstream permission before any vendoring. The current pin now visibly includes MIT license files and records pi-pocket/pi-termux-mobile provenance. That is improved evidence, but not a complete audit of its approximately 1,500-file tree and bundled third-party skills, binaries, fonts, and assets. Any future copying still requires a complete provenance check and all relevant notices.
+
+**Decision:** evaluate only as a separate client/platform using public APIs. Durable-session and mobile-UX ideas may be studied, but do not import its Android runtime, broad tool catalog, server, browser automation, credentials, or second session/durability owner into Apex. No Android build or device qualification was performed in this review.
+
+### B5. pi-pstack — selected licensed skills, not the whole autonomous extension
+
+**Current source recheck:** [`jiangkoumo/pi-pstack`](https://github.com/jiangkoumo/pi-pstack) at `7af23c2b80a5157db82eeaca3e4976a41eb67448` (package v0.3.15); MIT, including Lauren Tan’s upstream copyright and third-party notices.
+
+**Additive finding.** The engineering principles, verification checklists, investigation/review prompts, and selected playbook content can enrich Ring 3 without adding another runtime.
+
+**Integration path.**
+
+- Select individual skills/playbooks by product need; do not install all content by default.
+- Run the complete selected bundles through Ring 3 quarantine, including scripts, references, and agent definitions.
+- Preserve `LICENSE`, `LICENSES/`, and `THIRD_PARTY_NOTICES.md` and upstream source pins.
+- Convert persistent Poteto-style behavior into explicit, on-demand Apex workflows rather than live system-prompt mutation.
+- Map independent review and verification to existing Ring 2/7 roles and Ring 11 approvals.
+
+**Exclude initially:** auto-continue/loop, writer gates that own execution, automatic commit/push behavior, alternate subagent ownership, TLC/process runners, and any fallback that calls an unconfined temporary worktree a sandbox. Apex’s boundary remains authoritative.
+
+**Current upstream verification:** **38/38 top-level test-plan checks passed**. This supports upstream maintenance, not Apex approval. Dependency installation also reported three moderate and one high npm audit finding; no automatic remediation was applied, and the full dependency-bearing extension remains outside the recommendation.
+
+**Decision:** high-value content source after selection and quarantine; not a full extension import.
+
+---
+
+## 8. Review wave C — DSH Superagent
+
+**Source:** [`deepseek-ai/dsh-superagent-prototype`](https://github.com/deepseek-ai/dsh-superagent-prototype) at `6337fc823ce20251c8de8085948165c81aaa701e`; MIT. The README identifies it as a research prototype, not production-ready or an official DeepSeek product.
+
+DSH is a separate DeepSeek Harness application with its own sessions, executor, SQLite schema, sources, channels, and UI. It is not a Pi extension. Wholesale integration would duplicate Apex’s authorities.
+
+### C1. Versioned work Mandates and admission policy — highest architectural value
+
+**Gap in Apex.** Ring 9 authenticates senders and Ring 11 approves individual actions, but Apex lacks a durable work-item record explaining who authorized autonomous work, whether authority was explicit or inferred, which scope/rules applied, and which policy version must be revalidated before resume.
+
+**Adapt, do not copy.**
+
+- Create an Apex-owned immutable Mandate with source, actor, originating Trigger, strength, structured scope, matched deterministic rules, policy version, and lifecycle state.
+- Join Ring 8 GitHub intake and Ring 9 messages to Ring 7 runs through `mandateId`.
+- Start inferred proactive work in `observe`; explicit operator acceptance is required before execution until stronger evidence exists.
+- Let a model assess only within deterministic permissions; it cannot create capabilities or broaden paths/branches/tools.
+- Revalidate external authority and policy before resuming. A context subscription or follow-up grants no authority by itself.
+- Enforce scope through Ring 0/2/11, not through a prompt or DSH’s free-form scope string.
+
+DSH’s `src/policy.ts` and `src/core/model.ts` are design references, not drop-in modules.
+
+### C2. Durable outbound Effects/Outbox — concrete Ring 9 gap
+
+Apex’s `OmniChannelGateway.send()` currently performs transport I/O and writes the outbound gateway record after success. DSH contributes pre-send receipts, transactional enqueue, post-commit dispatch, coalescing, per-conversation ordering, retries/backoff, and restart recovery.
+
+**Required Apex redesign.**
+
+- Persist a scrubbed outbound receipt before transport execution in Apex-owned state.
+- Use stable ids/idempotency keys and adapter-specific idempotency where supported.
+- Preserve per-conversation ordering and explicit withdrawal/drop states.
+- Add `OUTCOME_UNKNOWN`: a crash after send but before settlement must not trigger blind duplicate replay.
+- Reconcile through provider message IDs or operator resolution where the platform cannot provide idempotency.
+- Cover transaction rollback, crash before send, crash after send, retry ordering, restart, scrubbing, and retention.
+
+DSH’s queue is useful evidence but is not, by itself, an exactly-once external-delivery solution. Do not import its Store or replace Apex’s WAL.
+
+### C3. Attention-first autonomous-work states — small Ring 5 extension
+
+Apex already has a “Needs your attention” control driven by pending execution approvals. The additive idea is to project existing autonomous runs, outbound receipts, and approvals into states such as **delivery, answer, review, blocked, and failed**, alongside queued/working/idle.
+
+Extend the current Mission Control API/UI; do not import DSH’s React panel or Ticket store. This should be a derived projection with links to the owning Apex receipt/run, not another authority or lifecycle.
+
+### C4. Secondary ideas and exclusions
+
+- **Observe-only GitHub Triggers:** cursor-based polling, deduplication, and source health can later extend Ring 8. Scan/quarantine external content before model assessment and require Mandate acceptance before Ring 7 execution.
+- **Human-priority worker slot:** optional scheduling refinement only; Apex already owns process/worktree management.
+- **Idempotent input delivery/read receipts:** compare with existing WAL and PTY/session ledgers before adding anything.
+
+**Do not import:**
+
+- DSH sessions, executor, Sources, Feishu/GitHub channels, Store, UI, or tool presets.
+- OS-user shell execution or command shims represented as security controls.
+- Prompt-only auto-merge requirements; merges remain host-enforced.
+- Mutable per-request prompt versions; changes belong at `/new` or outside the pinned prefix.
+
+### C5. DSH verification
+
+At `6337fc8`:
+
+- Frozen dependency installation: **passed**.
+- Typecheck: **passed**.
+- Build: **passed**.
+- Tests: **1,196 passed, 1 failed** across 59 files.
+- The failure was a Feishu consumer health assertion: after malformed event input, health remained `ready / Listening for bot events` rather than the expected error. The focused test failed identically when rerun alone.
+- No real GitHub/Feishu accounts, workers, external messages, or Apex integration were exercised.
+
+**Recommended DSH pilot:** observe-only GitHub Trigger → deterministic admission → immutable Mandate → explicit approval → existing Ring 7 pipeline. Pursue the outbound outbox as a separate infrastructure pilot. Do not merge the DSH runtime.
+
+---
+
+## 9. Verification and evidence register
+
+| Item | Exact source | Evidence | What it does **not** establish |
+|---|---|---|---|
+| Current Apex | `89fc070f02af3a3a6e5c8a200d182f6dc58ac333` | Current-source review; CI run `41338519955` green on Ubuntu 22.04/24.04 required lanes | Full live-feature, macOS, physical power-loss, or unresolved isolation certification |
+| Earlier Apex baseline | `1ef6dd14ae259479206de7504e1669b66b97dd84` | Used for source-delta comparison | That current worktree modifications are part of `main` |
+| ThinkRail spec-graph | `9066aa9f4bb5c0dcb681235b4b936e8be73651f7` | Historical 7/7 spike report | Reproducible current-main proof; spike files are absent |
+| SoL-Pi | `219568034fa54ed121ede80961655e33dfb9d0e3` | Source/manifest/security review; canonical repo and license rechecked | Pi 1.4 compatibility, safe Action Fusion, or an ObservationPack Apex pilot |
+| LangExtract | v1.7.1 tag `a4c0aa4c1be98f441ffc7e1d0f85b1067748e1f3` | Source/architecture/license review | Live extraction quality, Python sidecar qualification, or current main-branch requalification |
+| pi-cached-compaction | `e1e20de0a7e433070414602f1105cdcac258ef4f` | Typecheck passed; 18/18 upstream tests passed | Live provider savings, summary quality on Apex, or prefix-safe Apex integration |
+| pi-ampersand | `7893ced32b2d4ee740c9a6c5634a3b99c6f5b65e` | Source/manifest review | Live-service behavior or display-only safety of the unmodified extension |
+| Pi-Remote | `7a1abf13329c36dc50f3bcf8ed2486996fbcd979` | `npm test`: 2,326 passed, 13 failed, 44 cancelled, 11 skipped | Apex control-plane compatibility, UI build, production relay security, or a green qualification suite |
+| pi-phone | `0084cb5e96b503237d77c3d8b512b747f2bc34df` | Current source, license, and provenance recheck | Android build/device behavior or complete third-party asset audit |
+| pi-pstack | `7af23c2b80a5157db82eeaca3e4976a41eb67448` | 38/38 top-level upstream test-plan checks passed | Apex skill quarantine, full dependency approval, or autonomous-execution approval |
+| DSH Superagent | `6337fc823ce20251c8de8085948165c81aaa701e` | Install/typecheck/build passed; 1,196/1,197 tests passed | External-service readiness, executor security, or Apex compatibility of the runtime |
+| October 28 sources | Links and versions in Section 6 | Source/architecture/license assessments; no current Apex pilot | Current upstream HEAD verification or integration readiness |
+
+### Consolidation notes
+
+- The Pi-Remote test environment initially attempted to fetch a locked tarball from `registry.npmmirror.com`, which is outside this environment’s permitted registry path. That launcher/network failure is not reported as a product test failure. After installing through npm’s registry, the actual `npm test` result was **2,326 passed, 13 failed, 44 cancelled, and 11 skipped**, so Pi-Remote remains unqualified.
+- pi-cached-compaction has no lockfile at the reviewed pin, so `npm ci` was inapplicable. Its tests were run after a no-lockfile install; the initial `npm ci` usage error was not counted as a test failure.
+- No external credentials, live model calls, messages, scraping, Android operations, or autonomous Apex actions were used.
+- No Apex source remediation is included in this document or authorized by it.
+
+---
+
+## 10. Final integration position
+
+Apex’s differentiator is not the number of attached agent products; it is the ability to add capabilities without weakening authority, durability, provenance, or prompt determinism. The reviews therefore converge on one rule:
+
+> **Import a narrow capability only when Apex remains the sole owner of execution, session state, external effects, and approval authority.**
+
+The next best engineering investments are **Mandates**, a **crash-safe outbound outbox**, **small quarantined policy/content ports**, a **reproduced read-only spec-graph proof**, and a **gated SoL-Pi ObservationPack compatibility proof**. Everything else remains optional, external, reference-only, or rejected until its stated gates are met.
