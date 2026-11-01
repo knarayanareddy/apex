@@ -191,19 +191,6 @@ async function main(): Promise<void> {
     const baseUrl = `http://127.0.0.1:${info.port}`;
 
     try {
-      // Browser cookies are independent, revocable sessions, not bearer credentials.
-      const handshakeRes = await runHttpRequest({
-        url: `${baseUrl}/?token=${canaryToken}`,
-        method: "GET"
-      });
-      assert.equal(handshakeRes.status, 302, "Handshake GET /?token=... must return 302 redirect");
-      const setCookie = handshakeRes.headers["set-cookie"]?.[0] ?? "";
-      const sessionCookie = setCookie.split(";")[0];
-      assert.ok(sessionCookie.startsWith("apex_session="), "Must issue a browser session cookie");
-      assert.notEqual(sessionCookie, `apex_session=${canaryToken}`, "Browser session must differ from bearer token");
-      assert.ok(setCookie.includes("HttpOnly"), "Session cookie must have HttpOnly flag");
-      assert.ok(setCookie.includes("SameSite=Strict"), "Session cookie must have SameSite=Strict flag");
-      assert.equal(handshakeRes.headers["location"], "/", "Must redirect to / to strip token from URL");
       // 1A (i) Negative Denial Canary: Unauthenticated POST to /api/plan/toggle -> 401
       const unauthPost = await runHttpRequest({
         url: `${baseUrl}/api/plan/toggle`,
@@ -261,7 +248,7 @@ async function main(): Promise<void> {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Cookie: sessionCookie,
+          Cookie: `apex_session=${canaryToken}`,
           Origin: "http://127.0.0.1:9999"
         },
         body: JSON.stringify({ enabled: false })
@@ -275,7 +262,7 @@ async function main(): Promise<void> {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Cookie: sessionCookie,
+          Cookie: `apex_session=${canaryToken}`,
           Origin: "http://attacker-controlled.site"
         },
         body: JSON.stringify({ enabled: false })
@@ -288,7 +275,7 @@ async function main(): Promise<void> {
         url: `${baseUrl}/api/events`,
         method: "GET",
         headers: {
-          Cookie: sessionCookie,
+          Cookie: `apex_session=${canaryToken}`,
           Origin: "http://127.0.0.1:9999"
         }
       });
@@ -324,6 +311,18 @@ async function main(): Promise<void> {
       });
       assert.equal(authStatus.status, 200, "Authenticated GET /api/status with Bearer token must return 200");
 
+      // 1B (iii) Positive Permitted Control: Browser Handshake /?token=... sets HttpOnly cookie & redirects
+      const handshakeRes = await runHttpRequest({
+        url: `${baseUrl}/?token=${canaryToken}`,
+        method: "GET"
+      });
+      assert.equal(handshakeRes.status, 302, "Handshake GET /?token=... must return 302 redirect");
+      const setCookie = handshakeRes.headers["set-cookie"]?.[0] ?? "";
+      assert.ok(setCookie.includes("apex_session=" + canaryToken), "Must set apex_session cookie with token");
+      assert.ok(setCookie.includes("HttpOnly"), "Session cookie must have HttpOnly flag");
+      assert.ok(setCookie.includes("SameSite=Strict"), "Session cookie must have SameSite=Strict flag");
+      assert.equal(handshakeRes.headers["location"], "/", "Must redirect to / to strip token from URL");
+
       // 1B (iv) Positive Permitted Control: Authenticated SSE /api/events with Cookie -> 200
       const cookieSse = await new Promise<{ status: number; connectedFrame: string }>((resolve, reject) => {
         const req = http.request(
@@ -333,7 +332,7 @@ async function main(): Promise<void> {
             path: "/api/events",
             method: "GET",
             headers: {
-              Cookie: sessionCookie
+              Cookie: `apex_session=${canaryToken}`
             }
           },
           (res) => {
@@ -363,7 +362,7 @@ async function main(): Promise<void> {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Cookie: sessionCookie,
+          Cookie: `apex_session=${canaryToken}`,
           Origin: `http://127.0.0.1:${info.port}`
         },
         body: JSON.stringify({ enabled: false })

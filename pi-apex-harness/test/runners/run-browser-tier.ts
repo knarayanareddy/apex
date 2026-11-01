@@ -36,7 +36,7 @@ console.log(`  Found Chromium executable at: ${executable}`);
 console.log("Running Ring 7 browser CDP tests...");
 
 try {
-  execFileSync("npm", ["run", "test:ring7"], {
+  execFileSync("node", ["--experimental-strip-types", "test/ring7/run-ring7-tests.ts"], {
     stdio: "inherit"
   });
   console.log("\n=== ALL REQUIRED BROWSER CHECKS PASSED ===\n");

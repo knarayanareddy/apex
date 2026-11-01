@@ -127,14 +127,11 @@ export function createRing6Extension(bridge: {
             if (!params.serverName || !params.toolName) {
               throw new Error("mcp_hub call_tool requires both serverName and toolName.");
             }
-            // Capture identity before awaiting MCP; a later session switch must not retarget the spill.
-            const sessionId = bridge.getHarness()?.session.sessionManager.getSessionId();
             const res = await hub.callTool({
               serverName: params.serverName,
               toolName: params.toolName,
               args: params.args,
-              toolCallId,
-              sessionId
+              toolCallId
             });
             return {
               content: res.content,

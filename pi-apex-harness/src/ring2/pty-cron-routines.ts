@@ -14,8 +14,8 @@
  *    - Cron scheduler (`create | list | pause | resume | remove | tick`), global `pause`/`resume`
  *      emergency stop, misfire catch-up on resume, and durable SQLite job/run ledger.
  * 3. Ring 0 Security Wiring (`SPEC_BIBLE.md` Invariant `I-08`):
- *    - Detached lease with best-effort descendant cleanup and explicit unverified status;
- *      sanitized subprocess environment (zero host API keys leaked).
+ *    - Process-group lease (`detached: true`, `process.kill(-pid, ...)` on lease expiry or teardown)
+ *      + sanitized subprocess environment (zero host API keys leaked).
  *    - Every unattended Cron tick runs strictly under `executionOrigin = "unattended_cron"`
  *      (`DENY_UNATTENDED` fail-closed gate).
  */
@@ -56,9 +56,7 @@ export interface PtyLeaseInfo {
   title: string;
   command: string;
   cwd: string;
-  status: "running" | "leader_exited" | "exited" | "lease_expired" | "cleanup_pending" | "cleanup_unverified";
-  /** Snapshot-based only; it does not prove that no reparented descendants exist. */
-  cleanupStatus?: "pending" | "snapshot_cleared" | "unverified";
+  status: "running" | "exited" | "lease_expired";
   pid: number;
   exitCode?: number | null;
   startedAtMs: number;
@@ -95,7 +93,6 @@ function buildSanitizedPtyEnv(): NodeJS.ProcessEnv {
 export interface PtyPollResult {
   id: string;
   status: PtyLeaseInfo["status"];
-  cleanupStatus?: PtyLeaseInfo["cleanupStatus"];
   exitCode?: number | null;
   replay: string;
   cursor: number;
@@ -224,7 +221,9 @@ export class PtyLeaseManager {
     const leaseTimer = setTimeout(() => {
       const current = this.sessions.get(id);
       if (current && current.info.status === "running") {
-        this.requestCleanup(current, "lease_expired", false);
+        current.info.status = "lease_expired";
+        this.killProcessGroup(current.proc, current.procIdentity);
+        this.recordExitOrder(id);
       }
     }, leaseMs);
     leaseTimer.unref();
@@ -281,22 +280,13 @@ export class PtyLeaseManager {
 
     proc.stdout?.on("data", onChunk);
     proc.stderr?.on("data", onChunk);
-    const markLeaderExited = (code: number | null) => {
-      if (session.info.status === "running") {
-        // A closed leader is not evidence that reparented descendants exited.
-        session.info.status = "leader_exited";
-        session.info.cleanupStatus = "unverified";
-      }
-      session.info.exitCode = code;
-    };
-    // `close` can be delayed by inherited pipes after the leader itself exits.
-    proc.on("exit", markLeaderExited);
     proc.on("close", (code) => {
       clearTimeout(session.leaseTimer);
-      markLeaderExited(code);
-      if (this.sessions.has(id) && (session.info.status === "leader_exited" || !session.info.cleanupStatus || session.info.cleanupStatus === "snapshot_cleared")) {
-        this.recordExitOrder(id);
+      if (session.info.status === "running") {
+        session.info.status = "exited";
       }
+      session.info.exitCode = code;
+      this.recordExitOrder(id);
     });
 
     this.sessions.set(id, session);
@@ -335,7 +325,6 @@ export class PtyLeaseManager {
     return {
       id: session.info.id,
       status: session.info.status,
-      cleanupStatus: session.info.cleanupStatus,
       exitCode: session.info.exitCode,
       replay,
       cursor: session.info.cursor,
@@ -360,10 +349,11 @@ export class PtyLeaseManager {
     if (!session) throw new Error(`PTY_NOT_FOUND: ${id}`);
     clearTimeout(session.leaseTimer);
     if (session.info.status === "running") {
-      this.requestCleanup(session, "exited", removeRecord);
+      this.killProcessGroup(session.proc, session.procIdentity);
+      session.info.status = "exited";
     }
     const snap = { ...session.info };
-    if (removeRecord && (session.info.status === "leader_exited" || (session.info.status === "exited" && session.info.cleanupStatus !== "unverified"))) {
+    if (removeRecord) {
       this.sessions.delete(id);
       const idx = this.exitOrder.indexOf(id);
       if (idx !== -1) this.exitOrder.splice(idx, 1);
@@ -379,31 +369,18 @@ export class PtyLeaseManager {
     for (const session of this.sessions.values()) {
       clearTimeout(session.leaseTimer);
       if (session.info.status === "running") {
-        this.requestCleanup(session, "exited", true);
+        this.killProcessGroup(session.proc, session.procIdentity);
       }
     }
+    this.sessions.clear();
+    this.exitOrder.length = 0;
   }
 
-  private requestCleanup(session: ActivePtySession, successStatus: "exited" | "lease_expired", removeRecord: boolean): void {
-    session.info.status = successStatus === "lease_expired" ? "lease_expired" : "cleanup_pending";
-    session.info.cleanupStatus = "pending";
-    const finish = (success: boolean, diagnostic: string) => {
-      session.info.cleanupStatus = success ? "snapshot_cleared" : "unverified";
-      session.info.status = success ? successStatus : "cleanup_unverified";
-      if (!success) {
-        console.warn(`[PTY_CLEANUP_UNVERIFIED] ${diagnostic}`);
-        return;
-      }
-      this.recordExitOrder(session.info.id);
-      if (removeRecord) {
-        this.sessions.delete(session.info.id);
-        const index = this.exitOrder.indexOf(session.info.id);
-        if (index !== -1) this.exitOrder.splice(index, 1);
-      }
-    };
-    void terminateProcessTree(session.proc.pid ?? -1, session.procIdentity)
-      .then((result) => finish(result.success, result.diagnostic))
-      .catch((error) => finish(false, error instanceof Error ? error.message : String(error)));
+  private killProcessGroup(proc: ChildProcess, procIdentity?: ProcessIdentity): void {
+    const pid = proc.pid;
+    if (pid && pid > 0) {
+      terminateProcessTree(pid, procIdentity);
+    }
   }
 
   private recordExitOrder(id: string): void {

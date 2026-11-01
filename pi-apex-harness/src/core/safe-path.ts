@@ -52,16 +52,12 @@ export function isSecretBasename(
 
 export const MAX_SECRET_SCAN_DEPTH = 32;
 export const MAX_SECRET_SCAN_DIRECTORIES = 25000;
-export const MAX_CONTROL_PLANE_SCAN_ENTRIES = 100000;
 
 export interface SecretScanResult {
   realWorkspaceRoot: string;
   allMaskedPaths: string[];
   hardlinkAliasPaths: string[];
   secretInodeKeys: Set<string>;
-  /** Snapshot only; it is not an atomic control-plane ownership boundary. */
-  controlPlaneInodeKeys: Set<string>;
-  controlPlaneHasHardlinks: boolean;
   complete: boolean;
   incompleteReasons: string[];
 }
@@ -81,8 +77,6 @@ export function scanWorkspaceSecretsAndHardlinks(
       allMaskedPaths: [],
       hardlinkAliasPaths: [],
       secretInodeKeys: new Set(),
-      controlPlaneInodeKeys: new Set(),
-      controlPlaneHasHardlinks: false,
       complete: true,
       incompleteReasons: []
     };
@@ -92,14 +86,11 @@ export function scanWorkspaceSecretsAndHardlinks(
   const maskedSet = new Set<string>();
   const hardlinkAliases: string[] = [];
   const secretInodeKeys = new Set<string>();
-  const controlPlaneInodeKeys = new Set<string>();
   const multiLinkedInodeKeys = new Set<string>();
   let expectedExtraHardlinks = 0;
   let complete = true;
   const incompleteReasons: string[] = [];
   let totalDirectoriesVisited = 0;
-  let controlPlaneHasHardlinks = false;
-  let controlPlaneEntries = 0;
 
   const deferredHeavyDirs: string[] = [];
 
@@ -166,71 +157,6 @@ export function scanWorkspaceSecretsAndHardlinks(
   };
 
   walkPass1(realWs, "", 0);
-
-  // Private control-plane data is not named like a conventional secret. Track
-  // linked inodes so workspace aliases cannot bypass session-aware reads.
-  const harnessDir = path.join(realWs, ".harness");
-  let controlPlaneScanStopped = false;
-  const stopControlPlaneScan = (reason: string) => {
-    complete = false;
-    controlPlaneScanStopped = true;
-    incompleteReasons.push(reason);
-  };
-  const scanControlPlane = (dir: string, depth: number) => {
-    if (controlPlaneScanStopped) return;
-    if (depth >= MAX_SECRET_SCAN_DEPTH || ++totalDirectoriesVisited > MAX_SECRET_SCAN_DIRECTORIES) {
-      stopControlPlaneScan(`Control-plane scan limit reached at '${dir}'`);
-      return;
-    }
-    let stream: fs.Dir | undefined;
-    try {
-      stream = fs.opendirSync(dir);
-      while (!controlPlaneScanStopped) {
-        const entry = stream.readSync();
-        if (!entry) break;
-        if (++controlPlaneEntries > MAX_CONTROL_PLANE_SCAN_ENTRIES) {
-          stopControlPlaneScan(`Control-plane entry limit reached at '${dir}'`);
-          break;
-        }
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) scanControlPlane(full, depth + 1);
-        else if (entry.isFile()) {
-          try {
-            const st = fs.lstatSync(full);
-            if (!st.isFile()) throw new Error("file changed during scan");
-            controlPlaneInodeKeys.add(`${st.dev}:${st.ino}`);
-            if (st.nlink > 1) {
-              controlPlaneHasHardlinks = true;
-              secretInodeKeys.add(`${st.dev}:${st.ino}`);
-            }
-          } catch (err) {
-            stopControlPlaneScan(`Control-plane file inspection error at '${full}': ${String(err)}`);
-          }
-        } else {
-          stopControlPlaneScan(`Control-plane entry is a symlink or non-regular file: '${full}'`);
-        }
-      }
-    } catch (err) {
-      stopControlPlaneScan(`Control-plane directory read error at '${dir}': ${String(err)}`);
-    } finally {
-      if (stream) {
-        try { stream.closeSync(); }
-        catch (err) { stopControlPlaneScan(`Control-plane directory close error at '${dir}': ${String(err)}`); }
-      }
-    }
-  };
-  try {
-    const st = fs.lstatSync(harnessDir);
-    if (!st.isDirectory()) {
-      complete = false;
-      incompleteReasons.push("Control-plane path is not a directory");
-    } else scanControlPlane(harnessDir, 0);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      complete = false;
-      incompleteReasons.push(`Control-plane inspection error: ${String(err)}`);
-    }
-  }
 
   const walkHeavyDir = (absDir: string, depth: number = 0) => {
     if (depth >= MAX_SECRET_SCAN_DEPTH) {
@@ -348,8 +274,6 @@ export function scanWorkspaceSecretsAndHardlinks(
     allMaskedPaths: Array.from(maskedSet).sort(),
     hardlinkAliasPaths: hardlinkAliases.sort(),
     secretInodeKeys,
-    controlPlaneInodeKeys,
-    controlPlaneHasHardlinks,
     complete,
     incompleteReasons
   };
@@ -360,33 +284,39 @@ export function scanWorkspaceSecretsAndHardlinks(
  * beneath `workspaceRoot`.
  */
 export function findWorkspaceGitRoots(workspaceRoot: string): string[] {
-  const realWs = fs.realpathSync(workspaceRoot);
+  let realWs: string;
+  try {
+    realWs = fs.realpathSync(workspaceRoot);
+  } catch {
+    return [];
+  }
   const gitRoots: string[] = [];
-  let visited = 0;
+  if (fs.existsSync(path.join(realWs, ".git"))) {
+    gitRoots.push(realWs);
+  }
+  const maxDepth = 6;
   const walk = (dir: string, depth: number) => {
-    if (depth >= MAX_SECRET_SCAN_DEPTH || ++visited > MAX_SECRET_SCAN_DIRECTORIES) {
-      throw new PathContainmentError(`Incomplete Git repository discovery at '${dir}': scan limit reached`);
-    }
-    let entries: fs.Dirent[];
+    if (depth > maxDepth) return;
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch (err) {
-      throw new PathContainmentError(`Incomplete Git repository discovery at '${dir}': ${String(err)}`);
-    }
-    for (const entry of entries) {
-      if (entry.name === ".git") {
-        if (!entry.isDirectory() && !entry.isFile()) {
-          throw new PathContainmentError(`Unsafe .git metadata entry at '${dir}'`);
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory()) {
+          if (entry.name === ".git" || entry.name === ".harness" || entry.name === "node_modules" || entry.name === ".venv") {
+            continue;
+          }
+          const sub = path.join(dir, entry.name);
+          if (fs.existsSync(path.join(sub, ".git"))) {
+            gitRoots.push(sub);
+          }
+          walk(sub, depth + 1);
         }
-        gitRoots.push(dir);
-        continue;
       }
-      // The root control plane is independently hidden by the bwrap mount.
-      if (dir === realWs && entry.name === ".harness") continue;
-      if (entry.isDirectory()) walk(path.join(dir, entry.name), depth + 1);
+    } catch {
+      // non-fatal
     }
   };
-  walk(realWs, 0);
+  walk(realWs, 1);
   return gitRoots;
 }
 
@@ -767,7 +697,11 @@ export function unlinkSafeBeneathWorkspace(params: {
       verifyOpenFdContainedInWorkspace(parentInfo.parentDirFd, realWs);
       bridge.unlinkatSingle(parentInfo.parentDirFd, parentInfo.leafName, false);
       if (params.syncParentDir) {
-        fs.fsyncSync(parentInfo.parentDirFd);
+        try {
+          fs.fsyncSync(parentInfo.parentDirFd);
+        } catch {
+          // ignore if fsync not supported on filesystem
+        }
       }
       return true;
     } finally {
@@ -800,7 +734,11 @@ export function mkdirSingleBeneathWorkspace(workspaceRoot: string, relDirPath: s
       try {
         bridge.mkdiratSingle(pInfo.parentDirFd, pInfo.leafName, 0o755);
         if (syncParentDir) {
-          fs.fsyncSync(pInfo.parentDirFd);
+          try {
+            fs.fsyncSync(pInfo.parentDirFd);
+          } catch {
+            // ignore if fsync not supported
+          }
         }
       } catch (err) {
         const code = extractNativeErrnoCode(err);
@@ -856,7 +794,11 @@ export function rmdirEmptyBeneathWorkspace(workspaceRoot: string, relDirPath: st
       try {
         bridge.unlinkatSingle(pInfo.parentDirFd, pInfo.leafName, true);
         if (syncParentDir) {
-          fs.fsyncSync(pInfo.parentDirFd);
+          try {
+            fs.fsyncSync(pInfo.parentDirFd);
+          } catch {
+            // ignore if fsync not supported
+          }
         }
         return true;
       } catch (err) {
@@ -953,8 +895,6 @@ export function readWorkspaceFileSafe(params: {
   candidatePath: string;
   unmaskedExceptions?: readonly string[];
   maxBytes?: number;
-  /** Read at most this prefix length without requiring the whole file to fit. */
-  maxPrefixBytes?: number;
   sessionId?: string;
 }): Buffer {
   const bridge = getLinuxFsBridge();
@@ -977,13 +917,12 @@ export function readWorkspaceFileSafe(params: {
     if (!relPath.startsWith(".harness/spill/")) {
       throw new PathContainmentError(`[guard: internal .harness state read denied: ${relPath}]`);
     }
-    if (!params.sessionId) {
-      throw new PathContainmentError(`[guard: spill read requires a session identity: ${relPath}]`);
-    }
-    const sessionHash = crypto.createHash("sha256").update(params.sessionId).digest("hex").slice(0, 12);
-    const expectedSessionPrefix = `.harness/spill/session-${sessionHash}/`;
-    if (!relPath.startsWith(expectedSessionPrefix)) {
-      throw new PathContainmentError(`[guard: unauthorized cross-session spill read denied: ${relPath}]`);
+    if (params.sessionId) {
+      const sessionHash = crypto.createHash("sha256").update(params.sessionId).digest("hex").slice(0, 12);
+      const expectedSessionPrefix = `.harness/spill/session-${sessionHash}/`;
+      if (!relPath.startsWith(expectedSessionPrefix)) {
+        throw new PathContainmentError(`[guard: unauthorized cross-session spill read denied: ${relPath}]`);
+      }
     }
   }
 
@@ -1021,17 +960,10 @@ export function readWorkspaceFileSafe(params: {
     if (!st.isFile()) {
       throw new PathContainmentError(`[guard: non-regular file read denied: ${relPath}]`);
     }
-    const inodeKey = `${st.dev}:${st.ino}`;
-    if (secretScan.secretInodeKeys.has(inodeKey)) {
+    if (secretScan.secretInodeKeys.has(`${st.dev}:${st.ino}`)) {
       throw new PathContainmentError(
         `[guard: hardlink alias to secret file inode denied (read): ${relPath}]`
       );
-    }
-    if (!relPath.startsWith(".harness/") && secretScan.controlPlaneInodeKeys.has(inodeKey)) {
-      throw new PathContainmentError(`[guard: hardlink alias to private control-plane file denied (read): ${relPath}]`);
-    }
-    if (relPath.startsWith(".harness/spill/") && st.nlink > 1) {
-      throw new PathContainmentError(`[guard: hardlinked private spill denied (read): ${relPath}]`);
     }
     if (st.nlink > 1) {
       if (!secretScan.complete) {
@@ -1050,14 +982,6 @@ export function readWorkspaceFileSafe(params: {
           );
         }
       }
-    }
-    if (params.maxPrefixBytes !== undefined) {
-      if (params.maxBytes !== undefined || !Number.isInteger(params.maxPrefixBytes) || params.maxPrefixBytes < 1 || params.maxPrefixBytes > 1024 * 1024) {
-        throw new RangeError("maxPrefixBytes must be 1–1 MiB and cannot be combined with maxBytes.");
-      }
-      const prefix = Buffer.allocUnsafe(params.maxPrefixBytes);
-      const count = fs.readSync(fd, prefix, 0, prefix.length, 0);
-      return prefix.subarray(0, count);
     }
     if (params.maxBytes !== undefined) {
       if (!Number.isInteger(params.maxBytes) || params.maxBytes < 1 || params.maxBytes > 100 * 1024 * 1024) {

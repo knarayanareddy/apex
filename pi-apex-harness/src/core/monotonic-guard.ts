@@ -10,7 +10,6 @@ import {
   readWorkspaceFileSafe,
   scanWorkspaceSecretsAndHardlinks
 } from "./safe-path.ts";
-import { detectSupportedImageMimeType } from "./image-mime.ts";
 import { PreDispatchAbortedError, writeFileDurable } from "./wal-recovery.ts";
 
 export class GuardDeniedError extends PreDispatchAbortedError {
@@ -166,7 +165,6 @@ export function createConfinedFileOperations(params: {
   workspaceRoot: string;
   cfg: GuardrailsConfig;
   durabilityMode: DurabilityMode;
-  sessionId?: string;
   mode?: SandboxMode;
   beforeAction?: (tool: string, summary: string) => Promise<void>;
 }): {
@@ -203,17 +201,6 @@ export function createConfinedFileOperations(params: {
   };
 
   const readOps: ReadOperations = {
-    detectImageMimeType: async (absPath) => {
-      if (isCodemodeDocLogicalResource(absPath)) return null;
-      const bytes = readWorkspaceFileSafe({
-        workspaceRoot: params.workspaceRoot,
-        candidatePath: absPath,
-        unmaskedExceptions: params.cfg.sandbox.unmasked_exceptions,
-        sessionId: params.sessionId,
-        maxPrefixBytes: 4100
-      });
-      return detectSupportedImageMimeType(bytes);
-    },
     readFile: async (absPath) => {
       if (isCodemodeDocLogicalResource(absPath)) {
         const wsDoc = path.resolve(params.workspaceRoot, "docs/codemode.md");
@@ -222,8 +209,7 @@ export function createConfinedFileOperations(params: {
             return readWorkspaceFileSafe({
               workspaceRoot: params.workspaceRoot,
               candidatePath: wsDoc,
-              unmaskedExceptions: params.cfg.sandbox.unmasked_exceptions,
-              sessionId: params.sessionId
+              unmaskedExceptions: params.cfg.sandbox.unmasked_exceptions
             });
           } catch {
             // fall through to bundled if error
@@ -231,20 +217,14 @@ export function createConfinedFileOperations(params: {
         }
         const bundled = getBundledCodemodeDocPath();
         if (bundled) {
-          const apexNote = "# Apex-specific tool-result policy\n\n" +
-            "Apex redacts tool text and applies its configured WAL output budget. " +
-            "The structured bash `output` can therefore be a bounded preview or spill notice rather than the upstream full output; " +
-            "check `truncated` and use the session-authorized read path in the notice when available. " +
-            "Older cached bash receipts may lack structured metadata; do not repeat an effect merely to recover it.\n\n";
-          return Buffer.concat([Buffer.from(apexNote, "utf8"), fs.readFileSync(bundled)]);
+          return fs.readFileSync(bundled);
         }
       }
       try {
         return readWorkspaceFileSafe({
           workspaceRoot: params.workspaceRoot,
           candidatePath: absPath,
-          unmaskedExceptions: params.cfg.sandbox.unmasked_exceptions,
-          sessionId: params.sessionId
+          unmaskedExceptions: params.cfg.sandbox.unmasked_exceptions
         });
       } catch (err) {
         if (err instanceof PathContainmentError) {

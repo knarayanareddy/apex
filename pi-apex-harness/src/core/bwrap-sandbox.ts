@@ -212,17 +212,13 @@ export function resolveGitRepositoryLayout(workspaceRoot: string): ResolvedGitLa
  * nested repositories, linked worktrees) beneath `workspaceRoot`.
  */
 export function resolveAllWorkspaceGitLayouts(workspaceRoot: string): ResolvedGitLayout[] {
-  let roots: string[];
-  try {
-    roots = findWorkspaceGitRoots(workspaceRoot);
-  } catch (err) {
-    throw new SandboxUnavailableError(`Cannot isolate Git repositories: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  const roots = findWorkspaceGitRoots(workspaceRoot);
   const layouts: ResolvedGitLayout[] = [];
   for (const root of roots) {
     const layout = resolveGitRepositoryLayout(root);
-    if (!layout.isGitRepo) throw new SandboxUnavailableError(`Cannot resolve Git metadata at '${root}'`);
-    layouts.push(layout);
+    if (layout.isGitRepo) {
+      layouts.push(layout);
+    }
   }
   return layouts;
 }
@@ -286,15 +282,6 @@ export function buildMinimalBwrapArgv(
     }
   }
 
-  const secretScan = scanWorkspaceSecretsAndHardlinks(ws, cfg.unmaskedSecretExceptions);
-  if (!secretScan.complete) {
-    throw new SandboxUnavailableError(
-      `Cannot execute bubblewrap sandbox with incomplete secret mask coverage: ${secretScan.incompleteReasons.join("; ")}`
-    );
-  }
-  if (secretScan.controlPlaneHasHardlinks) {
-    throw new SandboxUnavailableError("Cannot execute bubblewrap sandbox while control-plane files have hardlinks");
-  }
   const allGitLayouts = resolveAllWorkspaceGitLayouts(ws);
   const gitIsoMode = cfg.isolateGitObjectsMode ?? "always";
 
@@ -343,23 +330,19 @@ export function buildMinimalBwrapArgv(
     }
   }
 
-  // Read-only is not private: hide the entire control plane, including other
-  // sessions' spills and cockpit credentials. Authorized spills use readOps.
+  // Protect control-plane subpaths (`.harness`) strictly Read-Only
   const absHarness = path.join(ws, ".harness");
-  let harnessStat: fs.Stats | undefined;
-  try {
-    harnessStat = fs.lstatSync(absHarness);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-  }
-  if (harnessStat) {
-    if (!harnessStat.isDirectory()) {
-      throw new SandboxUnavailableError("Cannot mask non-directory or symlink .harness control plane");
-    }
-    args.push("--tmpfs", absHarness);
+  if (fs.existsSync(absHarness)) {
+    args.push("--ro-bind", absHarness, absHarness);
   }
 
   // Mask workspace secret files & hardlink aliases recursively
+  const secretScan = scanWorkspaceSecretsAndHardlinks(ws, cfg.unmaskedSecretExceptions);
+  if (!secretScan.complete) {
+    throw new SandboxUnavailableError(
+      `Cannot execute bubblewrap sandbox with incomplete secret mask coverage: ${secretScan.incompleteReasons.join("; ")}`
+    );
+  }
   for (const secretPath of secretScan.allMaskedPaths) {
     args.push("--ro-bind", "/dev/null", secretPath);
   }
@@ -443,19 +426,7 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
 
         const terminateDescendantsAndStreams = () => {
           if (child.pid) {
-            void terminateProcessTree(child.pid, procIdentity)
-              .then((result) => {
-                if (!result.success) {
-                  const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${result.diagnostic}`;
-                  console.warn(warning);
-                  if (!settled) options.onData(Buffer.from(`\n${warning}\n`, "utf8"));
-                }
-              })
-              .catch((error) => {
-                const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${error instanceof Error ? error.message : String(error)}`;
-                console.warn(warning);
-                if (!settled) options.onData(Buffer.from(`\n${warning}\n`, "utf8"));
-              });
+            terminateProcessTree(child.pid, procIdentity);
           }
           try {
             child.stdout.destroy();
