@@ -8,6 +8,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUT_DIR="${1:-/home/user}"
+
+for item in package.json package-lock.json tsconfig.json SPEC_BIBLE.md ARCHITECTURE.md PERSONAL_QUICKSTART.md \
+  bin/pi-apex scripts/bootstrap-host.sh scripts/install-personal.sh scripts/package-release.sh surfaces-immutable/GUARDRAILS.yaml; do
+  if [[ ! -f "${REPO_ROOT}/${item}" ]]; then
+    echo "[package-release] PACKAGE_INPUT_MISSING: ${item}" >&2
+    exit 1
+  fi
+done
+for item in bin extensions scripts src surfaces surfaces-immutable test; do
+  if [[ ! -d "${REPO_ROOT}/${item}" ]]; then
+    echo "[package-release] PACKAGE_INPUT_MISSING: ${item}" >&2
+    exit 1
+  fi
+done
+
 VERSION="$(grep -oE '"version":[[:space:]]*"[^"]+"' "${REPO_ROOT}/package.json" | head -n1 | sed -E 's/.*"([^"]+)"/\1/')"
 ARCHIVE_NAME="pi-apex-v${VERSION}-personal.tar.gz"
 ARCHIVE_PATH="${OUT_DIR}/${ARCHIVE_NAME}"
@@ -39,9 +54,7 @@ for item in \
   surfaces-immutable \
   test
 do
-  if [[ -e "${REPO_ROOT}/${item}" ]]; then
-    cp -a "${REPO_ROOT}/${item}" "${STAGE_PKG}/"
-  fi
+  cp -a "${REPO_ROOT}/${item}" "${STAGE_PKG}/"
 done
 
 # Strip compiled native .node binary from portable source archive (rebuilt cleanly by install-personal.sh / npm test)

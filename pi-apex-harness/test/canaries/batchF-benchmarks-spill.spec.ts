@@ -103,6 +103,8 @@ async function testF1BenchmarkVerificationFailure(): Promise<void> {
       { cwd: REPO_ROOT, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
     );
     assert.match(passStdout, /Pi-Apex Personal SWE Eval & Prompt-Cache Benchmark/, "Expected report heading in benchmark stdout");
+    assert.match(passStdout, /\*\*Active Tool Schema:\*\* `1053` `o200k_base` tokens/, "The live benchmark report must display the measured default schema");
+    assert.doesNotMatch(passStdout, /invariant: `1,073`/, "The benchmark must not report the obsolete schema baseline");
     console.log("  [PERMITTED CONTROL PASS] Passing benchmark task exited with code 0 and generated benchmark report.");
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });

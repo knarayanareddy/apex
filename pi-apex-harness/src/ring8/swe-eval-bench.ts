@@ -11,8 +11,8 @@
  *  - Executes real Git branch isolation (`apex/<slug>`), real `openat2` file mutations,
  *    real Codex `mergeBase...HEAD` + Cursor BugBot `REVIEW_RULES.md` diff checks, and real
  *    minimal-rootfs `bwrap` CI verification across a 3-repo SWE bugfix corpus (or custom JSON pack).
- *  - Verifies Ring 0 static-prefix invariants (`activeSchemaTokens === 1,073 o200k_base`,
- *    `prefixDriftCount === 0`) and computes exact prompt-cache hit rate (`cacheReadTokens`),
+ *  - Measures Ring 0 active schema tokens and verifies static-prefix drift, then computes
+ *    exact prompt-cache hit rate (`cacheReadTokens`),
  *    dollar cost per resolved issue, and Harness² `EXPERIENCE.md` Before vs. After A/B delta!
  */
 
@@ -29,7 +29,7 @@ import {
   type TranscriptContext
 } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { countO200kTokens } from "../core/prefix-budget.ts";
+import { countActiveToolSchemaTokens } from "../core/prefix-budget.ts";
 import { scrubSecretsInfallible } from "../core/spill-store.ts";
 import { writeFileDurable } from "../core/wal-recovery.ts";
 import type { LearnedReviewRule } from "../ring2/bugbot-ci-loop.ts";
@@ -112,6 +112,10 @@ export interface SweBenchmarkReport {
   persistedJsonPath?: string;
   persistedMarkdownPath?: string;
   markdownReport: string;
+}
+
+export function formatSchemaBudgetLine(schemaTokens: number): string {
+  return `- **Active Tool Schema:** \`${schemaTokens}\` \`o200k_base\` tokens`;
 }
 
 export const BUILTIN_SWE_BENCHMARK_CORPUS: readonly SweBenchTaskDefinition[] = [
@@ -543,14 +547,7 @@ export async function runPersonalSweBenchmarkSuite(opts: {
         modelLabel = `${modelToUse.provider}/${modelToUse.id}`;
 
         // Verify Ring 0 static schema & prefix invariants on every benchmark harness instance
-        const serializedTools = JSON.stringify(
-          h.session.agent.state.tools.map((t) => ({
-            name: t.name,
-            description: t.description,
-            parameters: t.parameters
-          }))
-        );
-        observedSchemaTokens = countO200kTokens(serializedTools);
+        observedSchemaTokens = countActiveToolSchemaTokens(h.session.agent.state.tools);
         const beforeHash = h.prefix.verifyInvariantBeforeRequest(
           h.session.systemPrompt,
           h.session.agent.state.tools
@@ -648,7 +645,7 @@ export async function runPersonalSweBenchmarkSuite(opts: {
       `# Pi-Apex Personal SWE Eval & Prompt-Cache Benchmark (\`${benchId}\`)`,
       "",
       `- **Model Evaluated:** \`${baseRes.modelLabel}\``,
-      `- **Active Tool Schema Budget:** \`${observedSchemaTokens}\` \`o200k_base\` tokens (invariant: \`1,073\`)`,
+      formatSchemaBudgetLine(observedSchemaTokens),
       `- **Live Static Prefix Drift:** \`${observedPrefixDrift}\``,
       `- **Sandboxed CI Backend:** \`${useBwrap ? "bubblewrap minimal-rootfs" : "host-dev"}\``,
       "",
