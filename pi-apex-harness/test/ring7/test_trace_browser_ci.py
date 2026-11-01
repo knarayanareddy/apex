@@ -7,6 +7,7 @@ import unittest
 import inspect
 import contextlib
 import io
+from unittest import mock
 from pathlib import Path
 
 import trace_browser_ci as trace
@@ -14,6 +15,40 @@ from trace_browser_ci import classify_fd, descendants, parse_stat, run_observed,
 
 
 class BrowserTraceTests(unittest.TestCase):
+    def test_qualification_retains_early_and_recent_success_samples(self):
+        class Child:
+            pid = 123
+            returncode = 0
+            calls = 0
+
+            def poll(self):
+                self.calls += 1
+                return None if self.calls <= 120 else 0
+
+        sequence = iter(range(120))
+        real_run = trace.run_observed
+        output = io.StringIO()
+
+        def observe(command, **kwargs):
+            return real_run(command, sampler=lambda _pid: {"available": True, "seq": next(sequence)}, **kwargs)
+
+        with mock.patch.object(trace.sys, "platform", "linux"), \
+             mock.patch.object(trace.sys, "argv", ["trace_browser_ci.py"]), \
+             mock.patch.object(trace, "run_observed", side_effect=observe) as called, \
+             mock.patch.object(trace.subprocess, "Popen", return_value=Child()) as spawned, \
+             mock.patch.object(trace.time, "sleep"), \
+             contextlib.redirect_stderr(output), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(trace.main(), 0)
+        called.assert_called_once()
+        spawned.assert_called_once_with(["npm", "run", "test:browser"])
+        self.assertIn("BROWSER_TRACE_DIAGNOSTIC ", output.getvalue())
+        report = json.loads(output.getvalue().split("BROWSER_TRACE_DIAGNOSTIC ", 1)[1])
+        samples = [sample["seq"] for sample in report["samples"]]
+        self.assertEqual(report["samples_total"], 120)
+        self.assertEqual(len(samples), report["samples_retained"])
+        self.assertEqual(samples[:50], list(range(50)))
+        self.assertEqual(samples[-50:], list(range(70, 120)))
+
     def test_stat_parser_handles_parentheses_in_process_name(self):
         fields = ["S", "10"] + ["0"] * 17 + ["12345"]
         stat = "420 (chrome (worker)) " + " ".join(fields)

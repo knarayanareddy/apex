@@ -1,7 +1,8 @@
 """Observe the owned Linux browser test tree without signaling it or logging arguments.
 
 This runs the existing browser qualification exactly once and propagates its exit status.
-Process snapshots are reported only on failure; they are not evidence of unrelated PIDs.
+Process snapshots cover early and recent samples on success or failure; they are
+not evidence of unrelated PIDs.
 """
 import collections
 import json
@@ -160,16 +161,20 @@ def sample_owned_tree(root_pid, proc=Path("/proc")):
 def run_observed(command, sampler=sample_owned_tree, report_always=False):
     child = subprocess.Popen(command)
     samples = collections.deque(maxlen=50)
+    initial = []
     total = 0
     started = time.monotonic()
     while child.poll() is None:
         snapshot = sampler(child.pid)
         snapshot["elapsed_ms"] = round((time.monotonic() - started) * 1000)
-        samples.append(snapshot)
+        if len(initial) < 50:
+            initial.append(snapshot)
+        samples.append((total, snapshot))
         total += 1
         time.sleep(0.5)
     code = child.returncode
     if code != 0 or report_always:
+        retained = initial + [snapshot for index, snapshot in samples if index >= len(initial)]
         try:
             clock_ticks = os.sysconf("SC_CLK_TCK")
         except (ValueError, OSError):
@@ -177,7 +182,7 @@ def run_observed(command, sampler=sample_owned_tree, report_always=False):
         label = "BROWSER_TRACE_FAILURE " if code != 0 else "BROWSER_TRACE_DIAGNOSTIC "
         print(label + json.dumps({
             "exit": code, "clock_ticks_per_second": clock_ticks, "samples_total": total,
-            "samples_retained": len(samples), "samples": list(samples)
+            "samples_retained": len(retained), "samples": retained
         }, separators=(",", ":")), file=sys.stderr, flush=True)
     else:
         print("BROWSER_TRACE_PASS: qualification passed; no failure snapshot", flush=True)
@@ -195,7 +200,7 @@ def main():
         print("BROWSER_TRACE_INVALID_ARGUMENTS", file=sys.stderr)
         return 1
     print("Running npm run test:browser once with read-only owned-process observation", flush=True)
-    return run_observed(["npm", "run", "test:browser"])
+    return run_observed(["npm", "run", "test:browser"], report_always=True)
 
 
 if __name__ == "__main__":
