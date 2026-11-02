@@ -44,3 +44,34 @@
 - Full qualification run `41332012983` at `4482f46` passed both Ubuntu lanes. On 24.04 the first Chromium's port file appeared by observer sample 11,618 ms after the test observer started; that timestamp is not the exact browser launch time. A passing run does not close the intermittent startup failure.
 - The SWE benchmark report formats its measured schema count without claiming the old 1,073-token invariant and uses the shared schema counter. A focused formatting test and scratch typecheck pass; the added live benchmark assertion and full canaries have not been run for this change. Other historical claims and permissive ring assertions remain open.
 - Release packaging previously succeeded with a missing `SPEC_BIBLE.md`; the failing fixture is retained under `apex-schema-check-A32PQp`. The packaging change rejects four tested missing-input cases, preserves an existing archive, and creates an archive that was independently unpacked, installed into a scratch prefix and reported version 4.1.0. The extracted schema and missing-input tests passed. This is a local macOS artifact check, not a published release or full Linux/release qualification. The extracted lockfile's `npm audit` reports two moderate findings and no high or critical findings; its JSON output is retained in the same scratch directory.
+
+## Detailed completion-roadmap index
+
+The scope, dependencies, owners, acceptance criteria and verification for each
+item are in [`plan.md`](plan.md#detailed-completion-roadmap). These unchecked
+entries are a breakdown of the existing work above, not new claims of failure or
+authorization to perform blocked or destructive actions. Conditional items need
+an explicit operator scope decision before implementation.
+
+- [ ] R00 — Stabilize the test and credential boundary.
+- [ ] R01 — Build the requirement-to-evidence matrix.
+- [ ] R02 — Make delivery status truthful.
+- [ ] R03 — Define one authoritative tool-admission contract.
+- [ ] R04 — Bound nested execution and repeated turns.
+- [ ] R05 — Enforce private-state preflight before mutation.
+- [ ] R06 — Rehearse and authorize migration.
+- [ ] R07 — Qualify process ownership on Linux.
+- [ ] R08 — Gate shell, PTY and cron before dispatch.
+- [ ] R09 — Gate MCP stdio, LSP and macOS execution.
+- [ ] R10 — Complete nested Git isolation verification.
+- [ ] R11 — Complete pairing-file race verification.
+- [ ] R12 — Resolve browser startup and macOS navigation separately.
+- [ ] R13 — Reconcile schema and prefix claims.
+- [ ] R14 — Verify context, memory and Obsidian on real paths.
+- [ ] R15 — Verify MCP, plugins and deferred tools end to end.
+- [ ] R16 — Decide ACP support and verify protocol behavior if selected.
+- [ ] R17 — Build durable outbound effects if selected for release.
+- [ ] R18 — Design and gate work mandates if selected for release.
+- [ ] R19 — Establish the CI and runtime matrix.
+- [ ] R20 — Verify the actual release artifact.
+- [ ] R21 — Final review and release decision.
