@@ -12,7 +12,11 @@ No credential is included in this report.
 | Pinned memory and conversational context | Pass | A synthetic memory-surface fact reached the model; a later turn recalled a synthetic fact from an earlier turn. |
 | Episode memory | Pass | A synthetic SQLite episode was seeded in one process, then retrieved after harness restart by a model call to `memory_recall`. |
 | Obsidian | Pass | A model call to `obsidian_vault` read a synthetic Markdown note from a dedicated test vault. |
-| MCP, ACP, plugins and remaining features | Pending | No live result is claimed here. |
+| MCP | Partial | A synthetic in-memory MCP server returned the expected marker twice; both exact-response checks failed. In the second, the model omitted the marker's prefix. External MCP transports were not tested. |
+| Plugin | Pass, limited | The model invoked the selected tool from a synthetic in-process plugin; no other tool calls were observed in those turns. Two turns completed in 60,038 ms and 2,655 ms; the reason for the first delay is unknown. |
+| RPC | Pass | The real CLI's JSON RPC mode returned state and completed a live no-tool model prompt in 4,186 ms. RPC is not ACP. |
+| ACP | Not available in the tested CLI | Its mode parser accepts `text`, `json`, or `rpc`, not `acp`; no ACP handshake was tested. |
+| Other features | Pending | No comprehensive live result is claimed. |
 
 For the read, memory and Obsidian tests, the harness was explicitly restricted
 to the named tool and its prefix was re-locked before the test. The memory and
@@ -20,6 +24,17 @@ Obsidian tools were exposed directly for this controlled test, rather than via
 their normal deferred Codemode discovery path. These results do not qualify the
 unrestricted agent, an operator's actual vault, process containment, or
 private-state isolation.
+
+An additional deferred-Codemode probe retrieved the synthetic memory marker,
+but its test-only allowlist did not prevent further tool calls: events recorded
+`trust_artifact`, `browser_control`, `repo_map`, and `subagent_dispatch` before
+the turn ended. The probe's generated `success: true` is invalid because it did
+not reject these unexpected calls. It ran in the scratch workspace with a
+synthetic home; the exact effects and process containment are not verified.
+Do not treat this probe as a passing safety or full-agent test. No further
+model-driven tool tests were run after this observation. Because that guard
+failed, the earlier connector guards are not themselves proven effective; the
+connector results are limited to the tool calls actually observed.
 
 The three context turns took 1,033 ms, 943 ms and 827 ms end-to-end; their first
 text arrived at 1,006 ms, 885 ms and 765 ms. Memory recall took 3,101 ms and the
