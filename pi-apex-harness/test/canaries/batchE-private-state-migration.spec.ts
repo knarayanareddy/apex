@@ -142,6 +142,8 @@ console.log("--- E4 & E5: Offline non-destructive migration rehearsal ---");
 const srcHarness = path.join(realWs, "src-harness");
 const dstHarness = path.join(realWs, "dst-harness");
 fs.mkdirSync(srcHarness, { recursive: true });
+const sourceLock = path.join(srcHarness, "workspace.lock");
+fs.writeFileSync(sourceLock, "");
 
 // 1. Create realistic source state: SQLite WAL DB
 const stateDb = new StateDb(path.join(srcHarness, "state.db"), "crash-safe");
@@ -217,6 +219,24 @@ assert.equal(
   "IMPORTANT_PREEXISTING_USER_DATA\n",
   "Pre-existing destination content must be preserved intact"
 );
+
+// An actual held kernel lock must block both rehearsal and migration without creating a destination.
+{
+  const { getLinuxFsBridge } = await import("../../src/core/linux-fs-bridge.ts");
+  const bridge = getLinuxFsBridge();
+  const fd = fs.openSync(sourceLock, "r+");
+  bridge.flockExNb(fd);
+  try {
+    for (const dryRun of [true, false]) {
+      const target = path.join(realWs, `active-lock-${dryRun}`);
+      await assert.rejects(migratePrivateStateOffline({ sourceDir: srcHarness, destinationDir: target, dryRun, allowSameDeviceDev: true }), /MIGRATION_SOURCE_ACTIVE/);
+      assert.equal(fs.existsSync(target), false);
+    }
+  } finally {
+    bridge.flockUn(fd);
+    fs.closeSync(fd);
+  }
+}
 
 // 3d. Dry-run must report summary and verify without creating files in an uncreated destination
 const dryRunDst = path.join(realWs, "dry-run-dst");

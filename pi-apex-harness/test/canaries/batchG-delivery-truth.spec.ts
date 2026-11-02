@@ -383,9 +383,28 @@ try {
   assert.equal(thrownReceipt.deliveryStatus, "failed");
   assert.ok(thrownReceipt.transportDetail.includes("custom-adapter-failed: Simulated connection reset by peer"));
 
+  // Explicit non-confirmed outcomes must never be overridden by the legacy boolean.
+  for (const outcome of ["failed", "unknown", "unavailable", "queued"] as const) {
+    const platform = `plugin:conflicting:${outcome}` as const;
+    unconfiguredGw.registerAdapter({
+      platform,
+      send: async () => ({ externalMessageId: "synthetic", transportDetail: "synthetic", outcome, delivered: true })
+    });
+    const receipt = await unconfiguredGw.send({ platform, channelId: "fixture", text: "synthetic" });
+    assert.equal(receipt.delivered, false, `Conflicting ${outcome} must not confirm delivery`);
+    assert.equal(receipt.deliveryStatus, "unknown", `Conflicting ${outcome} must be treated as unknown`);
+  }
+  unconfiguredGw.registerAdapter({
+    platform: "plugin:conflicting:confirmed",
+    send: async () => ({ externalMessageId: "synthetic", transportDetail: "synthetic", outcome: "confirmed", delivered: false })
+  });
+  const contradiction = await unconfiguredGw.send({ platform: "plugin:conflicting:confirmed", channelId: "fixture", text: "synthetic" });
+  assert.equal(contradiction.delivered, false);
+  assert.equal(contradiction.deliveryStatus, "unknown");
+
   db.close();
   passed = true;
-  console.log("R02 Truthful messaging delivery status (all 17 controls): PASS");
+  console.log("R02 Truthful messaging delivery status (including conflicting adapter results): PASS");
 } finally {
   mockServer.close();
   if (passed) {

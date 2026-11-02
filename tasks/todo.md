@@ -65,6 +65,8 @@
 
 ## Detailed completion-roadmap index
 
+**Follow-up qualification correction:** Run `41497118583` failed browser endpoint discovery on both Ubuntu lanes at the unchanged 12-second deadline. Its earlier Linux security steps passed, but the full workflow did not. The subsequent fixes in the working tree have not been qualified on Linux or committed. The prior "closed" and macOS proxy-causality claims above are historical and do not establish completion. Migration requires an operator-approved separate filesystem and cutover; an advisory source lock protects only cooperating processes. No physical power-loss or live-provider qualification is implied.
+
 The scope, dependencies, owners, acceptance criteria and verification for each
 item are in [`plan.md`](plan.md#detailed-completion-roadmap). These unchecked
 entries are a breakdown of the existing work above, not new claims of failure or
@@ -73,17 +75,17 @@ an explicit operator scope decision before implementation.
 
 - [ ] R00 — Stabilize the test and credential boundary.
 - [x] R01 — Build the requirement-to-evidence matrix.
-- [x] R02 — Make delivery status truthful.
+- [ ] R02 — Make delivery status truthful (follow-up tests pending full qualification).
 - [x] R03 — Define one authoritative tool-admission contract.
 - [x] R04 — Bound nested execution and repeated turns.
 - [x] R05 — Enforce private-state preflight before mutation.
-- [x] R06 — Rehearse and authorize migration.
-- [x] R07 — Qualify process ownership on Linux.
-- [x] R08 — Gate shell, PTY and cron before dispatch.
-- [x] R09 — Gate MCP stdio, LSP and macOS execution.
+- [ ] R06 — Rehearse and authorize migration.
+- [ ] R07 — Qualify process ownership on Linux.
+- [ ] R08 — Gate shell, PTY and cron before dispatch.
+- [ ] R09 — Gate MCP stdio, LSP and macOS execution.
 - [x] R10 — Complete nested Git isolation verification.
 - [x] R11 — Complete pairing-file race verification.
-- [x] R12 — Resolve browser startup and macOS navigation separately.
+- [ ] R12 — Resolve browser startup and macOS navigation separately.
 - [x] R13 — Reconcile schema and prefix claims.
 - [x] R14 — Verify context, memory and Obsidian on real paths.
 - [x] R15 — Verify MCP, plugins and deferred tools end to end.

@@ -467,15 +467,15 @@ async function testD5ProcessOwnershipAndRecycling(): Promise<void> {
 
   const chunks: string[] = [];
   const start = Date.now();
-  const res = await bashOps.exec("sleep 100", ws, {
+  await assert.rejects(bashOps.exec("sleep 100", ws, {
     timeout: 1, // 1 second timeout
     onData: (buf) => chunks.push(buf.toString("utf8"))
-  });
+  }), /SANDBOX_CLEANUP_UNVERIFIED/);
   const elapsed = Date.now() - start;
 
-  assert.equal(res.exitCode, 124, "Timeout must return exitCode 124");
   assert.ok(elapsed < 2500, `Timeout must resolve promptly without hanging (elapsed: ${elapsed}ms)`);
   assert.ok(chunks.some((c) => c.includes("command timed out")), "Must output timeout notice");
+  assert.ok(chunks.some((c) => c.includes("SANDBOX_CLEANUP_UNVERIFIED")), "Unverified ownership must be reported to the caller");
 
   console.log("  [PASS] D5 verified: Observed processes terminated, ownership remains unverified, bounded shutdown, recycled PIDs protected.");
 }

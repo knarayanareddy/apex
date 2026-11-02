@@ -458,6 +458,7 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
         let timer: NodeJS.Timeout | undefined;
         let settleTimeout: NodeJS.Timeout | undefined;
         let settled = false;
+        let cleanupStarted = false;
 
         const performCleanup = async (
           reason: "timeout" | "abort" | "kill_ceiling"
@@ -475,7 +476,7 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
           } catch (err) {
             const code = (err as NodeJS.ErrnoException).code;
             if (code === "ESRCH") {
-              return { success: true, diagnostic: "Process already exited" };
+              return { success: bin === "bwrap" && process.platform === "linux", diagnostic: "Process already exited; unconfined descendants remain unverified" };
             }
             return { success: false, diagnostic: `REFUSING_SIGNAL: Signal probe failed with code ${code ?? String(err)}` };
           }
@@ -502,8 +503,9 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
               try {
                 process.kill(pid, 0);
                 await new Promise((r) => setTimeout(r, 25));
-              } catch {
-                return { success: true, diagnostic: "Linux PID namespace reclaimed by kernel after SIGTERM" };
+              } catch (err) {
+                if ((err as NodeJS.ErrnoException).code === "ESRCH") return { success: true, diagnostic: "Linux PID namespace reclaimed by kernel after SIGTERM" };
+                return { success: false, diagnostic: `Exit verification failed: ${String(err)}` };
               }
             }
 
@@ -528,8 +530,9 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
               try {
                 process.kill(pid, 0);
                 await new Promise((r) => setTimeout(r, 25));
-              } catch {
-                return { success: true, diagnostic: "Linux PID namespace reclaimed by kernel after SIGKILL" };
+              } catch (err) {
+                if ((err as NodeJS.ErrnoException).code === "ESRCH") return { success: true, diagnostic: "Linux PID namespace reclaimed by kernel after SIGKILL" };
+                return { success: false, diagnostic: `Exit verification failed: ${String(err)}` };
               }
             }
 
@@ -573,6 +576,8 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
 
         if (options.timeout && options.timeout > 0) {
           timer = setTimeout(() => {
+            if (settled || cleanupStarted) return;
+            cleanupStarted = true;
             timedOut = true;
             void performCleanup("timeout")
               .then((cleanupResult) => {
@@ -584,11 +589,7 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
                   const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${cleanupResult.diagnostic}`;
                   console.warn(warning);
                   options.onData(Buffer.from(`\n${warning}\n\n[sandbox: command timed out]\n`, "utf8"));
-                  if (bin !== "bwrap" || process.platform !== "linux") {
-                    settleOnce({ exitCode: 124 });
-                  } else {
-                    settleFail(new SandboxUnavailableError(warning));
-                  }
+                  settleFail(new SandboxUnavailableError(warning));
                 }
               })
               .catch((err) => {
@@ -599,6 +600,8 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
         }
 
         const onAbort = () => {
+          if (settled || cleanupStarted) return;
+          cleanupStarted = true;
           void performCleanup("abort")
             .then((cleanupResult) => {
               closeStreams();
@@ -608,11 +611,7 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
                 const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${cleanupResult.diagnostic}`;
                 console.warn(warning);
                 options.onData(Buffer.from(`\n${warning}\n`, "utf8"));
-                if (bin !== "bwrap" || process.platform !== "linux") {
-                  settleOnce({ exitCode: 137 });
-                } else {
-                  settleFail(new SandboxUnavailableError(warning));
-                }
+                settleFail(new SandboxUnavailableError(warning));
               }
             })
             .catch((err) => {
@@ -644,6 +643,8 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
 
           // Hard kill ceiling: if runaway command exceeds 128MB, kill process immediately
           if (totalBytesSeen > MAX_KILL_BYTES) {
+            if (cleanupStarted || settled) return;
+            cleanupStarted = true;
             killTriggered = true;
             options.onData(
               Buffer.from(
@@ -660,11 +661,7 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
                   const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${cleanupResult.diagnostic}`;
                   console.warn(warning);
                   options.onData(Buffer.from(`\n${warning}\n`, "utf8"));
-                  if (bin !== "bwrap" || process.platform !== "linux") {
-                    settleOnce({ exitCode: 137 });
-                  } else {
-                    settleFail(new SandboxUnavailableError(warning));
-                  }
+                  settleFail(new SandboxUnavailableError(warning));
                 }
               })
               .catch((err) => {
@@ -710,6 +707,8 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
         });
         child.on("close", (code, signal) => {
           if (settled) return;
+          // Cancellation owns settlement until its cleanup has been verified.
+          if (cleanupStarted) return;
           if (inlineCutoffReached && tailRing.length > 0) {
             const combinedTail = Buffer.concat(tailRing);
             const tailSlice = combinedTail.subarray(Math.max(0, combinedTail.length - MAX_TAIL_PREVIEW_BYTES));

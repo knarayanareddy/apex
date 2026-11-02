@@ -249,7 +249,8 @@ try {
     };
 
     try {
-      requestCleanupFn(aliveSession, "exited", false);
+      requestCleanupFn(aliveSession, "lease_expired", false);
+      assert.equal(aliveSession.info.status, "cleanup_pending", "Lease expiry is not verified until cleanup finishes");
       // Wait for 2x 1000ms deadlines in checkReap
       const deadline = Date.now() + 2500;
       while (Date.now() < deadline && aliveSession.info.cleanupStatus === "pending") {
@@ -268,6 +269,39 @@ try {
   }
 
   // -------------------------------------------------------------------------
+  // A permission error during the post-signal probe is not evidence of exit.
+  {
+    const identity = recordProcessIdentity(process.pid);
+    assert.ok(identity.startTime);
+    const session = {
+      info: { id: "pty_probe_eperm", status: "running" },
+      proc: { pid: process.pid }, procIdentity: identity, isConfined: true
+    } as unknown as ActivePtySession;
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const originalKill = process.kill;
+    let signalled = false;
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+      assert.equal(pid, process.pid);
+      if (signal === "SIGTERM") { signalled = true; return true; }
+      if (signal === 0 && signalled) {
+        const error = new Error("synthetic EPERM") as NodeJS.ErrnoException;
+        error.code = "EPERM";
+        throw error;
+      }
+      assert.equal(signal, 0, "No real signal may be sent to the test process");
+      return originalKill.call(process, pid, 0);
+    }) as typeof process.kill;
+    try {
+      requestCleanupFn(session, "exited", false);
+      assert.equal(session.info.status, "cleanup_unverified");
+      assert.equal(session.info.cleanupStatus, "unverified");
+    } finally {
+      process.kill = originalKill;
+      Object.defineProperty(process, "platform", platformDescriptor);
+    }
+  }
+
   // K5: Real process lifecycle and termination
   // -------------------------------------------------------------------------
   console.log("--- K5: Real spawned PTY process termination ---");
@@ -346,5 +380,6 @@ try {
   passed = true;
   console.log("=== ALL BATCH K TESTS PASSED CLEANLY ===");
 } finally {
-  fs.rmSync(ws, { recursive: true, force: true });
+  if (passed) fs.rmSync(ws, { recursive: true, force: true });
+  else console.error(`Batch K failure evidence retained at: ${ws}`);
 }

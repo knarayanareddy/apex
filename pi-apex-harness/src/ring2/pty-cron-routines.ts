@@ -392,7 +392,7 @@ export class PtyLeaseManager {
   }
 
   private requestCleanup(session: ActivePtySession, successStatus: "exited" | "lease_expired", removeRecord: boolean): void {
-    session.info.status = successStatus === "lease_expired" ? "lease_expired" : "cleanup_pending";
+    session.info.status = "cleanup_pending";
     session.info.cleanupStatus = "pending";
     const finish = (success: boolean, diagnostic: string) => {
       session.info.cleanupStatus = success ? "snapshot_cleared" : "unverified";
@@ -456,9 +456,9 @@ export class PtyLeaseManager {
           try {
             process.kill(pid, 0);
             await new Promise((r) => setTimeout(r, 25));
-          } catch {
-            // bwrap process has exited -> kernel PID namespace reclaimed!
-            finish(true, "Linux PID namespace reclaimed by kernel after SIGTERM");
+          } catch (err) {
+            const exited = (err as NodeJS.ErrnoException).code === "ESRCH";
+            finish(exited, exited ? "Linux PID namespace reclaimed by kernel after SIGTERM" : `Exit verification failed: ${String(err)}`);
             return;
           }
         }
@@ -487,8 +487,9 @@ export class PtyLeaseManager {
           try {
             process.kill(pid, 0);
             await new Promise((r) => setTimeout(r, 25));
-          } catch {
-            finish(true, "Linux PID namespace reclaimed by kernel after SIGKILL");
+          } catch (err) {
+            const exited = (err as NodeJS.ErrnoException).code === "ESRCH";
+            finish(exited, exited ? "Linux PID namespace reclaimed by kernel after SIGKILL" : `Exit verification failed: ${String(err)}`);
             return;
           }
         }

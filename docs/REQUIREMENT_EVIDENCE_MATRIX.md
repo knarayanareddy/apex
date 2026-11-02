@@ -4,6 +4,8 @@
 **Baseline Git Commit:** `441818b` (with complete Linux kernel ownership qualification, R02 delivery truth, R03/R04 tool admission, and R13 schema reconciliation)  
 **Tracked Against:** `tasks/plan.md` §1–§5, `tasks/todo.md`, `pi-apex-harness/package.json`, and `pi-apex-harness/research/2026-11-01-live-feature-verification.md`.
 
+**Qualification correction:** The rows below are historical, not qualification of the current working tree. Run `41497118583` failed browser qualification in both Ubuntu lanes at the unchanged 12-second endpoint deadline. Follow-up shell, PTY, migration and delivery changes require Linux qualification and independent review; macOS confinement, live providers, production migration and physical power loss remain unqualified. Do not interpret historical "Verified" labels below as release approval.
+
 ---
 
 ## 1. Matrix Overview & Status Taxonomy

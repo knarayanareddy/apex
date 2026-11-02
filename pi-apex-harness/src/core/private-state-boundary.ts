@@ -11,7 +11,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
-import { readProcStartTimeTicks } from "./workspace-lock.ts";
+import { getLinuxFsBridge } from "./linux-fs-bridge.ts";
 
 export class PrivateStateBoundaryError extends Error {
   constructor(message: string) {
@@ -310,32 +310,23 @@ export async function migratePrivateStateOffline(params: MigratePrivateStateOpti
     }
   }
 
-  // 6. Explicitly offline source verification (ensure no active processes hold workspace.lock)
+  // Hold the same cooperative kernel lock as the live workspace for the whole copy.
+  // A PID stored in the lock file is not proof that the lock is free.
   const lockPath = path.join(srcDir, "workspace.lock");
-  if (fs.existsSync(lockPath)) {
-    try {
-      const raw = fs.readFileSync(lockPath, "utf8").trim();
-      if (raw) {
-        const payload = JSON.parse(raw);
-        if (typeof payload.pid === "number" && payload.pid > 0) {
-          let isAlive = false;
-          try {
-            process.kill(payload.pid, 0);
-            isAlive = true;
-          } catch {}
-          if (isAlive) {
-            const startTicks = readProcStartTimeTicks(payload.pid);
-            if (startTicks && startTicks === payload.procStartTimeTicks) {
-              throw new PrivateStateBoundaryError(
-                `MIGRATION_SOURCE_ACTIVE: Source control-plane at '${srcDir}' is currently locked by active process PID ${payload.pid}. Migration requires an explicitly offline source.`
-              );
-            }
-          }
-        }
-      }
-    } catch (err) {
-      if (err instanceof PrivateStateBoundaryError) throw err;
-    }
+  let lockFd: number;
+  try {
+    lockFd = fs.openSync(lockPath, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW);
+  } catch (err) {
+    throw new PrivateStateBoundaryError(`MIGRATION_SOURCE_LOCK_UNAVAILABLE: Cannot open existing source lock: ${String(err)}`);
+  }
+  let bridge: ReturnType<typeof getLinuxFsBridge>;
+  try {
+    bridge = getLinuxFsBridge();
+    if (!fs.fstatSync(lockFd).isFile()) throw new Error("source lock is not a regular file");
+    bridge.flockExNb(lockFd);
+  } catch (err) {
+    fs.closeSync(lockFd);
+    throw new PrivateStateBoundaryError(`MIGRATION_SOURCE_ACTIVE: Cannot acquire exclusive source lock: ${String(err)}`);
   }
 
   const createdDirs: string[] = [];
@@ -464,5 +455,7 @@ export async function migratePrivateStateOffline(params: MigratePrivateStateOpti
       }
     }
     throw error;
+  } finally {
+    try { bridge.flockUn(lockFd); } finally { fs.closeSync(lockFd); }
   }
 }

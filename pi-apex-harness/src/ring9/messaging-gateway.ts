@@ -587,7 +587,10 @@ export class OmniChannelGateway {
         externalMessageId = res.externalMessageId;
         transportDetail = res.transportDetail;
 
-        if (res.outcome === "confirmed" || (res.delivered === true && res.outcome !== "queued")) {
+        if (res.outcome && res.delivered !== undefined && res.delivered !== (res.outcome === "confirmed")) {
+          delivered = false;
+          deliveryStatus = "unknown";
+        } else if (res.outcome === "confirmed" || (!res.outcome && res.delivered === true)) {
           delivered = true;
           deliveryStatus = "confirmed";
         } else if (res.outcome === "queued" || (!res.outcome && transportDetail.includes("queued"))) {
