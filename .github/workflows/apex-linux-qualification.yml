@@ -68,6 +68,8 @@ jobs:
           test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined)" = "$unconfined_before"
       - name: Compare inherited pipes under actual bubblewrap
         run: node --experimental-strip-types test/diagnostics/pty-retained-pipes.ts
+      - name: Compare bubblewrap monitor exit and sandbox-lifetime EOF
+        run: node --experimental-strip-types test/diagnostics/bwrap-sync-fd-probe.ts
       - name: Reproduce security canary sequence - diagnostic only
         run: npm run test:canaries
       - name: Stress Batch K only - not release qualification
