@@ -66,6 +66,8 @@ jobs:
           sudo grep -F 'apex-ci-bwrap' /sys/kernel/security/apparmor/profiles
           test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "$userns_before"
           test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined)" = "$unconfined_before"
+      - name: Compare inherited pipes under actual bubblewrap
+        run: node --experimental-strip-types test/diagnostics/pty-retained-pipes.ts
       - name: Reproduce security canary sequence - diagnostic only
         run: npm run test:canaries
       - name: Stress Batch K only - not release qualification

@@ -380,6 +380,15 @@ try {
   }
 
   ptyManager.dispose();
+  const currentHandles = (process as typeof process & { _getActiveHandles(): unknown[] })._getActiveHandles();
+  console.log("BATCH_K_PTY_SNAPSHOT", JSON.stringify(observedPtySessions.map((session) => ({
+    id: session.info.id, status: session.info.status, pid: session.proc.pid,
+    exitCode: session.proc.exitCode, signalCode: session.proc.signalCode,
+    streams: ["stdin", "stdout", "stderr"].map((name) => {
+      const stream = (session.proc as any)[name];
+      return { name, fd: stream?._handle?.fd, active: currentHandles.includes(stream), destroyed: stream?.destroyed };
+    })
+  }))));
   passed = true;
   console.log("=== ALL BATCH K TESTS PASSED CLEANLY ===");
 } finally {
