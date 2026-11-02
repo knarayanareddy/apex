@@ -383,3 +383,21 @@ try {
   if (passed) fs.rmSync(ws, { recursive: true, force: true });
   else console.error(`Batch K failure evidence retained at: ${ws}`);
 }
+
+// A passing assertion set is not a passing suite if owned handles keep Node alive.
+// This watchdog is unreferenced: it only runs if another resource prevents exit.
+const exitWatchdog = setTimeout(() => {
+  const node = process as typeof process & {
+    _getActiveHandles(): Array<{ constructor: { name: string }; pid?: number; destroyed?: boolean; readable?: boolean; writable?: boolean }>;
+  };
+  const handles = node._getActiveHandles().map((handle) => ({
+    type: handle.constructor.name,
+    pid: handle.pid,
+    destroyed: handle.destroyed,
+    readable: handle.readable,
+    writable: handle.writable
+  }));
+  console.error("BATCH_K_EXIT_TIMEOUT", JSON.stringify({ resources: process.getActiveResourcesInfo(), handles }));
+  throw new Error("BATCH_K_EXIT_TIMEOUT: test assertions finished but the process did not exit");
+}, 15_000);
+exitWatchdog.unref();
