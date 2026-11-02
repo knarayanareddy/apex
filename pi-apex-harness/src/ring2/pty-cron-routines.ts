@@ -424,7 +424,7 @@ export class PtyLeaseManager {
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ESRCH") {
-        finish(true, "Process already exited");
+        finish(session.isConfined && process.platform === "linux", session.isConfined && process.platform === "linux" ? "Process already exited in confined namespace" : "Process already exited; unconfined descendants unverified");
         return;
       }
       finish(false, `REFUSING_SIGNAL: Signal probe failed with code ${code ?? String(err)}`);

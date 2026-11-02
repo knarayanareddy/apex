@@ -2,11 +2,15 @@
  * Batch K Canary Suite: PTY Process Ownership & Verified Cleanup Boundary (Programme E3 / R07).
  *
  * Verifies:
- *  K1: Successful termination verifies that the process is actually reaped before reporting success.
- *  K2: Refusal to signal when ownership cannot be established (unknown/null identity).
- *  K3: Refusal to signal when PID recycling is detected (start time / bootId mismatch).
- *  K4: Unverified cleanup when process remains alive after deadline (never reports success).
- *  K5: Unverified cleanup when signaling fails.
+ *  K1: Refusal to signal when ownership cannot be established (unknown identity).
+ *  K2: Refusal to signal when PID recycling is detected.
+ *  K3: Signal error handling (e.g. EPERM / failed signaling marks cleanup_unverified).
+ *  K4: Process that remains alive after SIGKILL deadline (timeout marks cleanup_unverified).
+ *  K5: Successful termination of real active process:
+ *      - On Linux (confined with bwrap): process reaped, exits with snapshot_cleared.
+ *      - On macOS Darwin (unconfined): reports cleanup_unverified.
+ *  K6: Natural leader exit:
+ *      - When command finishes naturally, reports leader_exited and cleanupStatus: unverified.
  */
 
 import assert from "node:assert/strict";
@@ -15,7 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { loadVerifiedGuardrails } from "../../src/core/guardrail-pin.ts";
 import { PtyLeaseManager, type ActivePtySession } from "../../src/ring2/pty-cron-routines.ts";
-import { type ProcessIdentity } from "../../src/core/process-tree.ts";
+import { recordProcessIdentity, type ProcessIdentity } from "../../src/core/process-tree.ts";
 
 console.log("=== Running Batch K: PTY Ownership & Verified Cleanup Tests ===");
 
@@ -70,7 +74,7 @@ try {
     clearTimeout(mockSession.leaseTimer);
     sessionsMap.set(mockSession.info.id, mockSession);
 
-    requestCleanupFn(mockSession, "lease_expired", false);
+    requestCleanupFn(mockSession, "exited", false);
     assert.equal(
       mockSession.info.status,
       "cleanup_unverified",
@@ -85,7 +89,6 @@ try {
   // -------------------------------------------------------------------------
   console.log("--- K2: Recycled PID detection and signal refusal ---");
   {
-    // Use the current node process PID (which is guaranteed alive), but supply a mismatched start time
     const currentPid = process.pid;
     const recycledIdentity: ProcessIdentity = {
       pid: currentPid,
@@ -121,7 +124,7 @@ try {
     clearTimeout(recycledSession.leaseTimer);
     sessionsMap.set(recycledSession.info.id, recycledSession);
 
-    requestCleanupFn(recycledSession, "lease_expired", false);
+    requestCleanupFn(recycledSession, "exited", false);
     assert.equal(
       recycledSession.info.status,
       "cleanup_unverified",
@@ -132,12 +135,78 @@ try {
   }
 
   // -------------------------------------------------------------------------
-  // K3: Process that remains alive after deadline reports unverified
+  // K3: Failed signaling error handling
   // -------------------------------------------------------------------------
-  console.log("--- K3: Process remaining alive reports unverified ---");
+  console.log("--- K3: Failed signaling error handling ---");
   {
-    // Simulate confined Linux bwrap session where process.kill fails to reap process
-    const currentPid = process.pid; // node process won't exit on kill(pid, 0)
+    const currentPid = process.pid;
+    const validIdentity = recordProcessIdentity(currentPid);
+
+    const signalFailSession: ActivePtySession = {
+      info: {
+        id: "pty_test_signal_fail",
+        title: "Signal Fail",
+        command: "sleep 1",
+        cwd: ws,
+        status: "running",
+        pid: currentPid,
+        startedAtMs: Date.now(),
+        leaseExpiresAtMs: Date.now() + 1000,
+        cursor: 0,
+        bufferCursor: 0,
+        watchDisabled: false,
+        watchHitsDelivered: 0
+      },
+      proc: { pid: currentPid } as any,
+      procIdentity: validIdentity,
+      isConfined: true, // test confined Linux path checkReap
+      buffer: "",
+      leaseTimer: setTimeout(() => {}, 10_000),
+      watchPatterns: [],
+      lastWatchDeliveryMs: 0,
+      watchStrikes: 0,
+      watchMatchesLog: []
+    };
+    clearTimeout(signalFailSession.leaseTimer);
+    sessionsMap.set(signalFailSession.info.id, signalFailSession);
+
+    const origKill = process.kill;
+    (process as any).kill = (pid: number, signal?: string | number) => {
+      if (pid === currentPid && (signal === "SIGTERM" || signal === "SIGKILL")) {
+        const err = new Error("EPERM: operation not permitted") as NodeJS.ErrnoException;
+        err.code = "EPERM";
+        throw err;
+      }
+      return origKill.call(process, pid, signal as any);
+    };
+
+    try {
+      requestCleanupFn(signalFailSession, "exited", false);
+      // Wait for async cleanup to settle
+      const deadline = Date.now() + 2500;
+      while (Date.now() < deadline && signalFailSession.info.cleanupStatus === "pending") {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(
+        signalFailSession.info.status,
+        "cleanup_unverified",
+        "Failed signal must result in cleanup_unverified"
+      );
+      assert.equal(signalFailSession.info.cleanupStatus, "unverified");
+      console.log("  [PASS] K3: Signal failure handled cleanly as cleanup_unverified.");
+    } finally {
+      process.kill = origKill;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // K4: Process that remains alive after SIGKILL deadline (timeout)
+  // -------------------------------------------------------------------------
+  console.log("--- K4: Process remaining alive reports unverified ---");
+  {
+    const currentPid = process.pid;
+    const validIdentity = recordProcessIdentity(currentPid);
+
     const aliveSession: ActivePtySession = {
       info: {
         id: "pty_test_stuck",
@@ -154,12 +223,8 @@ try {
         watchHitsDelivered: 0
       },
       proc: { pid: currentPid } as any,
-      procIdentity: {
-        pid: currentPid,
-        startTime: null, // Unknown ownership prevents real signals to node process!
-        bootId: ""
-      },
-      isConfined: true,
+      procIdentity: validIdentity,
+      isConfined: true, // triggers checkReap loop
       buffer: "",
       leaseTimer: setTimeout(() => {}, 10_000),
       watchPatterns: [],
@@ -170,37 +235,111 @@ try {
     clearTimeout(aliveSession.leaseTimer);
     sessionsMap.set(aliveSession.info.id, aliveSession);
 
-    requestCleanupFn(aliveSession, "lease_expired", false);
-    assert.equal(aliveSession.info.status, "cleanup_unverified");
-    assert.equal(aliveSession.info.cleanupStatus, "unverified");
-    console.log("  [PASS] K3: Stuck/unverified process reported as cleanup_unverified.");
+    const origKill = process.kill;
+    (process as any).kill = (pid: number, signal?: string | number) => {
+      if (pid === currentPid) {
+        if (signal === "SIGTERM" || signal === "SIGKILL") {
+          return true; // pretend signal delivered
+        }
+        if (signal === 0) {
+          return true; // process stubbornly remains alive
+        }
+      }
+      return origKill.call(process, pid, signal as any);
+    };
+
+    try {
+      requestCleanupFn(aliveSession, "exited", false);
+      // Wait for 2x 1000ms deadlines in checkReap
+      const deadline = Date.now() + 2500;
+      while (Date.now() < deadline && aliveSession.info.cleanupStatus === "pending") {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(
+        aliveSession.info.status,
+        "cleanup_unverified",
+        "Process remaining alive past SIGKILL deadline must report cleanup_unverified"
+      );
+      assert.equal(aliveSession.info.cleanupStatus, "unverified");
+      console.log("  [PASS] K4: Stuck/unverified process reported as cleanup_unverified.");
+    } finally {
+      process.kill = origKill;
+    }
   }
 
   // -------------------------------------------------------------------------
-  // K4: Real process lifecycle and verified cleanup
+  // K5: Real process lifecycle and termination
   // -------------------------------------------------------------------------
-  console.log("--- K4: Real spawned PTY process lifecycle ---");
+  console.log("--- K5: Real spawned PTY process termination ---");
   {
     const lease = ptyManager.start({
-      command: "echo test-k4",
-      leaseMs: 1000
+      command: "sleep 10",
+      leaseMs: 5000
     });
     assert.ok(lease.pid > 0);
-    // Allow process to finish naturally
+    const initialPoll = ptyManager.poll(lease.id);
+    assert.equal(initialPoll.status, "running");
+
+    // Call stop() to trigger verified termination
+    ptyManager.stop(lease.id);
+
+    const deadline = Date.now() + 3000;
+    let finalPoll = ptyManager.poll(lease.id);
+    while (Date.now() < deadline && (finalPoll.status === "cleanup_pending" || finalPoll.cleanupStatus === "pending")) {
+      await new Promise((r) => setTimeout(r, 50));
+      finalPoll = ptyManager.poll(lease.id);
+    }
+
+    if (process.platform === "linux") {
+      assert.equal(
+        finalPoll.status,
+        "exited",
+        "On Linux with bwrap kernel boundary, termination must verify cleanup"
+      );
+      assert.equal(finalPoll.cleanupStatus, "snapshot_cleared");
+
+      let stillAlive = true;
+      try {
+        process.kill(lease.pid, 0);
+      } catch (err: any) {
+        if (err.code === "ESRCH") stillAlive = false;
+      }
+      assert.equal(stillAlive, false, "Target process must be confirmed reaped/dead");
+    } else {
+      assert.equal(
+        finalPoll.status,
+        "cleanup_unverified",
+        "On macOS Darwin, unconfined PTY exit must report cleanup_unverified"
+      );
+      assert.equal(finalPoll.cleanupStatus, "unverified");
+    }
+    console.log("  [PASS] K5: Real process spawned and terminated cleanly.");
+  }
+
+  // -------------------------------------------------------------------------
+  // K6: Real spawned PTY process natural exit
+  // -------------------------------------------------------------------------
+  console.log("--- K6: Real spawned PTY process natural exit ---");
+  {
+    const naturalLease = ptyManager.start({
+      command: "echo test-k6-natural",
+      leaseMs: 5000
+    });
+    assert.ok(naturalLease.pid > 0);
     await new Promise((r) => setTimeout(r, 200));
 
-    const poll = ptyManager.poll(lease.id);
-    if (process.platform === "linux") {
-      assert.ok(poll.status === "running" || poll.status === "exited");
-      assert.ok(poll.cleanupStatus === "pending" || poll.cleanupStatus === "snapshot_cleared");
-    } else {
-      assert.ok(
-        poll.status === "running" || poll.status === "leader_exited" || poll.status === "cleanup_unverified",
-        "On macOS Darwin, unconfined PTY exit must report leader_exited or cleanup_unverified"
-      );
-      assert.ok(poll.cleanupStatus === "pending" || poll.cleanupStatus === "unverified");
-    }
-    console.log("  [PASS] K4: Real process spawned and polled cleanly.");
+    const poll = ptyManager.poll(naturalLease.id);
+    assert.equal(
+      poll.status,
+      "leader_exited",
+      "Natural leader exit must be reported as leader_exited"
+    );
+    assert.equal(
+      poll.cleanupStatus,
+      "unverified",
+      "Natural leader exit does not verify reparented descendants"
+    );
+    console.log("  [PASS] K6: Natural leader exit reported as leader_exited and unverified.");
   }
 
   ptyManager.dispose();
