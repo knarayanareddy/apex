@@ -132,6 +132,7 @@ async function runRing1Tests(): Promise<void> {
       durabilityMode: "power-loss-safe",
       modelRuntime: sharedRuntime,
       model: faux.getModel(),
+      allowUnsandboxedDev: true,
       ring1: {
         lspServers: [
           {
@@ -523,6 +524,7 @@ async function runRing1Tests(): Promise<void> {
       trustedRepo: false,
       modelRuntime: sharedRuntime,
       model: faux.getModel(),
+      allowUnsandboxedDev: true,
       ring1: {
         lspServers: [
           {

@@ -63,6 +63,11 @@ if [[ -z "${NODE_BIN}" ]]; then
 fi
 NODE_DIR="$(dirname "${NODE_BIN}")"
 
+if [[ ! -d "${REPO_ROOT}/node_modules" ]]; then
+  echo "[install-personal] Installing dependencies..."
+  npm --prefix "${REPO_ROOT}" ci >/dev/null 2>&1 || npm --prefix "${REPO_ROOT}" install >/dev/null
+fi
+
 echo "[install-personal] Building native Linux openat2 syscall broker..."
 npm --prefix "${REPO_ROOT}" run build:native >/dev/null
 

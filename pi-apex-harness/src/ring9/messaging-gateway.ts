@@ -57,11 +57,14 @@ export interface OutboundChannelRequest {
   replyToMessageId?: string;
 }
 
+export type GatewayDeliveryStatus = "confirmed" | "staged" | "unconfigured" | "failed" | "unknown";
+
 export interface OutboundChannelReceipt {
   deliveryId: string;
   platform: GatewayPlatform;
   channelId: string;
   delivered: boolean;
+  deliveryStatus: GatewayDeliveryStatus;
   externalMessageId: string;
   transportDetail: string;
   timestampMs: number;
@@ -553,11 +556,15 @@ export class OmniChannelGateway {
     const custom = this.customAdapters.get(req.platform);
     let externalMessageId = `local_${crypto.randomBytes(4).toString("hex")}`;
     let transportDetail = "queued-local-adapter";
+    let delivered = false;
+    let deliveryStatus: GatewayDeliveryStatus = "unconfigured";
 
     if (custom) {
       const res = await custom.send({ ...req, text: safeText });
       externalMessageId = res.externalMessageId;
       transportDetail = res.transportDetail;
+      delivered = true;
+      deliveryStatus = "confirmed";
     } else if (req.platform === "telegram" && this.credentials.telegram?.botToken) {
       const base = (this.credentials.telegram.apiBaseUrl ?? "https://api.telegram.org").replace(
         /\/+$/,
@@ -579,6 +586,8 @@ export class OmniChannelGateway {
       const data = (await resp.json()) as { result?: { message_id?: number | string } };
       externalMessageId = String(data.result?.message_id ?? externalMessageId);
       transportDetail = "telegram-bot-api";
+      delivered = true;
+      deliveryStatus = "confirmed";
     } else if (req.platform === "discord" && this.credentials.discord?.botToken) {
       const base = (
         this.credentials.discord.apiBaseUrl ?? "https://discord.com/api/v10"
@@ -595,6 +604,8 @@ export class OmniChannelGateway {
       const data = (await resp.json()) as { id?: string };
       externalMessageId = String(data.id ?? externalMessageId);
       transportDetail = "discord-rest-v10";
+      delivered = true;
+      deliveryStatus = "confirmed";
     } else if (req.platform === "slack" && this.credentials.slack?.botToken) {
       const base = (this.credentials.slack.apiBaseUrl ?? "https://slack.com/api").replace(
         /\/+$/,
@@ -616,6 +627,8 @@ export class OmniChannelGateway {
       const data = (await resp.json()) as { ts?: string };
       externalMessageId = String(data.ts ?? externalMessageId);
       transportDetail = "slack-web-api";
+      delivered = true;
+      deliveryStatus = "confirmed";
     } else if (req.platform === "whatsapp_cloud" && this.credentials.whatsappCloud?.accessToken) {
       const cfg = this.credentials.whatsappCloud;
       const base = (cfg.apiBaseUrl ?? "https://graph.facebook.com/v21.0").replace(/\/+$/, "");
@@ -636,6 +649,8 @@ export class OmniChannelGateway {
       const data = (await resp.json()) as { messages?: Array<{ id?: string }> };
       externalMessageId = String(data.messages?.[0]?.id ?? externalMessageId);
       transportDetail = "whatsapp-cloud-graph-v21";
+      delivered = true;
+      deliveryStatus = "confirmed";
     } else if (req.platform === "signal" && this.credentials.signal?.rpcUrl) {
       const resp = await fetch(this.credentials.signal.rpcUrl, {
         method: "POST",
@@ -655,11 +670,23 @@ export class OmniChannelGateway {
       const data = (await resp.json()) as { result?: { timestamp?: number | string } };
       externalMessageId = String(data.result?.timestamp ?? externalMessageId);
       transportDetail = "signal-cli-jsonrpc";
+      delivered = true;
+      deliveryStatus = "confirmed";
     } else if (req.platform === "whatsapp_baileys") {
       externalMessageId = `baileys_${crypto.randomBytes(4).toString("hex")}`;
-      transportDetail = this.baileysState.connected
-        ? "whatsapp-baileys-md-bridge"
-        : "whatsapp-baileys-staged";
+      if (this.baileysState.connected) {
+        transportDetail = "whatsapp-baileys-md-bridge";
+        delivered = true;
+        deliveryStatus = "confirmed";
+      } else {
+        transportDetail = "whatsapp-baileys-staged";
+        delivered = false;
+        deliveryStatus = "staged";
+      }
+    } else {
+      transportDetail = `unconfigured-${req.platform}`;
+      delivered = false;
+      deliveryStatus = "unconfigured";
     }
 
     const timestampMs = Date.now();
@@ -675,7 +702,8 @@ export class OmniChannelGateway {
       deliveryId: `dlv_${crypto.randomBytes(4).toString("hex")}`,
       platform: req.platform,
       channelId: req.channelId,
-      delivered: true,
+      delivered,
+      deliveryStatus,
       externalMessageId,
       transportDetail,
       timestampMs

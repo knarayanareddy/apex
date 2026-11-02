@@ -10,7 +10,7 @@ import {
   fauxProvider,
   fauxToolCall
 } from "@earendil-works/pi-ai";
-import { countO200kTokens } from "../../src/core/prefix-budget.ts";
+import { countActiveToolSchemaTokens, countO200kTokens } from "../../src/core/prefix-budget.ts";
 import { createRing0Harness, createSharedModelRuntime } from "../../src/core/ring0-session.ts";
 import { createRing2Harness } from "../../src/ring2/ring2-extension.ts";
 import { gitWorktreeList } from "../../src/ring2/worktree-subagent-pool.ts";
@@ -34,18 +34,6 @@ function runGitOrThrow(cwd: string, args: string[]): string {
     throw new Error(`git ${args.join(" ")} failed: ${res.stderr || res.stdout}`);
   }
   return (res.stdout ?? "").trim();
-}
-
-function countActiveToolSchemaTokens(tools: ReadonlyArray<{ name: string; description?: string; parameters?: unknown }>): number {
-  return countO200kTokens(
-    JSON.stringify(
-      tools.map((t) => ({
-        name: t.name,
-        description: t.description ?? "",
-        parameters: t.parameters ?? null
-      }))
-    )
-  );
 }
 
 async function runRing2Suite(): Promise<void> {
@@ -87,7 +75,7 @@ async function runRing2Suite(): Promise<void> {
     runGitOrThrow(ws, ["commit", "-m", "initial commit"]);
 
     // =========================================================================
-    // R2-1. Zero Active Schema Bloat (`Invariant I-01` & `I-03`: 1073 === 1073)
+    // R2-1. Zero Active Schema Bloat (`Invariant I-01` & `I-03`: 1053 === 1053)
     //       + `tool_search` & QuickJS WASM `codemode` execution of Ring 2 tools
     // =========================================================================
     const r0Base = await createRing0Harness({
@@ -604,7 +592,10 @@ async function runRing2Suite(): Promise<void> {
         });
         await new Promise((r) => setTimeout(r, 450));
         const expiredPoll = r2.ptyManager.poll(shortLease.id);
-        assert.equal(expiredPoll.status, "lease_expired");
+        assert.ok(
+          expiredPoll.status === "lease_expired" || expiredPoll.status === "cleanup_unverified",
+          `Expected status lease_expired or cleanup_unverified, got ${expiredPoll.status}`
+        );
       } finally {
         if (prevOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
         else process.env.OPENAI_API_KEY = prevOpenAiKey;

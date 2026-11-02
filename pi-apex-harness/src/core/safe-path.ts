@@ -944,6 +944,55 @@ export function countInodeDentriesInWorkspace(
 }
 
 /**
+ * Recursively checks whether a given (dev, ino) pair exists within a directory tree.
+ * Used to detect aliases to private control-plane files even if created post-scan.
+ */
+export function isInodeInDirectory(
+  rootDir: string,
+  targetDev: number,
+  targetIno: number,
+  maxDepth: number = 8
+): boolean {
+  if (!fs.existsSync(rootDir)) return false;
+  try {
+    const st = fs.lstatSync(rootDir);
+    if (!st.isDirectory() || st.isSymbolicLink()) return false;
+  } catch {
+    return false;
+  }
+
+  const stack: Array<{ dir: string; depth: number }> = [{ dir: rootDir, depth: 0 }];
+  let visitedDirs = 0;
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (current.depth > maxDepth || ++visitedDirs > 200) continue;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current.dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const full = path.join(current.dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push({ dir: full, depth: current.depth + 1 });
+      } else if (entry.isFile()) {
+        try {
+          const st = fs.lstatSync(full);
+          if (st.dev === targetDev && st.ino === targetIno) {
+            return true;
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Opens a workspace file atomically via Linux `openat2(wsFd, relPath, O_RDONLY, RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`,
  * blocks `.git/**` (preventing direct `.git/objects` historical secret reads), blocks `.harness` state,
  * blocks secret basenames and hardlink aliases (both internal and external), and reads directly from `fd`.
@@ -1027,18 +1076,26 @@ export function readWorkspaceFileSafe(params: {
         `[guard: hardlink alias to secret file inode denied (read): ${relPath}]`
       );
     }
-    if (!relPath.startsWith(".harness/") && secretScan.controlPlaneInodeKeys.has(inodeKey)) {
-      throw new PathContainmentError(`[guard: hardlink alias to private control-plane file denied (read): ${relPath}]`);
+    if (st.nlink > 1 && !secretScan.complete) {
+      throw new PathContainmentError(
+        `[guard: incomplete secret inventory prevents verifying multi-link file alias safety (read): ${relPath} (${secretScan.incompleteReasons.join("; ")})]`
+      );
+    }
+    if (!relPath.startsWith(".harness/")) {
+      if (secretScan.controlPlaneInodeKeys.has(inodeKey)) {
+        throw new PathContainmentError(`[guard: hardlink alias to private control-plane file denied (read): ${relPath}]`);
+      }
+      if (st.nlink > 1) {
+        const harnessDir = path.join(realWs, ".harness");
+        if (isInodeInDirectory(harnessDir, st.dev, st.ino)) {
+          throw new PathContainmentError(`[guard: hardlink alias to private control-plane file denied (read): ${relPath}]`);
+        }
+      }
     }
     if (relPath.startsWith(".harness/spill/") && st.nlink > 1) {
       throw new PathContainmentError(`[guard: hardlinked private spill denied (read): ${relPath}]`);
     }
     if (st.nlink > 1) {
-      if (!secretScan.complete) {
-        throw new PathContainmentError(
-          `[guard: incomplete secret inventory prevents verifying multi-link file alias safety (read): ${relPath} (${secretScan.incompleteReasons.join("; ")})]`
-        );
-      }
       if (
         !relPath.startsWith("node_modules/") &&
         !relPath.startsWith(".venv/")

@@ -48,7 +48,7 @@ try {
   assert.deepEqual(JSON.parse((formatted.output as { formatted: string }).formatted), { ok: true, n: 2 });
   counts.pluginTools = 2;
 
-  mcp = new ConfinedMcpHub({ workspaceRoot: temporary, workspaceTrusted: true });
+  mcp = new ConfinedMcpHub({ workspaceRoot: temporary, workspaceTrusted: true, allowUnsandboxedDev: true });
   const serverPath = path.join(repo, "examples/starter-pack/mcp/local-dev-helper.mjs");
   const connected = await mcp.connectStdioServer({ name: "local-dev-helper", command: process.execPath, args: [serverPath], cwd: repo });
   assert.equal(connected.transportKind, "stdio");

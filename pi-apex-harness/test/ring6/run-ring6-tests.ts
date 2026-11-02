@@ -2,7 +2,7 @@
  * Ring 6 Verification Suite (`test/ring6/run-ring6-tests.ts`)
  *
  * Verifies `R6-1` through `R6-6` from `SPEC_BIBLE.md §7.4`:
- *  - R6-1: Zero schema bloat (`1,073 === 1,073` o200k tokens) + real `@earendil-works/pi-mcp`
+ *  - R6-1: Zero schema bloat (`1,053 === 1,053` o200k tokens) + real `@earendil-works/pi-mcp`
  *          `StdioTransport` & `InMemoryTransport` + QuickJS WASM `codemode` + `toLlmContent()`
  *          text+PNG image conversion + `inheritEnv: false` host-secret non-leakage.
  *  - R6-2: 4-Layer MCP Security Fence (`UNTRUSTED_WORKSPACE_MCP_BLOCKED`, `skills-guard-v10`
@@ -32,7 +32,7 @@ import {
   fauxToolCall
 } from "@earendil-works/pi-ai";
 import { createInMemoryTransportPair } from "@earendil-works/pi-mcp/testing";
-import { countO200kTokens } from "../../src/core/prefix-budget.ts";
+import { countActiveToolSchemaTokens, countO200kTokens } from "../../src/core/prefix-budget.ts";
 import { createSharedModelRuntime } from "../../src/core/ring0-session.ts";
 import {
   ALL_APEX_SLASH_COMMANDS,
@@ -189,17 +189,9 @@ async function main(): Promise<void> {
         assert.equal(stdioSummary.safeTools, 3);
         assert.equal(stdioSummary.poisonedTools, 1, "skills-guard-v10 must quarantine poisoned_exfil_tool");
 
-        // Verify active schema tokens remain strictly 1,073 === 1,073!
-        const schemaTokens = countO200kTokens(
-          JSON.stringify(
-            h.session.agent.state.tools.map((t) => ({
-              name: t.name,
-              description: t.description ?? "",
-              parameters: t.parameters ?? null
-            }))
-          )
-        );
-        assert.ok(schemaTokens === 1053 || schemaTokens === 1073 || schemaTokens === 1080, "Active schema must remain strictly 1053/1073/1080 o200k_base tokens");
+        // Verify active schema tokens remain strictly 1,053 === 1,053!
+        const schemaTokens = countActiveToolSchemaTokens(h.session.agent.state.tools);
+        assert.equal(schemaTokens, 1053, "Active schema must remain strictly 1053 o200k_base tokens");
 
         // Verify Clean-Env isolation (`inheritEnv: false` stripped host ANTHROPIC_API_KEY & OPENAI_API_KEY)
         const envCheck = await h.mcpHub.callTool({
@@ -253,7 +245,7 @@ async function main(): Promise<void> {
         results.push({
           id: "R6-1",
           detail:
-            "1,073 === 1,073 active schema tokens + real @earendil-works/pi-mcp Stdio & InMemory transports + QuickJS Codemode + clean-env secret isolation verified"
+            "1,053 === 1,053 active schema tokens + real @earendil-works/pi-mcp Stdio & InMemory transports + QuickJS Codemode + clean-env secret isolation verified"
         });
 
         // --- R6-2: 4-Layer MCP Security Fence ---
@@ -659,12 +651,12 @@ async function main(): Promise<void> {
       );
       assert.equal(docOut.status, 0, `Extracted /doctor failed: ${docOut.stderr}`);
       assert.match(docOut.stdout, /ALL HEALTHY/);
-      assert.match(docOut.stdout, /schema=(?:1053|1073|1080)/);
+      assert.match(docOut.stdout, /schema=1053/);
 
       results.push({
         id: "R6-6",
         detail:
-          `Portable pi-apex-v${pkgVersion}-personal.tar.gz + SHA-256 checksum + clean extraction, native build & /doctor (schema=1073) verified`
+          `Portable pi-apex-v${pkgVersion}-personal.tar.gz + SHA-256 checksum + clean extraction, native build & /doctor (schema=1053) verified`
       });
     }
 

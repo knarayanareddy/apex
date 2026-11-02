@@ -8,7 +8,7 @@
  * ARCHITECTURE & TOKEN INVARIANT (`Invariant I-01` & `I-03`):
  *  - Registers 7 operator slash commands (`/plan`, `/rewind`, `/review`, `/quarantine`, `/dream`,
  *    `/evolve`, `/doctor`) + `Ctrl+Alt+P` plan-mode toggle via `ExtensionRunner` commands.
- *  - Adds `+0` tools to `agent.state.tools` -> `1,073 === 1,073 o200k_base` active schema tokens
+ *  - Adds `+0` tools to `agent.state.tools` -> `1,053 === 1,053 o200k_base` active schema tokens
  *    and `0` live static-prefix SHA-256 drift!
  *  - Works identically across all 4 execution modes (`tui`, `print`, `json`, `rpc`):
  *      - Updates TUI status bar & notifications when `ctx.hasUI` is true
@@ -28,7 +28,7 @@ import { Key } from "@earendil-works/pi-tui";
 import { rewindChatAndDiskToLeaf } from "../core/git-rewind.ts";
 import { COMPILED_GUARDRAILS_SHA256, loadVerifiedGuardrails } from "../core/guardrail-pin.ts";
 import { getLinuxFsBridge } from "../core/linux-fs-bridge.ts";
-import { countO200kTokens } from "../core/prefix-budget.ts";
+import { countActiveToolSchemaTokens, countO200kTokens } from "../core/prefix-budget.ts";
 import type { ReviewTarget } from "../ring2/bugbot-ci-loop.ts";
 import type { Ring3HarnessInstance } from "../ring3/ring3-extension.ts";
 import type { SkillLifecycleStatus } from "../ring3/skills-guard-quarantine.ts";
@@ -672,15 +672,7 @@ export function createRing4SlashCommandsExtension(
           h.session.systemPrompt,
           h.session.agent.state.tools
         );
-        const activeSchemaTokens = countO200kTokens(
-          JSON.stringify(
-            h.session.agent.state.tools.map((t) => ({
-              name: t.name,
-              description: t.description ?? "",
-              parameters: t.parameters ?? null
-            }))
-          )
-        );
+        const activeSchemaTokens = countActiveToolSchemaTokens(h.session.agent.state.tools);
         const totalPrefixTokens = h.prefix.componentTokens.textTotal + activeSchemaTokens;
 
         // 8. Quarantine & Skills queue

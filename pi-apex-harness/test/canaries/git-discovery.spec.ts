@@ -46,4 +46,56 @@ assert.throws(() => buildMinimalBwrapArgv("true", malformed, { workspaceRoot: ma
 const linked = fs.mkdtempSync(path.join(os.tmpdir(), "apex-git-symlink-"));
 fs.symlinkSync(path.join(repos[0], ".git"), path.join(linked, ".git"));
 assert.throws(() => findWorkspaceGitRoots(linked), /Unsafe .git metadata/);
+
+// Alternate object store in nested repo (objects/info/alternates)
+const altStore = path.join(ws, "external-alt-objects");
+fs.mkdirSync(altStore, { recursive: true });
+const nestedWithAlt = path.join(ws, "nested-alt-repo");
+fs.mkdirSync(nestedWithAlt, { recursive: true });
+execFileSync("git", ["init", "-q"], { cwd: nestedWithAlt });
+const altInfoDir = path.join(nestedWithAlt, ".git", "objects", "info");
+fs.mkdirSync(altInfoDir, { recursive: true });
+fs.writeFileSync(path.join(altInfoDir, "alternates"), `${altStore}\n`);
+
+const rootsWithAlt = findWorkspaceGitRoots(ws);
+assert.ok(rootsWithAlt.includes(nestedWithAlt), `missing nested-alt-repo ${nestedWithAlt}`);
+const argvWithAlt = buildMinimalBwrapArgv("true", ws, { workspaceRoot: ws });
+const realAltStore = fs.realpathSync(altStore);
+assert.ok(
+  argvWithAlt.some((arg, i) => arg === "--tmpfs" && argvWithAlt[i + 1] === realAltStore),
+  "alternate object store in nested repo must be masked via --tmpfs"
+);
+
+// Unresolvable alternate in a nested repo must fail closed
+const badAltRepo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-git-bad-alt-"));
+execFileSync("git", ["init", "-q"], { cwd: badAltRepo });
+const badAltInfo = path.join(badAltRepo, ".git", "objects", "info");
+fs.mkdirSync(badAltInfo, { recursive: true });
+fs.writeFileSync(path.join(badAltInfo, "alternates"), `/nonexistent/path/to/alt-objects\n`);
+assert.throws(
+  () => buildMinimalBwrapArgv("true", badAltRepo, { workspaceRoot: badAltRepo }),
+  /Cannot isolate unresolvable Git alternate object store/
+);
+
+// Nested linked worktree (.git file pointing to another repo)
+const mainRepo = path.join(ws, "main-repo");
+fs.mkdirSync(mainRepo, { recursive: true });
+execFileSync("git", ["init", "-q"], { cwd: mainRepo });
+execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: mainRepo });
+execFileSync("git", ["config", "user.name", "Test"], { cwd: mainRepo });
+fs.writeFileSync(path.join(mainRepo, "README.md"), "hello\n");
+execFileSync("git", ["add", "README.md"], { cwd: mainRepo });
+execFileSync("git", ["commit", "-m", "init"], { cwd: mainRepo });
+
+const linkedWt = path.join(ws, "linked-wt");
+execFileSync("git", ["worktree", "add", linkedWt, "-b", "wt-branch"], { cwd: mainRepo });
+const rootsWithWt = findWorkspaceGitRoots(ws);
+assert.ok(rootsWithWt.includes(linkedWt), "findWorkspaceGitRoots must find linked worktrees");
+const argvWithWt = buildMinimalBwrapArgv("true", ws, { workspaceRoot: ws });
+const wtGitDir = fs.realpathSync(path.join(mainRepo, ".git", "worktrees", "linked-wt"));
+assert.ok(
+  argvWithWt.some((arg, i) => arg === "--bind" && argvWithWt[i + 1] === wtGitDir),
+  "linked worktree gitdir must be bound"
+);
+
 console.log("nested Git discovery and masking: PASS");

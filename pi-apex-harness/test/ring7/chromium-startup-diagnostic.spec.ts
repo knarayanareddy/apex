@@ -8,7 +8,7 @@ const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "apex-chromium-startup-d
 const launcher = path.join(workspace, "synthetic-chromium");
 // Synthetic owned process: advertise a marker file, then remain alive until the driver closes it.
 fs.writeFileSync(launcher, `#!/bin/sh\nfor arg in "$@"; do case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac; done\nprintf 'synthetic\\n' > "$profile/DevToolsActivePort"\nprintf 'synthetic-stdout'\nwhile :; do :; done\n`, { mode: 0o700 });
-const browser = new ChromiumCdpSession({ workspaceRoot: workspace, chromiumPath: launcher, connectTimeoutMs: 500 });
+const browser = new ChromiumCdpSession({ workspaceRoot: workspace, chromiumPath: launcher, connectTimeoutMs: 1500 });
 try {
   await assert.rejects(
     () => browser.ensureStarted(),

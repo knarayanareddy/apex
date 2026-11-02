@@ -395,10 +395,11 @@ export function createRing9Extension(bridge: {
           channelId: match[2]!,
           text: match[3]!
         });
+        const statusVerb = receipt.delivered ? "Delivered" : (receipt.deliveryStatus === "staged" ? "Staged" : "Queued (unconfigured)");
         emitReport(
           ctx,
           "send",
-          `Delivered \`${receipt.deliveryId}\` to **${receipt.platform}** (\`${receipt.channelId}\`, transport=\`${receipt.transportDetail}\`).`,
+          `${statusVerb} \`${receipt.deliveryId}\` to **${receipt.platform}** (\`${receipt.channelId}\`, status=\`${receipt.deliveryStatus}\`, transport=\`${receipt.transportDetail}\`).`,
           receipt
         );
       }

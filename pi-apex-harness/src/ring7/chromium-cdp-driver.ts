@@ -240,6 +240,16 @@ const MUTATION_OBSERVER_BOOTSTRAP_SCRIPT = `
 })();
 `;
 
+export interface BrowserStartupPhases {
+  endpointDurationMs: number;
+  targetDiscoveryDurationMs: number;
+  wsConnectionDurationMs: number;
+  handshakeDurationMs: number;
+  totalStartupMs: number;
+  activePortFileObserved: boolean;
+  endpointSource: "stderr" | "port_file";
+}
+
 export interface ChromiumCdpSessionOptions {
   workspaceRoot?: string;
   chromiumPath?: string;
@@ -264,6 +274,7 @@ export class ChromiumCdpSession {
   private activeSnapshotDomRevision = -1;
   private activeRefs: Record<string, RefTargetMetadata> = {};
   private closed = false;
+  private startupMetrics: BrowserStartupPhases | null = null;
 
   constructor(opts: ChromiumCdpSessionOptions = {}) {
     const resolvedBin = opts.chromiumPath ?? findLocalChromiumBinary();
@@ -285,6 +296,10 @@ export class ChromiumCdpSession {
     return !this.closed && this.ws !== null && this.proc !== null;
   }
 
+  public getStartupMetrics(): BrowserStartupPhases | null {
+    return this.startupMetrics;
+  }
+
   public async ensureStarted(): Promise<void> {
     if (this.isOpen()) return;
     this.closed = false;
@@ -299,12 +314,17 @@ export class ChromiumCdpSession {
       LANG: process.env["LANG"] ?? "C.UTF-8"
     };
 
+    const t0 = performance.now();
+    let endpointSource: "stderr" | "port_file" = "stderr";
+    let activePortFileObserved = false;
+
     const proc = spawn(
       this.chromiumPath,
       [
         "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
+        "--no-proxy-server",
         "--remote-allow-origins=*",
         "--disable-dev-shm-usage",
         "--no-first-run",
@@ -332,7 +352,14 @@ export class ChromiumCdpSession {
         let stderrBuf = "";
         let stderrBytes = 0;
         let endpointResolved = false;
+
+        const cleanupProbe = () => {
+          if (portFilePoll) clearInterval(portFilePoll);
+          clearTimeout(timer);
+        };
+
         const timer = setTimeout(() => {
+          cleanupProbe();
           let activePortFile = false;
           try {
             activePortFile = fs.lstatSync(path.join(userDataDir, "DevToolsActivePort")).isFile();
@@ -341,19 +368,43 @@ export class ChromiumCdpSession {
           }
           reject(
             new Error(
-              `CHROMIUM_CDP_TIMEOUT: DevTools endpoint did not start within ${this.connectTimeoutMs}ms. ` +
+              `CHROMIUM_CDP_TIMEOUT: DevTools endpoint did not start within ${this.connectTimeoutMs}ms (phase=endpoint_discovery). ` +
               `activePortFile=${activePortFile} stdoutBytes=${stdoutBytes} stderrBytes=${stderrBytes} ` +
               `exitCode=${String(proc.exitCode)} signalCode=${String(proc.signalCode)} stderr=${stderrBuf.slice(0, 400)}`
             )
           );
         }, this.connectTimeoutMs);
 
+        const portFilePoll = setInterval(() => {
+          if (endpointResolved) {
+            cleanupProbe();
+            return;
+          }
+          try {
+            const portFilePath = path.join(userDataDir, "DevToolsActivePort");
+            if (fs.existsSync(portFilePath)) {
+              activePortFileObserved = true;
+              const content = fs.readFileSync(portFilePath, "utf8").trim().split("\n");
+              if (content.length >= 2 && /^\d+$/.test(content[0].trim())) {
+                const port = content[0].trim();
+                const browserPath = content[1].trim();
+                endpointResolved = true;
+                endpointSource = "port_file";
+                cleanupProbe();
+                resolve(`ws://127.0.0.1:${port}${browserPath.startsWith("/") ? "" : "/"}${browserPath}`);
+              }
+            }
+          } catch {
+            // port file still being written
+          }
+        }, 50);
+
         proc.once("error", (err) => {
-          clearTimeout(timer);
+          cleanupProbe();
           reject(err);
         });
         proc.once("exit", (code, sig) => {
-          clearTimeout(timer);
+          cleanupProbe();
           reject(
             new Error(
               `CHROMIUM_EXITED_EARLY: code=${String(code)} sig=${String(sig)} stderr=${stderrBuf.slice(0, 400)}`
@@ -368,11 +419,15 @@ export class ChromiumCdpSession {
           stderrBuf = combined.slice(-8192);
           if (match?.[1]) {
             endpointResolved = true;
-            clearTimeout(timer);
+            endpointSource = "stderr";
+            cleanupProbe();
             resolve(match[1]);
           }
         });
       });
+
+      const t1 = performance.now();
+      const endpointDurationMs = Math.round(t1 - t0);
 
       const hostPort = new URL(browserWsUrl).host;
       let pageWsUrl: string | undefined;
@@ -392,8 +447,11 @@ export class ChromiumCdpSession {
         await new Promise((r) => setTimeout(r, 80));
       }
       if (!pageWsUrl) {
-        throw new Error("CHROMIUM_CDP_NO_PAGE_TARGET: Could not find a page target in /json/list.");
+        throw new Error("CHROMIUM_CDP_NO_PAGE_TARGET: Could not find a page target in /json/list (phase=target_discovery).");
       }
+
+      const t2 = performance.now();
+      const targetDiscoveryDurationMs = Math.round(t2 - t1);
 
       const ws = new WebSocket(pageWsUrl);
       await new Promise<void>((resolve, reject) => {
@@ -410,6 +468,9 @@ export class ChromiumCdpSession {
           reject(new Error("CHROMIUM_CDP_WS_ERROR"));
         };
       });
+
+      const t3 = performance.now();
+      const wsConnectionDurationMs = Math.round(t3 - t2);
 
       ws.onmessage = (ev) => {
         try {
@@ -451,6 +512,19 @@ export class ChromiumCdpSession {
         expression: MUTATION_OBSERVER_BOOTSTRAP_SCRIPT,
         returnByValue: true
       });
+
+      const t4 = performance.now();
+      const handshakeDurationMs = Math.round(t4 - t3);
+      const totalStartupMs = Math.round(t4 - t0);
+      this.startupMetrics = {
+        endpointDurationMs,
+        targetDiscoveryDurationMs,
+        wsConnectionDurationMs,
+        handshakeDurationMs,
+        totalStartupMs,
+        activePortFileObserved,
+        endpointSource
+      };
     } catch (err) {
       await this.close();
       throw err;

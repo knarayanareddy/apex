@@ -40,9 +40,16 @@ console.log("  [PASS] Bubblewrap functional on Linux host.");
 console.log("Running Linux namespace confinement canaries...");
 
 try {
+  console.log("Running Linux namespace confinement canaries...");
   execFileSync("node", ["--experimental-strip-types", "test/canaries/security-canaries.spec.ts"], {
     stdio: "inherit"
   });
+
+  console.log("\nRunning Linux kernel process ownership & containment qualification...");
+  execFileSync("node", ["--experimental-strip-types", "test/canaries/linux-process-containment.spec.ts"], {
+    stdio: "inherit"
+  });
+
   console.log("\n=== ALL REQUIRED LINUX CONFINEMENT CHECKS PASSED ===\n");
 } catch (err: any) {
   console.error(`\n[TIER: LINUX CONFINEMENT] FAILED: Canaries failed under Linux confinement: ${err.message}`);

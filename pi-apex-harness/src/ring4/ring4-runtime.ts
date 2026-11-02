@@ -182,7 +182,12 @@ export async function createRing4Harness(
       mcpHubRef = new ConfinedMcpHub({
         workspaceRoot: resolvedWs,
         workspaceTrusted,
-        spillStore: activeHarnessRef?.spillStore
+        spillStore: activeHarnessRef?.spillStore,
+        allowUnsandboxedDev: opts.allowUnsandboxedDev ?? false,
+        allowSameDeviceDev:
+          opts.allowSameDeviceDev ??
+          (opts.allowUnsandboxedDev ||
+            process.env.PI_APEX_ALLOW_SAME_DEVICE_DEV === "1")
       });
     }
     return mcpHubRef;
@@ -325,7 +330,12 @@ export async function createRing4Harness(
   mcpHubRef = new ConfinedMcpHub({
     workspaceRoot: resolvedWs,
     workspaceTrusted,
-    spillStore: ring3.spillStore
+    spillStore: ring3.spillStore,
+    allowUnsandboxedDev: opts.allowUnsandboxedDev ?? false,
+    allowSameDeviceDev:
+      opts.allowSameDeviceDev ??
+      (opts.allowUnsandboxedDev ||
+        process.env.PI_APEX_ALLOW_SAME_DEVICE_DEV === "1")
   });
 
   issueBridgeRef = new GitHubIssueBridge({

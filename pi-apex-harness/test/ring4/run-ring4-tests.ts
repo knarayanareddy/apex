@@ -12,7 +12,7 @@ import {
 import { RpcClient } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, type Terminal } from "@earendil-works/pi-tui";
 import { parsePiApexCliArgs, runPiApexCli } from "../../src/cli/pi-apex-cli.ts";
-import { countO200kTokens } from "../../src/core/prefix-budget.ts";
+import { countActiveToolSchemaTokens, countO200kTokens } from "../../src/core/prefix-budget.ts";
 import { createRing0Harness, createSharedModelRuntime } from "../../src/core/ring0-session.ts";
 import { createRing4Harness, createRing4Runtime } from "../../src/ring4/ring4-runtime.ts";
 import { RING4_SLASH_COMMANDS } from "../../src/ring4/slash-commands-extension.ts";
@@ -40,20 +40,6 @@ function runGitOrThrow(cwd: string, args: string[]): string {
     throw new Error(`git ${args.join(" ")} failed: ${res.stderr || res.stdout}`);
   }
   return (res.stdout ?? "").trim();
-}
-
-function countActiveToolSchemaTokens(
-  tools: ReadonlyArray<{ name: string; description?: string; parameters?: unknown }>
-): number {
-  return countO200kTokens(
-    JSON.stringify(
-      tools.map((t) => ({
-        name: t.name,
-        description: t.description ?? "",
-        parameters: t.parameters ?? null
-      }))
-    )
-  );
 }
 
 /**
@@ -185,7 +171,7 @@ async function runRing4Suite(): Promise<void> {
       assert.equal(
         r4SchemaTokens,
         r0SchemaTokens,
-        "Ring 4 slash commands MUST add +0 active tool schema tokens (1073 === 1073)!"
+        "Ring 4 slash commands MUST add +0 active tool schema tokens (1053 === 1053)!"
       );
 
       const bootPrefixHash = r4.prefix.verifyInvariantBeforeRequest(
@@ -397,7 +383,7 @@ async function runRing4Suite(): Promise<void> {
             proposedTargetSurface: "surfaces/EXPERIENCE.md",
             proposedExperience: {
               cue: "Adding operator CLI commands",
-              lesson: "Register via ExtensionAPI.registerCommand so active tool schema stays at 1073 tokens.",
+              lesson: "Register via ExtensionAPI.registerCommand so active tool schema stays at 1053 tokens.",
               evidence: "ring4/r4-1",
               confidence: "high"
             },
@@ -503,7 +489,7 @@ async function runRing4Suite(): Promise<void> {
       `bin/pi-apex -p "/doctor" failed: ${printRun.stderr}\n${printRun.stdout}`
     );
     assert.match(printRun.stdout, /# Pi-Apex Doctor Self-Audit — ALL HEALTHY/);
-    assert.match(printRun.stdout, /schema=(?:1053|1073|1080)/);
+    assert.match(printRun.stdout, /schema=1053/);
 
     // 2. Structured NDJSON `--mode json -p "/quarantine list"`
     const jsonRun = spawnSync(

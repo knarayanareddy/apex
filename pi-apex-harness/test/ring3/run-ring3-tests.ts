@@ -10,7 +10,7 @@ import {
   fauxToolCall
 } from "@earendil-works/pi-ai";
 import { COMPILED_GUARDRAILS_SHA256, loadVerifiedGuardrails } from "../../src/core/guardrail-pin.ts";
-import { countO200kTokens } from "../../src/core/prefix-budget.ts";
+import { countActiveToolSchemaTokens, countO200kTokens } from "../../src/core/prefix-budget.ts";
 import { createRing0Harness, createSharedModelRuntime } from "../../src/core/ring0-session.ts";
 import {
   assignAnonymousCandidateIds,
@@ -39,20 +39,6 @@ function runGitOrThrow(cwd: string, args: string[]): string {
     throw new Error(`git ${args.join(" ")} failed: ${res.stderr || res.stdout}`);
   }
   return (res.stdout ?? "").trim();
-}
-
-function countActiveToolSchemaTokens(
-  tools: ReadonlyArray<{ name: string; description?: string; parameters?: unknown }>
-): number {
-  return countO200kTokens(
-    JSON.stringify(
-      tools.map((t) => ({
-        name: t.name,
-        description: t.description ?? "",
-        parameters: t.parameters ?? null
-      }))
-    )
-  );
 }
 
 async function runRing3Suite(): Promise<void> {

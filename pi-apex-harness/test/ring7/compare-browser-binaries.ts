@@ -38,7 +38,22 @@ try {
         if (!snapshot.snapshot.includes("Browser comparison")) throw new Error("COMPARISON_CONTENT_MISMATCH");
         return elapsed;
       })(), deadline]);
-      results.push({ binary, realPath, dev: file.dev, ino: file.ino, available: true, ok: true, startupMs, totalMs: Math.round(performance.now() - start) });
+      const metrics = browser.getStartupMetrics();
+      results.push({
+        binary,
+        realPath,
+        dev: file.dev,
+        ino: file.ino,
+        available: true,
+        ok: true,
+        endpointMs: metrics?.endpointDurationMs ?? startupMs,
+        targetDiscoveryMs: metrics?.targetDiscoveryDurationMs ?? 0,
+        wsConnectMs: metrics?.wsConnectionDurationMs ?? 0,
+        handshakeMs: metrics?.handshakeDurationMs ?? 0,
+        startupMs,
+        totalStartupMs: metrics?.totalStartupMs ?? startupMs,
+        totalMs: Math.round(performance.now() - start)
+      });
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       const code = text.match(/^(?:CHROMIUM_[A-Z_]+|CDP_[A-Z_]+|COMPARISON_CONTENT_MISMATCH|BROWSER_COMPARISON_TIMEOUT)/)?.[0] ?? "OTHER_ERROR";

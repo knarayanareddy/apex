@@ -47,7 +47,7 @@ bash scripts/install-personal.sh --install-systemd-user --install-vscode
 | `/ledger verify\|list\|materialize` | Verify SHA-256 hash chain on `.harness/ledger/SELF_LEARNING_LEDGER.jsonl` & materialize next-boot `EXPERIENCE.md` |
 | `/pr --auto <issueUrl\|#42>` | Quarantine-scan GitHub Issue & run autonomous self-healing Issue-to-PR pipeline |
 | `/bench` | Run 3-repo SWE Eval & `o200k_base` Prompt-Cache Benchmark Suite |
-| `/doctor` | Verify all 9 health & confinement invariants (`schema=1073`, `0` drift) |
+| `/doctor` | Verify all 9 health & confinement invariants (`schema=1053`, `0` drift) |
 
 ## 4. Skills Library, Plugins & External Apps
 

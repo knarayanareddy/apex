@@ -25,6 +25,7 @@ import path from "node:path";
 
 import { MissionControlServer } from "../../src/ring5/mission-control-server.ts";
 import { createRing4Runtime } from "../../src/ring4/ring4-runtime.ts";
+import { getLinuxFsBridge } from "../../src/core/linux-fs-bridge.ts";
 
 function runHttpRequest(options: {
   url: string;
@@ -405,6 +406,56 @@ async function testBatchC() {
     assert.equal(fs.readFileSync(outsideCanary, "utf8"), "preserve-me");
     assert.equal(fs.statSync(outsideCanary).mode & 0o777, originalMode);
     assert.ok(fs.lstatSync(pairingFile).isSymbolicLink());
+
+    // Ancestor symlink: replace cockpit-pairings dir with a symlink to outside
+    const pairingsDir = path.dirname(pairingFile);
+    fs.rmSync(pairingsDir, { recursive: true, force: true });
+    fs.symlinkSync(path.join(tmpRoot, "outside-dir"), pairingsDir);
+    fs.mkdirSync(path.join(tmpRoot, "outside-dir"), { recursive: true });
+    const ancestorServer = new MissionControlServer({ controller, workspaceRoot: ws, port: 0 });
+    await assert.rejects(() => ancestorServer.start(), /COCKPIT_PAIRING_UNAVAILABLE/);
+    fs.rmSync(pairingsDir, { force: true });
+    fs.mkdirSync(pairingsDir, { mode: 0o700 });
+
+    // Legacy workspace pairing file (.harness/cockpit-pairing.json) preservation
+    const legacyDir = path.join(ws, ".harness");
+    fs.mkdirSync(legacyDir, { recursive: true });
+    const legacyFile = path.join(legacyDir, "cockpit-pairing.json");
+    fs.writeFileSync(legacyFile, "legacy-pairing-content", { mode: 0o600 });
+    const cleanServer = new MissionControlServer({ controller, workspaceRoot: ws, port: 0 });
+    const cleanInfo = await cleanServer.start();
+    assert.equal(fs.existsSync(cleanServer.pairingFile), true);
+    assert.equal(fs.existsSync(legacyFile), true, "Legacy workspace pairing file must not be removed");
+    assert.equal(fs.readFileSync(legacyFile, "utf8"), "legacy-pairing-content");
+    await cleanServer.stop();
+
+    // Controlled destination-swap probe: racing symlink insertion preserves external file
+    const swapTarget = path.join(tmpRoot, "swap-canary");
+    fs.writeFileSync(swapTarget, "swap-unmodified", { mode: 0o644 });
+    const bridge = getLinuxFsBridge();
+    const originalRenameat = bridge.renameatSingle;
+    let raced = false;
+    try {
+      bridge.renameatSingle = (...args: any[]) => {
+        if (!raced) {
+          try { fs.unlinkSync(cleanServer.pairingFile); } catch {}
+          fs.symlinkSync(swapTarget, cleanServer.pairingFile);
+          raced = true;
+        }
+        return (originalRenameat as any)(...args);
+      };
+      const raceServer = new MissionControlServer({ controller, workspaceRoot: ws, port: 0 });
+      await raceServer.start();
+      assert.equal(raced, true, "Race hook must have executed");
+      // External target file must be preserved
+      assert.equal(fs.readFileSync(swapTarget, "utf8"), "swap-unmodified");
+      // The symlink at pairingFile was atomically replaced by the regular pairing file
+      assert.equal(fs.lstatSync(raceServer.pairingFile).isSymbolicLink(), false);
+      assert.equal(fs.lstatSync(raceServer.pairingFile).isFile(), true);
+      await raceServer.stop();
+    } finally {
+      bridge.renameatSingle = originalRenameat;
+    }
     console.log("  [PASS] C2 verified: Configured public proxy origins, IPv6 handling, and anti-CSRF protections pass.");
 
     console.log("\n=== ALL BATCH C COCKPIT & PROXY TESTS PASSED CLEANLY ===\n");

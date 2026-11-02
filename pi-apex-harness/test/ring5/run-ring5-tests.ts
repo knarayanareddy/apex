@@ -191,11 +191,7 @@ async function main(): Promise<void> {
           headers: { Origin: `https://${listenInfo.port}-sandbox99.e2b.app` }
         });
         assert.equal(statusRes.status, 200);
-        assert.ok(
-          statusRes.data.prefix.activeSchemaTokens === 1053 ||
-            statusRes.data.prefix.activeSchemaTokens === 1073 ||
-            statusRes.data.prefix.activeSchemaTokens === 1080
-        );
+        assert.equal(statusRes.data.prefix.activeSchemaTokens, 1053);
         assert.equal(statusRes.data.prefix.driftCount, 0);
         assert.equal(statusRes.data.guardrailsPinVerified, true);
         assert.equal(statusRes.data.planModeActive, true);
@@ -207,18 +203,14 @@ async function main(): Promise<void> {
         });
         assert.equal(docRes.status, 200);
         assert.equal(docRes.data.details.healthy, true, "All 9 /doctor checks must pass");
-        assert.ok(
-          docRes.data.details.activeSchemaTokens === 1053 ||
-            docRes.data.details.activeSchemaTokens === 1073 ||
-            docRes.data.details.activeSchemaTokens === 1080
-        );
+        assert.equal(docRes.data.details.activeSchemaTokens, 1053);
         assert.match(docRes.data.markdown, /ALL HEALTHY/);
 
         results.push({
           id: "R5-1",
           ok: true,
           detail:
-            "MissionControlServer 0.0.0.0 + e2b.app proxy Host/Origin compliance + zero localhost/CDN + 9/9 /doctor + 1,073 schema tokens verified"
+            "MissionControlServer 0.0.0.0 + e2b.app proxy Host/Origin compliance + zero localhost/CDN + 9/9 /doctor + 1,053 schema tokens verified"
         });
 
         // --- R5-2: Real-Time SSE Streaming (`toJsonEvent`) + Inline Trust Artifact `steer()` & Approval ---
@@ -515,9 +507,7 @@ async function main(): Promise<void> {
               });
               if (
                 st.status === 200 &&
-                (st.data.prefix.activeSchemaTokens === 1053 ||
-                  st.data.prefix.activeSchemaTokens === 1073 ||
-                  st.data.prefix.activeSchemaTokens === 1080) &&
+                st.data.prefix.activeSchemaTokens === 1053 &&
                 Array.isArray(st.data.artifacts) &&
                 st.data.artifacts.length >= 1 &&
                 Array.isArray(st.data.skills) &&
@@ -562,7 +552,7 @@ async function main(): Promise<void> {
       );
       assert.equal(docRun.status, 0, `Installed pi-apex /doctor failed: ${docRun.stderr}`);
       assert.match(docRun.stdout, /ALL HEALTHY/);
-      assert.match(docRun.stdout, /schema=(?:1053|1073|1080)/);
+      assert.match(docRun.stdout, /schema=1053/);
 
       results.push({
         id: "R5-6",

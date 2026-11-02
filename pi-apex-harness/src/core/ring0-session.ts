@@ -31,6 +31,7 @@ import {
   recoverInterruptedRewinds
 } from "./git-rewind.ts";
 import { loadVerifiedGuardrails } from "./guardrail-pin.ts";
+import { validatePrivateStatePreflight } from "./private-state-boundary.ts";
 import {
   createConfinedFileOperations,
   evaluateShellCommandGuard,
@@ -47,6 +48,12 @@ import {
   reconcileWalOnStartup,
   syncSessionTranscriptDurable
 } from "./wal-recovery.ts";
+import {
+  ToolAdmissionController,
+  type ToolAdmissionLimits,
+  type ToolExecutionPrincipal,
+  ToolAdmissionError
+} from "./tool-admission.ts";
 
 export interface Ring0HarnessOptions {
   workspaceRoot: string;
@@ -59,6 +66,7 @@ export interface Ring0HarnessOptions {
   unattendedRoutine?: boolean;
   durabilityMode?: DurabilityMode;
   allowUnsandboxedDev?: boolean;
+  allowSameDeviceDev?: boolean;
   beforeAction?: (tool: string, summary: string) => Promise<void>;
   agentDir?: string;
   modelRuntime?: ModelRuntime;
@@ -70,10 +78,14 @@ export interface Ring0HarnessOptions {
   sessionManager?: SessionManager;
   extraExtensions?: ExtensionFactory[];
   extraTools?: ToolDefinition<any, any, any>[];
+  admissionLimits?: Partial<ToolAdmissionLimits>;
+  allowedTools?: readonly string[];
+  deniedTools?: readonly string[];
 }
 
 export interface Ring0HarnessInstance {
   readonly session: AgentSession;
+  readonly admissionController: ToolAdmissionController;
   readonly agentDir: string;
   readonly modelRuntime: ModelRuntime;
   readonly settingsManager: SettingsManager;
@@ -130,6 +142,7 @@ function wrapToolDefinitionWithWal(
     workspaceRoot: string;
     sandboxMode?: SandboxMode;
     allowUnsandboxedDev?: boolean;
+    admissionController?: ToolAdmissionController;
   }
 ): ToolDefinition<any, any, any> {
   const originalExecute = tool.execute.bind(tool);
@@ -180,9 +193,28 @@ function wrapToolDefinitionWithWal(
         };
       }
 
-      let preflightAdmission: (() => void | Promise<void>) | undefined = undefined;
+      const slashIdx = toolCallId.lastIndexOf("/");
+      const parentToolCallId = slashIdx !== -1 ? toolCallId.slice(0, slashIdx) : null;
+
+      const basePreflight = async () => {
+        if (walContext.admissionController) {
+          walContext.admissionController.assertAdmitted({
+            principal: "model",
+            workspaceRoot: walContext.workspaceRoot,
+            sessionId: walContext.sessionId,
+            toolName: tool.name,
+            args: p,
+            toolCallId,
+            parentToolCallId,
+            signal
+          });
+        }
+      };
+
+      let preflightAdmission: (() => void | Promise<void>) = basePreflight;
       if (tool.name === "bash") {
-        preflightAdmission = () => {
+        preflightAdmission = async () => {
+          await basePreflight();
           if (walContext.sandboxMode !== "danger-full-access") {
             const probe = probeBwrapFunctional();
             if (!probe.ok && !walContext.allowUnsandboxedDev) {
@@ -194,7 +226,8 @@ function wrapToolDefinitionWithWal(
         };
       } else if (tool.name === "write" || tool.name === "edit") {
         if (walContext.sandboxMode === "read-only") {
-          preflightAdmission = () => {
+          preflightAdmission = async () => {
+            await basePreflight();
             throw new GuardDeniedError(
               `EACCES: permission denied, workspace is in read-only sandbox mode (${tool.name} blocked)`
             );
@@ -203,8 +236,6 @@ function wrapToolDefinitionWithWal(
       }
 
       const leafId = walContext.sessionManager.getLeafId() ?? walContext.sessionId;
-      const slashIdx = toolCallId.lastIndexOf("/");
-      const parentToolCallId = slashIdx !== -1 ? toolCallId.slice(0, slashIdx) : null;
 
       const walRes = await executeThroughWalSpine({
         stateDb: walContext.stateDb,
@@ -320,6 +351,9 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
 
   // 2. Initialize StateDb (WAL + FTS5 CRUD triggers) & PrivateSpillStore (0700 / 0600 O_EXCL)
   const harnessDir = path.join(opts.workspaceRoot, ".harness");
+  validatePrivateStatePreflight(opts.workspaceRoot, harnessDir, {
+    allowSameDeviceDev: opts.allowSameDeviceDev ?? (opts.allowUnsandboxedDev || process.env.PI_APEX_ALLOW_SAME_DEVICE_DEV === "1")
+  });
   const stateDb = new StateDb(path.join(harnessDir, "state.db"), durabilityMode);
   const spillStore = new PrivateSpillStore({
     rootDir: path.join(harnessDir, "spill"),
@@ -370,6 +404,15 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     ...(opts.extraTools ?? [])
   ];
 
+  const admissionController = new ToolAdmissionController({
+    workspaceRoot: opts.workspaceRoot,
+    sessionId,
+    limits: opts.admissionLimits,
+    allowedTools: opts.allowedTools,
+    deniedTools: opts.deniedTools,
+    readOnly: sandboxMode === "read-only"
+  });
+
   const walContext = {
     stateDb,
     spillStore,
@@ -377,7 +420,8 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     sessionManager,
     workspaceRoot: opts.workspaceRoot,
     sandboxMode,
-    allowUnsandboxedDev: opts.allowUnsandboxedDev ?? false
+    allowUnsandboxedDev: opts.allowUnsandboxedDev ?? false,
+    admissionController
   };
 
   const confinedBuiltins: ToolDefinition<any, any, any>[] = rawBuiltins.map((t) =>
@@ -421,7 +465,12 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     };
 
     pi.on("turn_start", async () => {
+      admissionController.onTurnStart();
       auditPrefix();
+    });
+
+    pi.on("turn_end", async () => {
+      admissionController.onTurnEnd();
     });
 
     pi.on("before_provider_request", async () => {
@@ -431,6 +480,27 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     pi.on("tool_call", async (event) => {
       try {
         assertNoUnresolvedOutcomeUnknown(stateDb, sessionId);
+
+        const admissionDecision = admissionController.admit({
+          principal: "model",
+          workspaceRoot: opts.workspaceRoot,
+          sessionId,
+          toolName: event.toolName,
+          args: (event.input ?? {}) as Record<string, unknown>,
+          toolCallId: event.toolCallId,
+          parentToolCallId: event.parentToolCallId ?? null
+        });
+
+        if (!admissionDecision.allowed) {
+          interceptedToolCalls.push({
+            toolCallId: event.toolCallId,
+            parentToolCallId: event.parentToolCallId ?? null,
+            toolName: event.toolName,
+            blocked: true,
+            reason: admissionDecision.reason
+          });
+          return { block: true, reason: admissionDecision.reason };
+        }
 
         if (event.toolName === "bash") {
           const cmd = String((event.input as { command?: string }).command ?? "");
@@ -622,6 +692,7 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     observedPrefixHashes,
     interceptedToolCalls,
     transcriptSyncReceipts,
+    admissionController,
     dispose() {
       session.dispose();
       stateDb.close();

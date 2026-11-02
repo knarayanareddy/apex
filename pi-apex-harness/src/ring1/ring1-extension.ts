@@ -66,7 +66,8 @@ export async function createRing1Harness(
     guardrails,
     trustedRepo: opts.trustedRepo ?? true,
     servers: opts.ring1?.lspServers,
-    diagnosticsWaitMs: opts.ring1?.lspDiagnosticsWaitMs ?? 200
+    diagnosticsWaitMs: opts.ring1?.lspDiagnosticsWaitMs ?? 200,
+    allowUnsandboxedDev: opts.allowUnsandboxedDev ?? false
   });
 
   const injectedRulesLog: ScopedRuleInjection[] = [];

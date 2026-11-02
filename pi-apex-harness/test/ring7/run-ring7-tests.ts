@@ -24,7 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
-import { countO200kTokens } from "../../src/core/prefix-budget.ts";
+import { countActiveToolSchemaTokens, countO200kTokens } from "../../src/core/prefix-budget.ts";
 import {
   ALL_APEX_SLASH_COMMANDS,
   createRing4Harness,
@@ -266,17 +266,9 @@ async function main(): Promise<void> {
         await h.modelRuntime.setRuntimeApiKey(faux.provider.id, "faux-key");
         await h.session.setModel(faux.getModel());
 
-        // Verify 1,073 === 1,073 active schema tokens & 13 slash commands
-        const schemaTokens = countO200kTokens(
-          JSON.stringify(
-            h.session.agent.state.tools.map((t) => ({
-              name: t.name,
-              description: t.description ?? "",
-              parameters: t.parameters ?? null
-            }))
-          )
-        );
-        assert.ok(schemaTokens === 1053 || schemaTokens === 1073 || schemaTokens === 1080, "Active schema tokens must stay exactly 1053/1,073/1,080");
+        // Verify 1,053 === 1,053 active schema tokens & 13 slash commands
+        const schemaTokens = countActiveToolSchemaTokens(h.session.agent.state.tools);
+        assert.equal(schemaTokens, 1053, "Active schema tokens must stay exactly 1053");
         assert.ok(ALL_APEX_SLASH_COMMANDS.length >= 13, "Must expose Ring 7+ slash commands");
 
         const bootPrefixHash = h.prefix.verifyInvariantBeforeRequest(
@@ -550,7 +542,7 @@ async function main(): Promise<void> {
       results.push({
         id: "R7-4",
         detail:
-          "All 13 zero-token operator slash commands (/preset, /bookmark, /handoff, /pr, /doctor, ...) verified with 1,073 schema tokens & 0 prefix drift"
+          "All 13 zero-token operator slash commands (/preset, /bookmark, /handoff, /pr, /doctor, ...) verified with 1,053 schema tokens & 0 prefix drift"
       });
     }
 
@@ -723,11 +715,7 @@ async function main(): Promise<void> {
           prefix: { activeSchemaTokens: number; driftCount: number };
         };
         assert.equal(fs.realpathSync(stAfter.workspaceRoot), fs.realpathSync(repoB));
-        assert.ok(
-          stAfter.prefix.activeSchemaTokens === 1053 ||
-            stAfter.prefix.activeSchemaTokens === 1073 ||
-            stAfter.prefix.activeSchemaTokens === 1080
-        );
+        assert.equal(stAfter.prefix.activeSchemaTokens, 1053);
         assert.equal(stAfter.prefix.driftCount, 0);
       } finally {
         await server.stop();
@@ -802,7 +790,7 @@ async function main(): Promise<void> {
       );
       assert.equal(docOut.status, 0, `Extracted v3.7.0 /doctor failed: ${docOut.stderr}`);
       assert.match(docOut.stdout, /ALL HEALTHY/);
-      assert.match(docOut.stdout, /schema=(?:1053|1073|1080)/);
+      assert.match(docOut.stdout, /schema=1053/);
 
       results.push({
         id: "R7-6",

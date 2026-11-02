@@ -29,7 +29,7 @@ import {
   fauxProvider,
   fauxToolCall
 } from "@earendil-works/pi-ai";
-import { countO200kTokens } from "../../src/core/prefix-budget.ts";
+import { countActiveToolSchemaTokens, countO200kTokens } from "../../src/core/prefix-budget.ts";
 import { StateDb } from "../../src/core/state-db.ts";
 import {
   ALL_APEX_SLASH_COMMANDS,
@@ -379,6 +379,7 @@ async function main(): Promise<void> {
         workspaceRoot: ws,
         surfacesDir: SURFACES_DIR,
         agentDir: path.join(tmpRoot, "agent-r9-2"),
+        allowUnsandboxedDev: true,
         model: faux.getModel()
       });
 
@@ -605,6 +606,7 @@ async function main(): Promise<void> {
         workspaceRoot: ws,
         surfacesDir: SURFACES_DIR,
         agentDir: path.join(tmpRoot, "agent-r9-3"),
+        allowUnsandboxedDev: true,
         model: faux.getModel()
       });
 
@@ -624,17 +626,9 @@ async function main(): Promise<void> {
         });
         assert.equal(mtxReceipt.externalMessageId, "mtx_42");
 
-        // Verify active tool schema is STILL strictly 1,073 o200k_base tokens!
-        const schemaTokens = countO200kTokens(
-          JSON.stringify(
-            h.session.agent.state.tools.map((t) => ({
-              name: t.name,
-              description: t.description ?? "",
-              parameters: t.parameters ?? null
-            }))
-          )
-        );
-        assert.ok(schemaTokens === 1053 || schemaTokens === 1073 || schemaTokens === 1080, "External plugin MUST add +0 tokens to active LLM schema");
+        // Verify active tool schema is STILL strictly 1,053 o200k_base tokens!
+        const schemaTokens = countActiveToolSchemaTokens(h.session.agent.state.tools);
+        assert.equal(schemaTokens, 1053, "External plugin MUST add +0 tokens to active LLM schema");
 
         await h.session.prompt("Call changelog-formatter inside codemode.");
         const toolResults = h.session.messages.filter(
@@ -710,6 +704,7 @@ async function main(): Promise<void> {
         workspaceRoot: ws,
         surfacesDir: surfacesCopy,
         agentDir: path.join(tmpRoot, "agent-r9-4"),
+        allowUnsandboxedDev: true,
         model: faux.getModel()
       });
 
@@ -847,7 +842,8 @@ async function main(): Promise<void> {
       const rt = await createRing4Runtime({
         workspaceRoot: ws,
         surfacesDir: surfacesCopy,
-        agentDir: path.join(tmpRoot, "agent-r9-5")
+        agentDir: path.join(tmpRoot, "agent-r9-5"),
+        allowUnsandboxedDev: true
       });
       const server = new MissionControlServer({
         controller: rt,
@@ -867,16 +863,8 @@ async function main(): Promise<void> {
           h.registeredSlashCommands.length >= 21,
           "Must expose all 21+ zero-token slash commands"
         );
-        const activeSchemaTokens = countO200kTokens(
-          JSON.stringify(
-            h.session.agent.state.tools.map((t) => ({
-              name: t.name,
-              description: t.description ?? "",
-              parameters: t.parameters ?? null
-            }))
-          )
-        );
-        assert.ok(activeSchemaTokens === 1053 || activeSchemaTokens === 1073 || activeSchemaTokens === 1080, "Active schema locked at 1053/1,073/1,080 across all 19 deferred tools");
+        const activeSchemaTokens = countActiveToolSchemaTokens(h.session.agent.state.tools);
+        assert.equal(activeSchemaTokens, 1053, "Active schema locked at 1053 across all 19 deferred tools");
 
         const bootHash = h.prefix.verifyInvariantBeforeRequest(
           h.session.systemPrompt,
@@ -970,7 +958,7 @@ async function main(): Promise<void> {
       results.push({
         id: "R9-5",
         detail:
-          "20 built-in deferred tools, 22 slash commands (1,073 schema tokens, 0 drift), and Cockpit v6 all 10 views verified in Headless Chromium 156"
+          "20 built-in deferred tools, 22 slash commands (1,053 schema tokens, 0 drift), and Cockpit v6 all 10 views verified in Headless Chromium 156"
       });
     }
 
@@ -1040,7 +1028,7 @@ async function main(): Promise<void> {
       );
       assert.equal(docOut.status, 0, `Extracted v${pkgVersion} /doctor failed: ${docOut.stderr}`);
       assert.match(docOut.stdout, /ALL HEALTHY/);
-      assert.match(docOut.stdout, /schema=(?:1053|1073|1080)/);
+      assert.match(docOut.stdout, /schema=1053/);
 
       results.push({
         id: "R9-6",

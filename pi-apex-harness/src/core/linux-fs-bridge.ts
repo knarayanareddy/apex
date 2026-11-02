@@ -157,12 +157,30 @@ function ensureNativeBridgeCompiled(): void {
   }
 }
 
+let bridgeOverrides: Record<string, unknown> = {};
+
 export function getLinuxFsBridge(): LinuxFsBridge {
-  if (cachedBridge) return cachedBridge;
-  ensureNativeBridgeCompiled();
-  const req = createRequire(import.meta.url);
-  cachedBridge = req(ADDON_PATH) as LinuxFsBridge;
-  return cachedBridge;
+  if (!cachedBridge) {
+    ensureNativeBridgeCompiled();
+    const req = createRequire(import.meta.url);
+    cachedBridge = req(ADDON_PATH) as LinuxFsBridge;
+  }
+  return new Proxy({} as unknown as LinuxFsBridge, {
+    get(_target, prop) {
+      if (prop in bridgeOverrides) {
+        return bridgeOverrides[prop as string];
+      }
+      return (cachedBridge as any)[prop];
+    },
+    set(_target, prop, value) {
+      bridgeOverrides[prop as string] = value;
+      return true;
+    },
+    deleteProperty(_target, prop) {
+      delete bridgeOverrides[prop as string];
+      return true;
+    }
+  });
 }
 
 export function extractNativeErrnoCode(err: unknown): string | undefined {

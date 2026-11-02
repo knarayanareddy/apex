@@ -41,6 +41,8 @@ import {
 } from "@earendil-works/pi-mcp";
 import { readWorkspaceFileSafe } from "../core/safe-path.ts";
 import { type PrivateSpillStore, scrubSecretsInfallible } from "../core/spill-store.ts";
+import { probeBwrapFunctional, SandboxUnavailableError } from "../core/bwrap-sandbox.ts";
+import { validatePrivateStatePreflight } from "../core/private-state-boundary.ts";
 import {
   scanSkillBundle,
   type SkillScanFinding,
@@ -156,6 +158,7 @@ export class ConfinedMcpHub {
   private readonly workspaceRoot: string;
   private workspaceTrusted: boolean;
   private readonly spillStore?: PrivateSpillStore;
+  private readonly allowUnsandboxedDev: boolean;
   private readonly servers = new Map<string, ManagedServerEntry>();
   private readonly remoteStorePath:string;
   private readonly restoreIssues:string[]=[];
@@ -180,11 +183,18 @@ export class ConfinedMcpHub {
     workspaceRoot: string;
     workspaceTrusted?: boolean;
     spillStore?: PrivateSpillStore;
+    allowUnsandboxedDev?: boolean;
+    allowSameDeviceDev?: boolean;
   }) {
     this.workspaceRoot = path.resolve(opts.workspaceRoot);
     this.workspaceTrusted = opts.workspaceTrusted ?? true;
     this.spillStore = opts.spillStore;
-    const stateDir=path.join(this.workspaceRoot,".harness");fs.mkdirSync(stateDir,{recursive:true,mode:0o700});this.remoteStorePath=path.join(stateDir,"mcp-remote-servers.json");
+    this.allowUnsandboxedDev = opts.allowUnsandboxedDev ?? false;
+    const stateDir=path.join(this.workspaceRoot,".harness");
+    validatePrivateStatePreflight(this.workspaceRoot, stateDir, {
+      allowSameDeviceDev: opts.allowSameDeviceDev ?? (opts.allowUnsandboxedDev || process.env.PI_APEX_ALLOW_SAME_DEVICE_DEV === "1")
+    });
+    fs.mkdirSync(stateDir,{recursive:true,mode:0o700});this.remoteStorePath=path.join(stateDir,"mcp-remote-servers.json");
     if(fs.existsSync(this.remoteStorePath)){const st=fs.lstatSync(this.remoteStorePath);if(st.isSymbolicLink()||!st.isFile())throw new Error("MCP_REMOTE_STORE_PATH_UNSAFE");fs.chmodSync(this.remoteStorePath,0o600);}
   }
 
@@ -275,6 +285,20 @@ export class ConfinedMcpHub {
     if (source === "workspace-config" && !this.workspaceTrusted) {
       throw new Error(
         `UNTRUSTED_WORKSPACE_MCP_BLOCKED: Refusing to spawn workspace-configured stdio MCP server '${params.name}' (${params.command}) because workspaceTrusted=false.`
+      );
+    }
+
+    const probe = probeBwrapFunctional();
+    if (!probe.ok && !this.allowUnsandboxedDev) {
+      throw new SandboxUnavailableError(
+        process.platform === "darwin"
+          ? "SANDBOX_UNAVAILABLE: Stdio MCP execution failed (bubblewrap is not supported on macOS darwin). Refusing unconfined execution without explicit allowUnsandboxedDev: true."
+          : `SANDBOX_UNAVAILABLE: Stdio MCP execution failed (bubblewrap is not functional on Linux host: ${probe.reason ?? "unknown"}). Refusing unconfined execution without explicit allowUnsandboxedDev: true.`
+      );
+    }
+    if (!probe.ok) {
+      console.warn(
+        `[APEX_CONFINEMENT_WARNING] Running unconfined development stdio MCP server '${params.name}' on ${process.platform}. Kernel namespaces disabled.`
       );
     }
 

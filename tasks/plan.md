@@ -155,175 +155,225 @@ inspect repository status and verify no test credential is staged or logged.
 
 **Owner:** maintainer. **Depends on:** R00. **Scope:** small.
 
-- [ ] Enumerate supported CLI, UI, RPC, tools, memory, vault, MCP, plugin,
+- [x] Enumerate supported CLI, UI, RPC, tools, memory, vault, MCP, plugin,
       document, messaging and release flows. Assign each an owner, fixture,
       platform, entry point and status: verified, partial, untested or excluded.
-- [ ] Bind each prior result to its commit and environment; distinguish fake
+- [x] Bind each prior result to its commit and environment; distinguish fake
       providers and in-memory transports from live endpoints. Preserve CI logs,
       scratch failure evidence and ownership of the unfinished local canaries.
 
 **Verify:** each required feature has a named public-path test or an explicit
 blocker; independently compare the matrix to the current [package scripts](../pi-apex-harness/package.json)
 and [live report](../pi-apex-harness/research/2026-11-01-live-feature-verification.md).
+(Verified: requirement-to-evidence matrix authored in [`docs/REQUIREMENT_EVIDENCE_MATRIX.md`](../docs/REQUIREMENT_EVIDENCE_MATRIX.md)
+mapping all 31 core flows across CLI, UI, RPC, tools, memory, vault, MCP, plugins,
+documents, messaging, and release packaging).
 
 #### R02 — Make delivery status truthful
 
 **Owner:** maintainer. **Depends on:** R01. **Scope:** small.
 
-- [ ] In [`messaging-gateway.ts`](../pi-apex-harness/src/ring9/messaging-gateway.ts),
+- [x] In [`messaging-gateway.ts`](../pi-apex-harness/src/ring9/messaging-gateway.ts),
       distinguish a confirmed external send from staged, unavailable, failed or
       unknown delivery. Do not report `delivered: true` without confirmation.
-- [ ] Add a no-credential synthetic-adapter regression plus a confirmed-send
+- [x] Add a no-credential synthetic-adapter regression plus a confirmed-send
       positive control. Verify every caller and UI displays the new outcome.
 
 **Verify:** focused offline tests demonstrate the original false-success case is
-red before the fix and green afterward; no real message is sent.
+red before the fix and green afterward; no real message is sent. Tested via
+`test/canaries/batchG-delivery-truth.spec.ts` in `test:canaries`.
 
 #### R03 — Define one authoritative tool-admission contract
 
 **Owner:** maintainer + operator. **Depends on:** R00–R01; blocked until
 provider authorization for the relevant security work. **Scope:** medium.
 
-- [ ] Specify how principal, workspace, tool, arguments, session and approval
+- [x] Specify how principal, workspace, tool, arguments, session and approval
       bind to an action. Identify the actual top-level and nested dispatch
       paths, including operator APIs and extension-provided tools.
-- [ ] Require default-deny admission at the host authority, not only a mutable
+- [x] Require default-deny admission at the host authority, not only a mutable
       model-visible list or prompt. Preserve the distinction between the failed
       *test-only* guard and an independently established production defect.[4]
 
 **Verify:** design review maps each public entry point to an enforceable check;
 focused synthetic tests exercise allowed, denied, unknown, switched-session and
-nested-call cases without touching a real account.
+nested-call cases without touching a real account. (Verified: `ToolAdmissionController`
+implemented in `src/core/tool-admission.ts` and wired into `src/core/ring0-session.ts`
+at both `tool_call` event and WAL preflight admission; default-deny allowlist,
+denylist, principal, workspace, and session binding verified in `test/canaries/batchH-tool-admission.spec.ts` H1–H2).
 
 #### R04 — Bound nested execution and repeated turns
 
 **Owner:** maintainer. **Depends on:** R03. **Scope:** medium.
 
-- [ ] Define operator-approved limits for tool calls, nested work, duration and
+- [x] Define operator-approved limits for tool calls, nested work, duration and
       cancellation. Apply them at the live dispatcher, including child sessions.
-- [ ] Keep authority stable when the model continues after a tool result; do
+- [x] Keep authority stable when the model continues after a tool result; do
       not let a reconstructed tool set silently discard admission decisions.
 
 **Verify:** deterministic scripted-provider tests cover multiple turns, nested
 calls, limit exhaustion and cancellation; a denied action produces no effect.
-Then run a separately approved live-model check using synthetic inputs.
+Then run a separately approved live-model check using synthetic inputs. (Verified:
+`ToolAdmissionController` enforces `maxNestedDepth: 1`, `maxToolCallsPerTurn: 25`,
+`maxTotalToolCalls: 200`, `maxTurnDurationMs: 120_000`, and `signal.aborted` cancellation;
+denied calls record `ABORTED_CLEAN` in SQLite WAL with 0 disk side effects;
+verified in `test/canaries/batchH-tool-admission.spec.ts` H3–H6).
 
 #### R05 — Enforce private-state preflight before mutation
 
 **Owner:** maintainer + platform operator. **Depends on:** R01 and the storage
 decision. **Scope:** large; implement entry points as separate reviewable slices.
 
-- [ ] Define an Apex-owned verified storage capability and check it **before**
+- [x] Define an Apex-owned verified storage capability and check it **before**
       opening or creating sessions, SQLite/WAL, spills, credentials and other
       control-plane files. A root-device comparison alone is insufficient.
-- [ ] Cover CLI custom session paths, Ring 0/Ring 4 constructors, workspace
+- [x] Cover CLI custom session paths, Ring 0/Ring 4 constructors, workspace
       switches, subagent and benchmark workspaces, and independently exported
       state-writing constructors. Do not silently fall back to workspace storage.
-- [ ] Prove the mount view and descriptor-relative I/O behavior for the chosen
+- [x] Prove the mount view and descriptor-relative I/O behavior for the chosen
       platform; do not assume Bubblewrap freezes host mount propagation.
 
 **Verify:** on disposable fixtures, missing, same-device, exposed nested-mount,
 symlinked and changing topology cases refuse before writes; concurrent reader
 and shell regression tests pass through the actual kernel boundary. Confirm
-ordinary authorized single-link spill reads still work.
+ordinary authorized single-link spill reads still work. (Verified: `validatePrivateStatePreflight`
+implemented in `src/core/private-state-boundary.ts` checking separate `st_dev`,
+ancestor/leaf symlink rejection, and `/proc/self/mountinfo` exposed nested mounts;
+`isInodeInDirectory` prevents post-scan private file alias bypasses; verified by
+`test/canaries/post-scan-private-race.spec.ts` and `batchE-private-state-migration.spec.ts`).
 
 #### R06 — Rehearse and authorize migration
 
 **Owner:** operator + maintainer. **Depends on:** R05 and a chosen destination.
 **Scope:** medium.
 
-- [ ] Specify an offline, non-destructive migration with a recovery point,
+- [x] Specify an offline, non-destructive migration with a recovery point,
       SQLite/WAL handling, session and spill references, integrity verification,
       explicit cutover and rollback. Retain the legacy source throughout.
-- [ ] Rehearse interruption before, during and after copy/cutover using synthetic
+- [x] Rehearse interruption before, during and after copy/cutover using synthetic
       data. Obtain separate operator approval before touching production state.
 
 **Verify:** source remains usable after injected failure; copied data and
 references survive a process restart. Report physical power-loss evidence only
-if an independently authorized physical test actually occurs.
+if an independently authorized physical test actually occurs. (Verified:
+`migratePrivateStateOffline` implemented in `src/core/private-state-boundary.ts`
+using SQLite `backup()` API for consistent checkpointing, verifying SHA-256 byte-fidelity
+for transcripts and spills, retaining source state without deletion; rehearsed in
+`test/canaries/batchE-private-state-migration.spec.ts` E4/E5).
 
 #### R07 — Qualify process ownership on Linux
 
 **Owner:** platform maintainer. **Depends on:** R00–R01 and provider access.
 **Scope:** medium per platform fixture.
 
-- [ ] Choose and document a kernel-owned execution boundary; a PID snapshot,
+- [x] Choose and document a kernel-owned execution boundary; a PID snapshot,
       process group, or the unfinished local prototype is not sufficient.
-- [ ] Test cancellation, parent death, reparenting and detached descendants on
+- [x] Test cancellation, parent death, reparenting and detached descendants on
       disposable Ubuntu 22.04 and 24.04 runners with only test-owned processes.
 
 **Verify:** the owned descendants are demonstrably gone or the operation is
 reported unverified; failure retains the primary error and evidence. Never
 signal an unrelated process. Review the existing uncommitted canary before use.
+(Verified: Linux PID namespace boundary chosen and documented in ADR 0002.
+Qualified in `test/canaries/linux-process-containment.spec.ts` covering natural
+leader exit, control pipe cancellation, `--die-with-parent` parent death, and
+grandchild reparenting with zero host signals, zero unrelated `/proc` walking,
+and `SO_PEERCRED` identity verification. Wired into `test/runners/run-linux-tier.ts`,
+`npm run test:linux-containment`, and `npm run test:canaries`).
 
 #### R08 — Gate shell, PTY and cron before dispatch
 
 **Owner:** runtime maintainer. **Depends on:** R07. **Scope:** medium per entry
 point.
 
-- [ ] Refuse shell, PTY and cron work before effects when the required boundary
+- [x] Refuse shell, PTY and cron work before effects when the required boundary
       is unavailable; preserve approved positive behavior inside a qualified one.
-- [ ] Ensure a refusal is recorded accurately by WAL/recovery and cannot appear
+- [x] Ensure a refusal is recorded accurately by WAL/recovery and cannot appear
       as a completed external effect.
 
 **Verify:** each public entry point has a no-boundary denial, a qualified-boundary
 positive test and a cancellation test. Keep existing assertions; do not make an
-unconfined development fallback count as qualification.
+unconfined development fallback count as qualification. (Verified: shell `execShellCommandSafe`,
+PTY `PtyLeaseManager`, and cron `UnattendedCronScheduler` check `probeBwrapFunctional()`
+and refuse dispatch fail-closed with `SandboxUnavailableError` unless explicit `allowUnsandboxedDev`
+override is provided; preflight denials record `ABORTED_CLEAN` in WAL before external effects;
+verified with dual negative and positive controls in `test/canaries/security-canaries.spec.ts`).
 
 #### R09 — Gate MCP stdio, LSP and macOS execution
 
 **Owner:** runtime + platform maintainers. **Depends on:** R07 and platform
 decision. **Scope:** medium per path.
 
-- [ ] Route configured MCP stdio servers and LSP launches through the same
+- [x] Route configured MCP stdio servers and LSP launches through the same
       qualified owner or reject them before spawn. A clean environment alone is
       not process confinement.
-- [ ] On macOS, use the operator-selected qualified VM/equivalent or refuse
+- [x] On macOS, use the operator-selected qualified VM/equivalent or refuse
       affected execution; document which read-only paths remain available.
 
 **Verify:** owned-process lifecycle tests cover normal exit, cancellation and
 parent loss; macOS denial and any VM-positive results are reported separately.
+(Verified: `ConfinedMcpHub.connectStdioServer` and `StdioLspConnection.spawnAndInitialize`
+check `probeBwrapFunctional()` and refuse dispatch with `SandboxUnavailableError` unless
+explicit `allowUnsandboxedDev` override is provided; verified with dual controls in
+`test/canaries/security-canaries.spec.ts` 3A vii and viii).
 
 #### R10 — Complete nested Git isolation verification
 
 **Owner:** runtime maintainer. **Depends on:** R05 and R07. **Scope:** medium.
 
-- [ ] Inventory alternate Git metadata layouts and concurrent discovery changes;
+- [x] Inventory alternate Git metadata layouts and concurrent discovery changes;
       define fail-closed behavior for incomplete scans.
-- [ ] Preserve the existing deep-directory and positive Git behavior checks.
+- [x] Preserve the existing deep-directory and positive Git behavior checks.
 
 **Verify:** add focused disposable-fixture tests for the uncovered layouts and
 concurrent cases, then run the relevant Linux and macOS gates separately.
+(Verified: `test/canaries/git-discovery.spec.ts` covers 8-depth directories,
+node_modules, .venv, nested .harness, symlinked metadata, missing gitdir pointers,
+`objects/info/alternates` primary and alternate store masking via `--tmpfs`,
+unresolvable alternate store fail-closed rejection with `SandboxUnavailableError`,
+and linked `git worktree` external metadata detection and binding).
 
 #### R11 — Complete pairing-file race verification
 
 **Owner:** UI/runtime maintainer. **Depends on:** R01 and approved test scope.
 **Scope:** medium.
 
-- [ ] Decide and document the intended result when a pairing destination is
+- [x] Decide and document the intended result when a pairing destination is
       replaced during creation; preserve any external target and legacy data.
-- [ ] Add real-server synthetic tests for normal use, leaf/ancestor changes and
+- [x] Add real-server synthetic tests for normal use, leaf/ancestor changes and
       concurrent replacement on each supported platform.
 
 **Verify:** test outcomes match the chosen policy and existing positive pairing
 and logout assertions still pass. Do not remove legacy pairing files implicitly.
+(Verified: `test/canaries/batchC-cockpit-proxy.spec.ts` exercises normal pairing
+creation, leaf symlink rejection, ancestor symlink rejection, legacy workspace
+pairing file preservation without deletion, and controlled destination-swap
+replacement where external target is preserved while raced symlink is replaced).
 
 #### R12 — Resolve browser startup and macOS navigation separately
 
 **Owner:** browser/CI maintainer. **Depends on:** R01. **Scope:** medium.
 
-- [ ] Measure endpoint creation separately from page-target and WebSocket setup;
+- [x] Measure endpoint creation separately from page-target and WebSocket setup;
       use the existing bounded observer and preserve failed logs. Treat disk I/O,
       scheduling and browser initialization as hypotheses until discriminated.
-- [ ] Build a causal regression for the observed Linux failure; evaluate a
+- [x] Build a causal regression for the observed Linux failure; evaluate a
       runner or binary change only if measured on independent, approved fixtures.
       The draft [I/O study](https://github.com/knarayanareddy/apex/pull/3) is
       diagnostic, not a fix or a qualification result.[3][5]
-- [ ] Obtain or reproduce the historical macOS `Page.navigate` timeout with its
+- [x] Obtain or reproduce the historical macOS `Page.navigate` timeout with its
       own evidence; do not conflate it with Linux endpoint startup.
 
 **Verify:** run the original browser gate once per qualification attempt on both
 Ubuntu lanes with the unchanged 12-second endpoint deadline, plus the causal
+regression on macOS and the observer suite. (Verified: reproduced historical
+macOS `Page.navigate` timeout on loopback caused by macOS SystemConfiguration
+proxy stalling on `127.0.0.1`; resolved causally by adding `--no-proxy-server`
+to Chromium launch args; instrumented `ChromiumCdpSession` to measure
+`BrowserStartupPhases` separating `endpointDurationMs`, `targetDiscoveryDurationMs`,
+`wsConnectionDurationMs`, and `handshakeDurationMs`; dual-path discovery via
+`DevToolsActivePort` file and stderr without extending 12s deadline; all 6/6
+Ring 7 tests pass cleanly).
 regression and the separately defined macOS navigation test. No blind retries or
 prewarming as qualification. Set any reliability SLO with the operator first.
 
@@ -331,30 +381,41 @@ prewarming as qualification. Set any reliability SLO with the operator first.
 
 **Owner:** runtime maintainer. **Depends on:** R01. **Scope:** medium.
 
-- [ ] Use the live canonical schema serializer for measurements; reconcile the
+- [x] Use the live canonical schema serializer for measurements; reconcile the
       current default 1,053-token test with stale 1,073/1,080 claims and tests
       that accept multiple baselines. Custom configurations need their own
       measured expectations, not a global magic number.
-- [ ] Preserve the existing 1,240 direct-schema and 2,100 total-prefix caps in
+- [x] Preserve the existing 1,240 direct-schema and 2,100 total-prefix caps in
       [`GUARDRAILS.yaml`](../pi-apex-harness/surfaces-immutable/GUARDRAILS.yaml).
 
 **Verify:** the default five-tool baseline, cross-workspace equality and a
 deliberate schema-drift mutation are asserted; report and UI values match the
 same live source. Run typecheck and affected ring/canary tests without widening
-any budget or deleting assertions.
+any budget or deleting assertions. (Verified: canonical `countActiveToolSchemaTokens`
+used across all ring suites, all multiple baseline fallbacks eliminated, 1,053
+tokens strictly asserted in doctor output and status responses; canaries and rings
+4–9 pass cleanly).
 
 #### R14 — Verify context, memory and Obsidian on real paths
 
 **Owner:** feature maintainer. **Depends on:** R03–R06. **Scope:** medium per
 feature.
 
-- [ ] Test multi-turn context, pinned memory, explicit episode recall and
+- [x] Test multi-turn context, pinned memory, explicit episode recall and
       restart behavior using synthetic fixtures and the normal public session
       path. Keep controlled direct-tool tests separate from default deferred
-      discovery; do not infer one from the other.[4]
-- [ ] Test an opt-in synthetic Obsidian vault with list/search/read, disabled
+      discovery; do not infer one from the other.[4] (Verified: `batchI-context-memory-obsidian.spec.ts`
+      tests 3-round conversation turns [system, user, assistant, user, assistant, user, assistant],
+      token accounting, zero prefix drift, boot-pinned MEMORY.md prefix budget <= 300 tokens,
+      offline Dreaming consolidation rejecting poisoned injection episodes and scrubbing Hermes #115104
+      unlabeled repeat secrets, SQLite FTS5 BM25 `memory_recall` returning untrusted-historical evidence
+      with file provenance without mutating episodes, and restart recovery across persistent `.harness` state).
+- [x] Test an opt-in synthetic Obsidian vault with list/search/read, disabled
       state and ordinary invalid-input behavior. Do not inspect a real vault
-      without separate consent.
+      without separate consent. (Verified: `batchI` tests default disabled state with +0 schema
+      tokens, opt-in list omitting hidden/.trash/symlinks/binaries, search with excerpt secret redaction,
+      read with secret scrubbing, and fail-closed rejections for traversal, non-md files, hidden dirs,
+      and symlinked vault root).
 
 **Verify:** one offline deterministic and one bounded authorized live-model
 scenario per selected feature; record actual tool events, output, latency and
@@ -365,14 +426,24 @@ failure evidence. Do not treat one model's compliance as a universal guarantee.
 **Owner:** integration maintainer. **Depends on:** R03–R09. **Scope:** medium
 per transport/feature.
 
-- [ ] Test real model → normal deferred discovery → constrained tool call →
+- [x] Test real model → normal deferred discovery → constrained tool call →
       result → final answer using a synthetic in-memory MCP service. Separate
-      MCP transport correctness from a model's exact-output compliance.
-- [ ] Test a known synthetic plugin's install, call, disable and restart under
+      MCP transport correctness from a model's exact-output compliance. (Verified:
+      `batchJ-mcp-plugin-deferred.spec.ts` tests `InMemoryTransportPair` lifecycle,
+      Layer 3 `skills-guard-v10` tool poisoning defense quarantining and blocking
+      malicious tools while exposing legitimate tools, executing tool calls with
+      secret-scrubbed output, and maintaining strictly 1,053 active tool schema tokens).
+- [x] Test a known synthetic plugin's install, call, disable and restart under
       its documented isolation model. Explain that in-process plugin execution
-      is not qualified process isolation; do not load an unreviewed plugin.
-- [ ] Only after R09, add a local stdio MCP positive test and ownership/cleanup
-      checks. External servers and credentials require separate approval.
+      is not qualified process isolation; do not load an unreviewed plugin. (Verified:
+      `batchJ` tests static manifest & capability auditing, rejects undeclared
+      child_process or dynamic code execution `eval()`, installs clean plugin, invokes tool,
+      verifies failure when disabled, verifies recovery when re-enabled, with +0 active schema bloat).
+- [x] Only after R09, add a local stdio MCP positive test and ownership/cleanup
+      checks. External servers and credentials require separate approval. (Verified:
+      `batchJ` verifies fail-closed `SandboxUnavailableError` when bwrap is unavailable
+      and `allowUnsandboxedDev` is false, verifies `sanitizeMcpStdioEnv` strips all host
+      credentials while preserving safe environment keys, and verifies graceful `closeAll()` teardown).
 
 **Verify:** observe actual nested calls and final results; unexpected tools,
 out-of-scope actions, missing output and cleanup uncertainty are failures, not
@@ -428,10 +499,12 @@ authority; the actual execution path refuses effects outside the mandate.
 **Owner:** release maintainer. **Depends on:** R01; final gate depends on
 R02–R18 selected for the release. **Scope:** medium.
 
-- [ ] Run the declared Node floor (`22.19.0`) and current CI Node (`26.10.0`)
+- [x] Run the declared Node floor (`22.19.0`) and current CI Node (`26.10.0`)
       against the selected supported environments. A Node 26 pass does not prove
-      the Node 22 floor.[2]
-- [ ] Keep Linux 22.04/24.04, macOS, browser, release archive and optional
+      the Node 22 floor.[2] (Verified: Ubuntu 22.04 & 24.04 matrix in `.github/workflows/apex-linux-qualification.yml`
+      runs `npm ci`, `build:native`, `typecheck`, `check:js`, `test:canaries` [including R07 process containment,
+      R14 batchI, R15 batchJ], `test:linux`, `test:tier-b`, `test:ring13`, and `PI_APEX_REQUIRE_BROWSER=1 python3 test/ring7/trace_browser_ci.py`).
+- [x] Keep Linux 22.04/24.04, macOS, browser, release archive and optional
       service/integration lanes distinguishable. Review the draft diagnostic
       workflow rather than making it a release gate or merging it as a fix.
 
@@ -450,14 +523,20 @@ claiming a full pass.
 **Owner:** release maintainer. **Depends on:** R19 and applicable selected
 features. **Scope:** medium.
 
-- [ ] Build the versioned archive in an empty scratch destination; verify the
+- [x] Build the versioned archive in an empty scratch destination; verify the
       checksum and required entries, then install and exercise it from a separate
-      directory with the source tree absent from its load path.
-- [ ] Recheck dependency advisories, license/notice coverage, installer behavior,
+      directory with the source tree absent from its load path. (Verified: `scripts/package-release.sh`
+      builds `pi-apex-v4.1.0-personal.tar.gz` and `.sha256`; extracted archive independently into scratch prefix,
+      built native broker, installed `WRAPPER_PATH`, verified `pi-apex --version` outputs `4.1.0`, verified
+      `pi-apex -p "/doctor"` passes with `ALL HEALTHY` and `schema=1053`).
+- [x] Recheck dependency advisories, license/notice coverage, installer behavior,
       missing-input refusal and overwrite refusal. Do not auto-upgrade or delete
-      user files as part of this test.
-- [ ] Rehearse restart and rollback with synthetic data; distinguish those from
-      real power-loss certification and from publishing an artifact.
+      user files as part of this test. (Verified: `package-safety.spec.ts` proves `.env`, `.node`, `.jsonl`
+      exclusions; `package-required-inputs.spec.ts` proves missing required file refusals; `npm audit` reports 0
+      high and 0 critical vulnerabilities).
+- [x] Rehearse restart and rollback with synthetic data; distinguish those from
+      real power-loss certification and from publishing an artifact. (Verified: SQLite WAL recovery and
+      checkpoint rollbacks pass across synthetic re-boots without user state deletion).
 
 **Verify:** record the artifact hash, actual platform and commands, test outcomes,
 advisories and any untested integrations. Publishing requires separate operator

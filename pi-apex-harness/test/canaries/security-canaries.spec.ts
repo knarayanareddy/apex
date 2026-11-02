@@ -53,12 +53,14 @@ import {
   resolveOutcomeUnknown
 } from "../../src/core/wal-recovery.ts";
 import { BugBotAndCiEngine } from "../../src/ring2/bugbot-ci-loop.ts";
-import { PtyLeaseManager } from "../../src/ring2/pty-cron-routines.ts";
+import { PtyLeaseManager, UnattendedCronScheduler } from "../../src/ring2/pty-cron-routines.ts";
 import { createRing4Runtime } from "../../src/ring4/ring4-runtime.ts";
 import { MissionControlServer } from "../../src/ring5/mission-control-server.ts";
 import { AutonomousPrPipeline } from "../../src/ring7/autonomous-pr-pipeline.ts";
 import { ExternalPluginHost } from "../../src/ring9/external-plugin-host.ts";
 import { parsePiApexCliArgs } from "../../src/cli/pi-apex-cli.ts";
+import { ConfinedMcpHub } from "../../src/ring6/mcp-confined-hub.ts";
+import { LspClientManager } from "../../src/ring1/lsp-client.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
@@ -687,6 +689,56 @@ async function main(): Promise<void> {
         assert.ok(err instanceof SandboxUnavailableError, `Expected SandboxUnavailableError, got ${String(err)}`);
       }
       assert.equal(ptyStrictBlocked, true, "PTY start must fail closed on darwin without allowUnsandboxedDev");
+
+      // 3A (vi) Negative Denial Canary: Cron routine execution fails closed on Darwin without allowUnsandboxedDev
+      const cronSchedulerStrict = new UnattendedCronScheduler({
+        db: stateDb.db,
+        workspaceRoot: ws,
+        guardrails,
+        sandboxMode: "workspace-write",
+        allowUnsandboxedDev: false
+      });
+      cronSchedulerStrict.createRoutine({
+        name: "test-cron-darwin-strict",
+        intervalMs: 1000,
+        command: "echo cron-darwin-strict",
+        nowMs: Date.now() - 2000
+      });
+      const cronRuns = cronSchedulerStrict.tick(Date.now());
+      assert.equal(cronRuns.length, 1);
+      assert.equal(cronRuns[0].status, "BLOCKED_DENY_UNATTENDED");
+      assert.equal(cronRuns[0].blockedRuleId, "CONFINEMENT_UNAVAILABLE");
+
+      // 3A (vii) Negative Denial Canary: ConfinedMcpHub stdio connect fails closed on Darwin without allowUnsandboxedDev
+      const mcpHubStrict = new ConfinedMcpHub({
+        workspaceRoot: ws,
+        allowUnsandboxedDev: false,
+        allowSameDeviceDev: true
+      });
+      await assert.rejects(
+        () => mcpHubStrict.connectStdioServer({ name: "test-mcp-strict", command: "echo", args: ["test"] }),
+        SandboxUnavailableError,
+        "Stdio MCP start must fail closed on darwin without allowUnsandboxedDev"
+      );
+
+      // 3A (viii) Negative Denial Canary: LspClientManager fails closed on Darwin without allowUnsandboxedDev
+      const lspManagerStrict = new LspClientManager({
+        workspaceRoot: ws,
+        guardrails,
+        allowUnsandboxedDev: false,
+        servers: [{
+          languageId: "typescript",
+          command: "typescript-language-server",
+          args: ["--stdio"],
+          extensions: [".ts"]
+        }]
+      });
+      fs.writeFileSync(path.join(ws, "test.ts"), "const x = 1;\n");
+      await assert.rejects(
+        () => lspManagerStrict.executeOperation({ operation: "diagnostics", filePath: "test.ts" }),
+        SandboxUnavailableError,
+        "LSP start must fail closed on darwin without allowUnsandboxedDev"
+      );
     }
 
     // 3B. Positive Permitted Control: CI execution permitted in workspace-write mode

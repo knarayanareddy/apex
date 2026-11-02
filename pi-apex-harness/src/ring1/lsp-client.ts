@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveAndValidateWorkspacePath } from "../core/monotonic-guard.ts";
 import { readWorkspaceFileSafe } from "../core/safe-path.ts";
+import { probeBwrapFunctional, SandboxUnavailableError } from "../core/bwrap-sandbox.ts";
 import type { GuardrailsConfig } from "../types.ts";
 
 export type LspOperationName =
@@ -45,6 +46,7 @@ export interface LspManagerOptions {
   servers?: LspServerCommandSpec[];
   requestTimeoutMs?: number;
   diagnosticsWaitMs?: number;
+  allowUnsandboxedDev?: boolean;
 }
 
 const DEFAULT_SYSTEM_LSP_CANDIDATES: LspServerCommandSpec[] = [
@@ -110,6 +112,7 @@ class StdioLspConnection {
   readonly spec: LspServerCommandSpec;
   private readonly workspaceRoot: string;
   private readonly requestTimeoutMs: number;
+  private readonly allowUnsandboxedDev: boolean;
   private proc: ChildProcessWithoutNullStreams | null = null;
   private readBuf: Buffer = Buffer.alloc(0);
   private nextId = 1;
@@ -120,10 +123,16 @@ class StdioLspConnection {
   private initPromise: Promise<void> | null = null;
   private closed = false;
 
-  constructor(spec: LspServerCommandSpec, workspaceRoot: string, requestTimeoutMs: number) {
+  constructor(
+    spec: LspServerCommandSpec,
+    workspaceRoot: string,
+    requestTimeoutMs: number,
+    allowUnsandboxedDev: boolean = false
+  ) {
     this.spec = spec;
     this.workspaceRoot = workspaceRoot;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.allowUnsandboxedDev = allowUnsandboxedDev;
   }
 
   async ensureInitialized(): Promise<void> {
@@ -135,6 +144,20 @@ class StdioLspConnection {
   }
 
   private async spawnAndInitialize(): Promise<void> {
+    const probe = probeBwrapFunctional();
+    if (!probe.ok && !this.allowUnsandboxedDev) {
+      throw new SandboxUnavailableError(
+        process.platform === "darwin"
+          ? `SANDBOX_UNAVAILABLE: LSP server execution failed for ${this.spec.languageId} (bubblewrap is not supported on macOS darwin). Refusing unconfined execution without explicit allowUnsandboxedDev: true.`
+          : `SANDBOX_UNAVAILABLE: LSP server execution failed for ${this.spec.languageId} (bubblewrap is not functional on Linux host: ${probe.reason ?? "unknown"}). Refusing unconfined execution without explicit allowUnsandboxedDev: true.`
+      );
+    }
+    if (!probe.ok) {
+      console.warn(
+        `[APEX_CONFINEMENT_WARNING] Running unconfined development LSP server '${this.spec.command}' for ${this.spec.languageId} on ${process.platform}. Kernel namespaces disabled.`
+      );
+    }
+
     const sanitizedEnv: NodeJS.ProcessEnv = {
       PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
       HOME: process.env.HOME ?? "/tmp",
@@ -398,6 +421,7 @@ export class LspClientManager {
   private readonly connections = new Map<string, StdioLspConnection>();
   private readonly requestTimeoutMs: number;
   private readonly diagnosticsWaitMs: number;
+  private readonly allowUnsandboxedDev: boolean;
   readonly touchedFiles: string[] = [];
 
   constructor(opts: LspManagerOptions) {
@@ -406,6 +430,7 @@ export class LspClientManager {
     this.trustedRepo = opts.trustedRepo ?? true;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 5_000;
     this.diagnosticsWaitMs = opts.diagnosticsWaitMs ?? 200;
+    this.allowUnsandboxedDev = opts.allowUnsandboxedDev ?? false;
 
     if (!this.trustedRepo) return;
 
@@ -433,7 +458,7 @@ export class LspClientManager {
     const key = `${spec.languageId}:${spec.command}`;
     let conn = this.connections.get(key);
     if (!conn) {
-      conn = new StdioLspConnection(spec, this.workspaceRoot, this.requestTimeoutMs);
+      conn = new StdioLspConnection(spec, this.workspaceRoot, this.requestTimeoutMs, this.allowUnsandboxedDev);
       this.connections.set(key, conn);
     }
     return conn;
@@ -512,7 +537,8 @@ export class LspClientManager {
         `</lsp-diagnostics>`;
 
       return { diagnostics, formattedTailBlock };
-    } catch {
+    } catch (err) {
+      if (err instanceof SandboxUnavailableError) throw err;
       return { diagnostics: [], formattedTailBlock: "" };
     }
   }
@@ -564,7 +590,7 @@ export class LspClientManager {
         (() => {
           const firstSpec = Array.from(this.extToSpec.values())[0];
           if (!firstSpec) return null;
-          const c = new StdioLspConnection(firstSpec, this.workspaceRoot, this.requestTimeoutMs);
+          const c = new StdioLspConnection(firstSpec, this.workspaceRoot, this.requestTimeoutMs, this.allowUnsandboxedDev);
           this.connections.set(`${firstSpec.languageId}:${firstSpec.command}`, c);
           return c;
         })();

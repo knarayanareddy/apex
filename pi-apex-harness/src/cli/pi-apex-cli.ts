@@ -53,6 +53,7 @@ export interface PiApexCliParsed {
   enableCua: boolean;
   obsidianVaultRoot?: string;
   allowUnsandboxedDev: boolean;
+  allowSameDeviceDev: boolean;
   webMode: boolean;
   webHost: string;
   webPort: number;
@@ -75,6 +76,9 @@ export function parsePiApexCliArgs(
   let enableCua = false;
   let obsidianVaultArg: string | undefined;
   let allowUnsandboxedDev = process.env["PI_APEX_ALLOW_UNSANDBOXED"] === "1";
+  let allowSameDeviceDev =
+    process.env["PI_APEX_ALLOW_SAME_DEVICE_DEV"] === "1" ||
+    process.env["PI_APEX_ALLOW_UNSANDBOXED"] === "1";
   let webMode = false;
   let webHost = "127.0.0.1";
   let webPort = 4310;
@@ -135,6 +139,8 @@ export function parsePiApexCliArgs(
       obsidianVaultArg = arg.slice("--obsidian-vault=".length);
     } else if (arg === "--allow-unsandboxed-dev") {
       allowUnsandboxedDev = true;
+    } else if (arg === "--allow-same-device-dev") {
+      allowSameDeviceDev = true;
     } else if (arg === "--web") {
       webMode = true;
     } else if (arg === "--host" && i + 1 < rawArgv.length) {
@@ -179,6 +185,7 @@ export function parsePiApexCliArgs(
     enableCua,
     ...(obsidianVaultRoot ? { obsidianVaultRoot } : {}),
     allowUnsandboxedDev,
+    allowSameDeviceDev,
     webMode,
     webHost,
     webPort,
@@ -464,6 +471,9 @@ export async function runPiApexCli(
     return 1;
   }
 
+  const isLocalSlashCommand =
+    isPrintMode && areAllMessagesLocalSlashCommands(piArgs.messages);
+
   const controller = await createRing4Runtime({
     workspaceRoot: parsed.cwd,
     surfacesDir: parsed.surfacesDir,
@@ -471,6 +481,10 @@ export async function runPiApexCli(
     sandboxMode: parsed.sandboxMode,
     durabilityMode: parsed.durabilityMode,
     allowUnsandboxedDev: parsed.allowUnsandboxedDev,
+    allowSameDeviceDev:
+      parsed.allowSameDeviceDev ||
+      parsed.allowUnsandboxedDev ||
+      isLocalSlashCommand,
     modelRuntime,
     model: resolvedModel,
     thinkingLevel,
