@@ -57,7 +57,7 @@ export interface OutboundChannelRequest {
   replyToMessageId?: string;
 }
 
-export type GatewayDeliveryStatus = "confirmed" | "staged" | "unconfigured" | "failed" | "unknown";
+export type GatewayDeliveryStatus = "confirmed" | "queued" | "unavailable" | "failed" | "unknown" | "staged";
 
 export interface OutboundChannelReceipt {
   deliveryId: string;
@@ -252,6 +252,9 @@ export class OmniChannelGateway {
     formattedPrompt: string;
   }) => Promise<string>;
   private baileysState: WhatsAppBaileysPairingState;
+  private readonly baileysSender?: {
+    send(to: string, text: string): Promise<{ messageId: string }>;
+  };
 
   constructor(opts: {
     workspaceRoot: string;
@@ -262,11 +265,15 @@ export class OmniChannelGateway {
       envelope: InboundChannelEnvelope;
       formattedPrompt: string;
     }) => Promise<string>;
+    baileysSender?: {
+      send(to: string, text: string): Promise<{ messageId: string }>;
+    };
   }) {
     this.workspaceRoot = path.resolve(opts.workspaceRoot);
     this.db = opts.db;
     this.credentials = opts.credentials ?? {};
     this.turnHandler = opts.turnHandler;
+    this.baileysSender = opts.baileysSender;
 
     const waAuthDir = path.join(this.workspaceRoot, ".harness", "whatsapp-auth");
     fs.mkdirSync(waAuthDir, { recursive: true, mode: 0o700 });
@@ -557,136 +564,246 @@ export class OmniChannelGateway {
     let externalMessageId = `local_${crypto.randomBytes(4).toString("hex")}`;
     let transportDetail = "queued-local-adapter";
     let delivered = false;
-    let deliveryStatus: GatewayDeliveryStatus = "unconfigured";
+    let deliveryStatus: GatewayDeliveryStatus = "unavailable";
 
     if (custom) {
-      const res = await custom.send({ ...req, text: safeText });
-      externalMessageId = res.externalMessageId;
-      transportDetail = res.transportDetail;
-      delivered = true;
-      deliveryStatus = "confirmed";
-    } else if (req.platform === "telegram" && this.credentials.telegram?.botToken) {
-      const base = (this.credentials.telegram.apiBaseUrl ?? "https://api.telegram.org").replace(
-        /\/+$/,
-        ""
-      );
-      const resp = await fetch(
-        `${base}/bot${this.credentials.telegram.botToken}/sendMessage`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: req.channelId,
-            text: safeText,
-            ...(req.threadId ? { message_thread_id: Number(req.threadId) } : {})
-          })
-        }
-      );
-      if (!resp.ok) throw new Error(`TELEGRAM_SEND_FAILED: HTTP ${resp.status}`);
-      const data = (await resp.json()) as { result?: { message_id?: number | string } };
-      externalMessageId = String(data.result?.message_id ?? externalMessageId);
-      transportDetail = "telegram-bot-api";
-      delivered = true;
-      deliveryStatus = "confirmed";
-    } else if (req.platform === "discord" && this.credentials.discord?.botToken) {
-      const base = (
-        this.credentials.discord.apiBaseUrl ?? "https://discord.com/api/v10"
-      ).replace(/\/+$/, "");
-      const resp = await fetch(`${base}/channels/${req.channelId}/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bot ${this.credentials.discord.botToken}`
-        },
-        body: JSON.stringify({ content: safeText.slice(0, 2000) })
-      });
-      if (!resp.ok) throw new Error(`DISCORD_SEND_FAILED: HTTP ${resp.status}`);
-      const data = (await resp.json()) as { id?: string };
-      externalMessageId = String(data.id ?? externalMessageId);
-      transportDetail = "discord-rest-v10";
-      delivered = true;
-      deliveryStatus = "confirmed";
-    } else if (req.platform === "slack" && this.credentials.slack?.botToken) {
-      const base = (this.credentials.slack.apiBaseUrl ?? "https://slack.com/api").replace(
-        /\/+$/,
-        ""
-      );
-      const resp = await fetch(`${base}/chat.postMessage`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.credentials.slack.botToken}`
-        },
-        body: JSON.stringify({
-          channel: req.channelId,
-          text: safeText,
-          ...(req.threadId ? { thread_ts: req.threadId } : {})
-        })
-      });
-      if (!resp.ok) throw new Error(`SLACK_SEND_FAILED: HTTP ${resp.status}`);
-      const data = (await resp.json()) as { ts?: string };
-      externalMessageId = String(data.ts ?? externalMessageId);
-      transportDetail = "slack-web-api";
-      delivered = true;
-      deliveryStatus = "confirmed";
-    } else if (req.platform === "whatsapp_cloud" && this.credentials.whatsappCloud?.accessToken) {
-      const cfg = this.credentials.whatsappCloud;
-      const base = (cfg.apiBaseUrl ?? "https://graph.facebook.com/v21.0").replace(/\/+$/, "");
-      const resp = await fetch(`${base}/${cfg.phoneNumberId}/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${cfg.accessToken}`
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          to: req.channelId,
-          type: "text",
-          text: { body: safeText }
-        })
-      });
-      if (!resp.ok) throw new Error(`WHATSAPP_CLOUD_SEND_FAILED: HTTP ${resp.status}`);
-      const data = (await resp.json()) as { messages?: Array<{ id?: string }> };
-      externalMessageId = String(data.messages?.[0]?.id ?? externalMessageId);
-      transportDetail = "whatsapp-cloud-graph-v21";
-      delivered = true;
-      deliveryStatus = "confirmed";
-    } else if (req.platform === "signal" && this.credentials.signal?.rpcUrl) {
-      const resp = await fetch(this.credentials.signal.rpcUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "send",
-          id: crypto.randomUUID(),
-          params: {
-            account: this.credentials.signal.accountE164,
-            recipient: [req.channelId],
-            message: safeText
-          }
-        })
-      });
-      if (!resp.ok) throw new Error(`SIGNAL_RPC_SEND_FAILED: HTTP ${resp.status}`);
-      const data = (await resp.json()) as { result?: { timestamp?: number | string } };
-      externalMessageId = String(data.result?.timestamp ?? externalMessageId);
-      transportDetail = "signal-cli-jsonrpc";
-      delivered = true;
-      deliveryStatus = "confirmed";
-    } else if (req.platform === "whatsapp_baileys") {
-      externalMessageId = `baileys_${crypto.randomBytes(4).toString("hex")}`;
-      if (this.baileysState.connected) {
-        transportDetail = "whatsapp-baileys-md-bridge";
+      try {
+        const res = await custom.send({ ...req, text: safeText });
+        externalMessageId = res.externalMessageId;
+        transportDetail = res.transportDetail;
         delivered = true;
         deliveryStatus = "confirmed";
-      } else {
-        transportDetail = "whatsapp-baileys-staged";
+      } catch (err) {
+        externalMessageId = `fail_${crypto.randomBytes(4).toString("hex")}`;
+        transportDetail = `custom-adapter-failed: ${err instanceof Error ? err.message : String(err)}`;
         delivered = false;
-        deliveryStatus = "staged";
+        deliveryStatus = "failed";
+      }
+    } else if (req.platform === "telegram") {
+      if (!this.credentials.telegram?.botToken) {
+        transportDetail = "unconfigured-telegram";
+        delivered = false;
+        deliveryStatus = "unavailable";
+      } else {
+        const base = (this.credentials.telegram.apiBaseUrl ?? "https://api.telegram.org").replace(/\/+$/, "");
+        try {
+          const resp = await fetch(`${base}/bot${this.credentials.telegram.botToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: req.channelId,
+              text: safeText,
+              ...(req.threadId ? { message_thread_id: Number(req.threadId) } : {})
+            }),
+            signal: AbortSignal.timeout(10_000)
+          });
+          const data = (await resp.json().catch(() => null)) as {
+            ok?: boolean;
+            result?: { message_id?: number | string };
+            description?: string;
+          } | null;
+          if (resp.ok && data?.ok === true && data?.result?.message_id !== undefined) {
+            externalMessageId = String(data.result.message_id);
+            transportDetail = "telegram-bot-api";
+            delivered = true;
+            deliveryStatus = "confirmed";
+          } else {
+            delivered = false;
+            deliveryStatus = "failed";
+            transportDetail = `telegram:${data?.description || `http_${resp.status}`}`;
+          }
+        } catch (err) {
+          delivered = false;
+          deliveryStatus = "unknown";
+          transportDetail = `telegram:timeout_or_network_error (${err instanceof Error ? err.message : String(err)})`;
+        }
+      }
+    } else if (req.platform === "discord") {
+      if (!this.credentials.discord?.botToken) {
+        transportDetail = "unconfigured-discord";
+        delivered = false;
+        deliveryStatus = "unavailable";
+      } else {
+        const base = (this.credentials.discord.apiBaseUrl ?? "https://discord.com/api/v10").replace(/\/+$/, "");
+        try {
+          const resp = await fetch(`${base}/channels/${req.channelId}/messages`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bot ${this.credentials.discord.botToken}`
+            },
+            body: JSON.stringify({ content: safeText.slice(0, 2000) }),
+            signal: AbortSignal.timeout(10_000)
+          });
+          const data = (await resp.json().catch(() => null)) as { id?: string; message?: string; code?: number } | null;
+          if (resp.ok && data?.id) {
+            externalMessageId = String(data.id);
+            transportDetail = "discord-rest-v10";
+            delivered = true;
+            deliveryStatus = "confirmed";
+          } else {
+            delivered = false;
+            deliveryStatus = "failed";
+            transportDetail = `discord:${data?.message || `http_${resp.status}`}`;
+          }
+        } catch (err) {
+          delivered = false;
+          deliveryStatus = "unknown";
+          transportDetail = `discord:timeout_or_network_error (${err instanceof Error ? err.message : String(err)})`;
+        }
+      }
+    } else if (req.platform === "slack") {
+      if (!this.credentials.slack?.botToken) {
+        transportDetail = "unconfigured-slack";
+        delivered = false;
+        deliveryStatus = "unavailable";
+      } else {
+        const base = (this.credentials.slack.apiBaseUrl ?? "https://slack.com/api").replace(/\/+$/, "");
+        try {
+          const resp = await fetch(`${base}/chat.postMessage`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${this.credentials.slack.botToken}`
+            },
+            body: JSON.stringify({
+              channel: req.channelId,
+              text: safeText,
+              ...(req.threadId ? { thread_ts: req.threadId } : {})
+            }),
+            signal: AbortSignal.timeout(10_000)
+          });
+          const data = (await resp.json().catch(() => null)) as { ok?: boolean; ts?: string; error?: string } | null;
+          if (resp.ok && data?.ok === true && data?.ts) {
+            externalMessageId = String(data.ts);
+            transportDetail = "slack-web-api";
+            delivered = true;
+            deliveryStatus = "confirmed";
+          } else {
+            delivered = false;
+            deliveryStatus = "failed";
+            transportDetail = `slack:${data?.error || (resp.ok ? "ok_false" : `http_${resp.status}`)}`;
+          }
+        } catch (err) {
+          delivered = false;
+          deliveryStatus = "unknown";
+          transportDetail = `slack:timeout_or_network_error (${err instanceof Error ? err.message : String(err)})`;
+        }
+      }
+    } else if (req.platform === "whatsapp_cloud") {
+      const cfg = this.credentials.whatsappCloud;
+      if (!cfg?.accessToken || !cfg?.phoneNumberId) {
+        transportDetail = "unconfigured-whatsapp_cloud";
+        delivered = false;
+        deliveryStatus = "unavailable";
+      } else {
+        const base = (cfg.apiBaseUrl ?? "https://graph.facebook.com/v21.0").replace(/\/+$/, "");
+        try {
+          const resp = await fetch(`${base}/${cfg.phoneNumberId}/messages`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${cfg.accessToken}`
+            },
+            body: JSON.stringify({
+              messaging_product: "whatsapp",
+              to: req.channelId,
+              type: "text",
+              text: { body: safeText }
+            }),
+            signal: AbortSignal.timeout(10_000)
+          });
+          const data = (await resp.json().catch(() => null)) as {
+            messages?: Array<{ id?: string }>;
+            error?: { message?: string };
+          } | null;
+          if (resp.ok && data?.messages?.[0]?.id) {
+            externalMessageId = String(data.messages[0].id);
+            transportDetail = "whatsapp-cloud-graph-v21";
+            delivered = true;
+            deliveryStatus = "confirmed";
+          } else {
+            delivered = false;
+            deliveryStatus = "failed";
+            transportDetail = `whatsapp_cloud:${data?.error?.message || `http_${resp.status}`}`;
+          }
+        } catch (err) {
+          delivered = false;
+          deliveryStatus = "unknown";
+          transportDetail = `whatsapp_cloud:timeout_or_network_error (${err instanceof Error ? err.message : String(err)})`;
+        }
+      }
+    } else if (req.platform === "signal") {
+      if (!this.credentials.signal?.rpcUrl || !this.credentials.signal?.accountE164) {
+        transportDetail = "unconfigured-signal";
+        delivered = false;
+        deliveryStatus = "unavailable";
+      } else {
+        try {
+          const resp = await fetch(this.credentials.signal.rpcUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              method: "send",
+              id: crypto.randomUUID(),
+              params: {
+                account: this.credentials.signal.accountE164,
+                recipient: [req.channelId],
+                message: safeText
+              }
+            }),
+            signal: AbortSignal.timeout(10_000)
+          });
+          const data = (await resp.json().catch(() => null)) as {
+            result?: { timestamp?: number | string };
+            error?: { message?: string };
+          } | null;
+          if (resp.ok && data?.result?.timestamp !== undefined) {
+            externalMessageId = String(data.result.timestamp);
+            transportDetail = "signal-cli-jsonrpc";
+            delivered = true;
+            deliveryStatus = "confirmed";
+          } else {
+            delivered = false;
+            deliveryStatus = "failed";
+            transportDetail = `signal:${data?.error?.message || `http_${resp.status}`}`;
+          }
+        } catch (err) {
+          delivered = false;
+          deliveryStatus = "unknown";
+          transportDetail = `signal:timeout_or_network_error (${err instanceof Error ? err.message : String(err)})`;
+        }
+      }
+    } else if (req.platform === "whatsapp_baileys") {
+      externalMessageId = `baileys_${crypto.randomBytes(4).toString("hex")}`;
+      if (this.baileysSender && this.baileysState.connected) {
+        try {
+          const res = await this.baileysSender.send(req.channelId, safeText);
+          externalMessageId = res.messageId;
+          transportDetail = "whatsapp-baileys-md-bridge";
+          delivered = true;
+          deliveryStatus = "confirmed";
+        } catch (err) {
+          delivered = false;
+          deliveryStatus = "failed";
+          transportDetail = `whatsapp-baileys:send_failed (${err instanceof Error ? err.message : String(err)})`;
+        }
+      } else if (this.baileysState.connected) {
+        // Paired locally, but socket is offline / no live transport attached
+        transportDetail = "whatsapp-baileys-queued-offline";
+        delivered = false;
+        deliveryStatus = "queued";
+      } else {
+        // Not paired / absent credentials
+        transportDetail = "whatsapp-baileys-unpaired";
+        delivered = false;
+        deliveryStatus = "unavailable";
       }
     } else {
       transportDetail = `unconfigured-${req.platform}`;
       delivered = false;
-      deliveryStatus = "unconfigured";
+      deliveryStatus = "unavailable";
     }
 
     const timestampMs = Date.now();

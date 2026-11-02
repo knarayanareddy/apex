@@ -109,6 +109,7 @@ async function runRing1Tests(): Promise<void> {
     const r0Baseline = await createRing0Harness({
       workspaceRoot: ws,
       surfacesDir: surfaces,
+      allowUnsandboxedDev: true,
       modelRuntime: sharedRuntime,
       model: faux.getModel()
     });

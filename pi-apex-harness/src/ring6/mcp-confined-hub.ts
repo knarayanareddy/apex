@@ -11,7 +11,7 @@
  *
  * 4-LAYER CONFINEMENT INVARIANTS:
  *  - `+0` Active Schema Tokens: Exposed via deferred `mcp_hub` tool (`exposure: "deferred"`), keeping
- *    active tool schema strictly at `1,073 === 1,073 o200k_base` tokens regardless of MCP server count.
+ *    active tool schema strictly at `1,053 === 1,053 o200k_base` tokens regardless of MCP server count.
  *  - Layer 1 (Workspace Trust Gate): Workspace-sourced stdio MCP servers fail closed with
  *    `UNTRUSTED_WORKSPACE_MCP_BLOCKED` when `workspaceTrusted === false`.
  *  - Layer 2 (Clean-Env Stdio Isolation): `StdioTransport` runs with `inheritEnv: false` and a
@@ -41,7 +41,7 @@ import {
 } from "@earendil-works/pi-mcp";
 import { readWorkspaceFileSafe } from "../core/safe-path.ts";
 import { type PrivateSpillStore, scrubSecretsInfallible } from "../core/spill-store.ts";
-import { probeBwrapFunctional, SandboxUnavailableError } from "../core/bwrap-sandbox.ts";
+import { buildMinimalBwrapCommandArgv, probeBwrapFunctional, SandboxUnavailableError } from "../core/bwrap-sandbox.ts";
 import { validatePrivateStatePreflight } from "../core/private-state-boundary.ts";
 import {
   scanSkillBundle,
@@ -296,7 +296,21 @@ export class ConfinedMcpHub {
           : `SANDBOX_UNAVAILABLE: Stdio MCP execution failed (bubblewrap is not functional on Linux host: ${probe.reason ?? "unknown"}). Refusing unconfined execution without explicit allowUnsandboxedDev: true.`
       );
     }
-    if (!probe.ok) {
+    let commandToSpawn = params.command;
+    let argsToSpawn = params.args ?? [];
+    if (probe.ok) {
+      commandToSpawn = "bwrap";
+      argsToSpawn = buildMinimalBwrapCommandArgv(
+        params.command,
+        params.args ?? [],
+        params.cwd ?? this.workspaceRoot,
+        {
+          workspaceRoot: this.workspaceRoot,
+          mode: "workspace-write",
+          allowUnsandboxedDev: this.allowUnsandboxedDev
+        }
+      );
+    } else {
       console.warn(
         `[APEX_CONFINEMENT_WARNING] Running unconfined development stdio MCP server '${params.name}' on ${process.platform}. Kernel namespaces disabled.`
       );
@@ -304,8 +318,8 @@ export class ConfinedMcpHub {
 
     const cleanEnv = sanitizeMcpStdioEnv(process.env, params.env);
     const transport = new StdioTransport({
-      command: params.command,
-      args: params.args ?? [],
+      command: commandToSpawn,
+      args: argsToSpawn,
       cwd: params.cwd ?? this.workspaceRoot,
       inheritEnv: false,
       env: cleanEnv,

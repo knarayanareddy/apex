@@ -21,6 +21,7 @@ import {
   PrivateStateBoundaryError,
   validatePrivateStatePreflight
 } from "../../src/core/private-state-boundary.ts";
+import { PrivateSpillStore } from "../../src/core/spill-store.ts";
 import { StateDb } from "../../src/core/state-db.ts";
 
 console.log("=== Running Batch E: Private State Preflight & Migration Tests ===");
@@ -49,6 +50,35 @@ assert.throws(
   },
   "Default preflight must fail closed on same-device control plane"
 );
+
+// 1b. Missing .harness on first boot must fail closed before creation when allowSameDeviceDev: false
+const unprovisionedWs = fs.mkdtempSync(path.join(os.tmpdir(), "apex-e-unprovisioned-"));
+const missingHarness = path.join(unprovisionedWs, ".harness");
+assert.throws(
+  () => validatePrivateStatePreflight(unprovisionedWs, missingHarness, { allowSameDeviceDev: false }),
+  PrivateStateBoundaryError,
+  "Missing .harness must fail closed on same filesystem before state creation"
+);
+// Standalone StateDb constructor with workspaceRoot must fail closed when allowSameDeviceDev: false
+assert.throws(
+  () => new StateDb(path.join(missingHarness, "state.db"), "crash-safe", {
+    workspaceRoot: unprovisionedWs,
+    allowSameDeviceDev: false
+  }),
+  PrivateStateBoundaryError,
+  "Standalone StateDb constructor must enforce preflight before directory creation"
+);
+// Standalone PrivateSpillStore constructor with workspaceRoot must fail closed when allowSameDeviceDev: false
+assert.throws(
+  () => new PrivateSpillStore({
+    rootDir: path.join(missingHarness, "spill"),
+    workspaceRoot: unprovisionedWs,
+    allowSameDeviceDev: false
+  }),
+  PrivateStateBoundaryError,
+  "Standalone PrivateSpillStore constructor must enforce preflight before directory creation"
+);
+fs.rmSync(unprovisionedWs, { recursive: true, force: true });
 
 // 2. Symlinked control-plane directory must be rejected
 const symlinkWs = fs.mkdtempSync(path.join(os.tmpdir(), "apex-e-symlink-ws-"));

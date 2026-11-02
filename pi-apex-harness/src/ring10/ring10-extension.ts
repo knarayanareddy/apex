@@ -3,7 +3,7 @@
  * (`src/ring10/ring10-extension.ts`).
  *
  * PRESERVED INVARIANTS:
- * - `onboarding_status` registers with `exposure: "deferred"` (`+0` active schema tokens: `1,073 === 1,073`).
+ * - `onboarding_status` registers with `exposure: "deferred"` (`+0` active schema tokens: `1,053 === 1,053`).
  * - `onboarding_status` exposes ONLY masked readiness status — raw keys never enter QuickJS `codemode`.
  * - `/setup` registers via `ExtensionAPI.registerCommand` (`+0` active schema tokens, `0` prefix drift).
  */

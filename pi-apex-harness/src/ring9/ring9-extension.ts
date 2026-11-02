@@ -4,7 +4,7 @@
  * `/swarm`, `/plugin`, `/ledger`) (`src/ring9/ring9-extension.ts`).
  *
  * PRESERVED INVARIANTS:
- * - All 4 Ring 9 tools register strictly with `exposure: "deferred"` (`1,073 === 1,073` `o200k_base`
+ * - All 4 Ring 9 tools register strictly with `exposure: "deferred"` (`1,053 === 1,053` `o200k_base`
  *   active schema tokens — zero schema bloat even when external plugins are installed at runtime!).
  * - All 6 slash commands register via `ExtensionAPI.registerCommand` (`+0` schema tokens, `0` drift).
  */
@@ -395,7 +395,15 @@ export function createRing9Extension(bridge: {
           channelId: match[2]!,
           text: match[3]!
         });
-        const statusVerb = receipt.delivered ? "Delivered" : (receipt.deliveryStatus === "staged" ? "Staged" : "Queued (unconfigured)");
+        const statusVerb = receipt.delivered
+          ? "Delivered"
+          : receipt.deliveryStatus === "queued" || receipt.deliveryStatus === "staged"
+            ? "Queued"
+            : receipt.deliveryStatus === "failed"
+              ? "Delivery Failed"
+              : receipt.deliveryStatus === "unknown"
+                ? "Outcome Unknown"
+                : "Unavailable (unconfigured)";
         emitReport(
           ctx,
           "send",

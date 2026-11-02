@@ -15,7 +15,12 @@
  *   3. Static capability conformance rejects undeclared `child_process`, `process.env` harvesting,
  *      and `eval()` / `new Function()` (`PLUGIN_UNDECLARED_CAPABILITY`).
  * - Plugin tools are invoked through the deferred `plugin_manager` tool inside QuickJS WASM
- *   `codemode`, adding **ZERO** tokens (`1,073 === 1,073` `o200k_base`) to the active LLM schema!
+ *   `codemode`, adding **ZERO** tokens (`1,053 === 1,053` `o200k_base`) to the active LLM schema!
+ * - EXECUTION CONFINEMENT LIMITATION: Capability auditing and static quarantine scans
+ *   provide pre-import inspection; however, JavaScript modules loaded into the host process
+ *   via dynamic `import()` execute within the host Node.js / V8 runtime without kernel or
+ *   process-boundary sandbox isolation. Code imported into the host process is not confined
+ *   by capability auditing alone.
  */
 
 import crypto from "node:crypto";

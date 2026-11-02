@@ -12,7 +12,7 @@
  *  - R8-4: Personal 3-Repo SWE Eval & Harness² `EXPERIENCE.md` Before/After A/B Prompt-Cache
  *          Benchmark Suite (`runPersonalSweBenchmarkSuite` + `npm run bench` CLI).
  *  - R8-5: All 15 deferred specialist tools (`tools.github_issue` in QuickJS WASM `codemode`),
- *          all 15 zero-token slash commands (`1,073 === 1,073 o200k_base` tokens, `0` drift),
+ *          all 15 zero-token slash commands (`1,053 === 1,053 o200k_base` tokens, `0` drift),
  *          and Cockpit v4 (`Tab 8` + `/api/github-issue` + `/api/bench` + real Headless Chromium
  *          156 clicking all 8 tabs).
  *  - R8-6: Portable versioned personal archive + `.sha256` + clean extraction,

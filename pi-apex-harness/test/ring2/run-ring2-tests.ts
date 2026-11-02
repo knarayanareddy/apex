@@ -592,10 +592,21 @@ async function runRing2Suite(): Promise<void> {
         });
         await new Promise((r) => setTimeout(r, 450));
         const expiredPoll = r2.ptyManager.poll(shortLease.id);
-        assert.ok(
-          expiredPoll.status === "lease_expired" || expiredPoll.status === "cleanup_unverified",
-          `Expected status lease_expired or cleanup_unverified, got ${expiredPoll.status}`
-        );
+        if (process.platform === "linux") {
+          assert.equal(
+            expiredPoll.status,
+            "lease_expired",
+            "On Linux with qualified bwrap kernel boundary, lease expiry must verify cleanup"
+          );
+        } else {
+          // On non-Linux (macOS Darwin), unconfined host execution cannot guarantee ownership (ADR 0002).
+          // Unverified cleanup must remain a failure or explicit blocker, never accepted as verified success.
+          assert.equal(
+            expiredPoll.status,
+            "cleanup_unverified",
+            "On macOS host without kernel boundary, cleanup must report cleanup_unverified"
+          );
+        }
       } finally {
         if (prevOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
         else process.env.OPENAI_API_KEY = prevOpenAiKey;

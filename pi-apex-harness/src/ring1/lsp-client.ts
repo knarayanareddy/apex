@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveAndValidateWorkspacePath } from "../core/monotonic-guard.ts";
 import { readWorkspaceFileSafe } from "../core/safe-path.ts";
-import { probeBwrapFunctional, SandboxUnavailableError } from "../core/bwrap-sandbox.ts";
+import { buildMinimalBwrapCommandArgv, probeBwrapFunctional, SandboxUnavailableError } from "../core/bwrap-sandbox.ts";
 import type { GuardrailsConfig } from "../types.ts";
 
 export type LspOperationName =
@@ -152,7 +152,16 @@ class StdioLspConnection {
           : `SANDBOX_UNAVAILABLE: LSP server execution failed for ${this.spec.languageId} (bubblewrap is not functional on Linux host: ${probe.reason ?? "unknown"}). Refusing unconfined execution without explicit allowUnsandboxedDev: true.`
       );
     }
-    if (!probe.ok) {
+    let commandToSpawn = this.spec.command;
+    let argsToSpawn = this.spec.args;
+    if (probe.ok) {
+      commandToSpawn = "bwrap";
+      argsToSpawn = buildMinimalBwrapCommandArgv(this.spec.command, this.spec.args, this.workspaceRoot, {
+        workspaceRoot: this.workspaceRoot,
+        mode: "workspace-write",
+        allowUnsandboxedDev: this.allowUnsandboxedDev
+      });
+    } else {
       console.warn(
         `[APEX_CONFINEMENT_WARNING] Running unconfined development LSP server '${this.spec.command}' for ${this.spec.languageId} on ${process.platform}. Kernel namespaces disabled.`
       );
@@ -165,7 +174,7 @@ class StdioLspConnection {
       LANG: "C.UTF-8"
     };
 
-    const child = spawn(this.spec.command, this.spec.args, {
+    const child = spawn(commandToSpawn, argsToSpawn, {
       cwd: this.workspaceRoot,
       env: sanitizedEnv,
       stdio: ["pipe", "pipe", "pipe"]

@@ -35,6 +35,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Terminal } from "@earendil-works/pi-tui";
 import { captureTurnCheckpoint } from "../core/git-rewind.ts";
+import { validatePrivateStatePreflight } from "../core/private-state-boundary.ts";
 import { ALL_APEX_SLASH_COMMANDS, createRing4Runtime, type Ring4HarnessInstance } from "../ring4/ring4-runtime.ts";
 import { MissionControlServer } from "../ring5/mission-control-server.ts";
 import type { DurabilityMode, SandboxMode } from "../types.ts";
@@ -292,7 +293,7 @@ function seedMissionControlDemo(h: Ring4HarnessInstance, workspaceRoot: string):
   h.stateDb.insertEpisode({
     sessionId: h.session.sessionManager.getSessionId(),
     repoRoot: workspaceRoot,
-    summary: "Verified Ring 0 openat2 RESOLVE_BENEATH confinement, SQLite WAL crash recovery, and 1,073-token pinned prefix.",
+    summary: "Verified Ring 0 openat2 RESOLVE_BENEATH confinement, SQLite WAL crash recovery, and 1,053-token pinned prefix.",
     filesTouched: ["src/core/linux-fs-bridge.ts", "src/core/wal-recovery.ts"],
     outcome: "verified"
   });
@@ -425,7 +426,7 @@ export async function runPiApexCli(
     webDemoFaux.setResponses(
       Array.from({ length: 32 }, (_, idx) =>
         fauxAssistantMessage(
-          `[Pi-Apex Local Cockpit Demo #${idx + 1}] Verified 1,073-token pinned prefix (0 drift), openat2 RESOLVE_BENEATH confinement, and SQLite WAL telemetry. Configure ANTHROPIC_API_KEY / OPENAI_API_KEY or pass --model & --api-key to connect a live frontier model.`
+          `[Pi-Apex Local Cockpit Demo #${idx + 1}] Verified 1,053-token pinned prefix (0 drift), openat2 RESOLVE_BENEATH confinement, and SQLite WAL telemetry. Configure ANTHROPIC_API_KEY / OPENAI_API_KEY or pass --model & --api-key to connect a live frontier model.`
         )
       )
     );
@@ -439,18 +440,6 @@ export async function runPiApexCli(
       ? (await resolveModelScopeWithDiagnostics(piArgs.models, modelRuntime)).scopedModels
       : undefined;
 
-  // Build SessionManager matching `--no-session`, `--session`, `--continue`, or default `.harness/sessions`
-  const sessionDir = piArgs.sessionDir
-    ? path.resolve(piArgs.sessionDir)
-    : path.join(parsed.cwd, ".harness", "sessions");
-  const sessionManager = piArgs.noSession
-    ? SessionManager.inMemory(parsed.cwd)
-    : piArgs.session
-      ? SessionManager.open(path.resolve(piArgs.session), sessionDir, parsed.cwd)
-      : piArgs.continue
-        ? SessionManager.continueRecent(parsed.cwd, sessionDir)
-        : SessionManager.create(parsed.cwd, sessionDir);
-
   const isRpcMode = piArgs.mode === "rpc";
   const isJsonMode = piArgs.mode === "json";
   const isPrintMode =
@@ -458,6 +447,33 @@ export async function runPiApexCli(
     (Boolean(piArgs.print) ||
       isJsonMode ||
       (!isRpcMode && !hostOpts?.terminal && !process.stdin.isTTY && piArgs.messages.length > 0));
+  const isLocalSlashCommand =
+    isPrintMode && areAllMessagesLocalSlashCommands(piArgs.messages);
+
+  // Build SessionManager matching `--no-session`, `--session`, `--continue`, or default `.harness/sessions`
+  const sessionDir = piArgs.sessionDir
+    ? path.resolve(piArgs.sessionDir)
+    : path.join(parsed.cwd, ".harness", "sessions");
+
+  if (!piArgs.noSession) {
+    const cpDir = sessionDir.startsWith(path.join(parsed.cwd, ".harness"))
+      ? path.join(parsed.cwd, ".harness")
+      : sessionDir;
+    validatePrivateStatePreflight(parsed.cwd, cpDir, {
+      allowSameDeviceDev:
+        parsed.allowSameDeviceDev ||
+        parsed.allowUnsandboxedDev ||
+        isLocalSlashCommand
+    });
+  }
+
+  const sessionManager = piArgs.noSession
+    ? SessionManager.inMemory(parsed.cwd)
+    : piArgs.session
+      ? SessionManager.open(path.resolve(piArgs.session), sessionDir, parsed.cwd)
+      : piArgs.continue
+        ? SessionManager.continueRecent(parsed.cwd, sessionDir)
+        : SessionManager.create(parsed.cwd, sessionDir);
 
   // Guard non-interactive LLM prompts when no model credentials exist, while allowing keyless `/doctor`, `/quarantine`, etc.!
   if (
@@ -470,9 +486,6 @@ export async function runPiApexCli(
     );
     return 1;
   }
-
-  const isLocalSlashCommand =
-    isPrintMode && areAllMessagesLocalSlashCommands(piArgs.messages);
 
   const controller = await createRing4Runtime({
     workspaceRoot: parsed.cwd,

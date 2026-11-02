@@ -7,7 +7,7 @@
  *  - R9-2: Custom `.agents/agents/*.md` personas (`skills-guard-v10` poisoned persona block), `DAG_CYCLE_DETECTED`,
  *          real multi-wave `dag` over isolated Git worktrees (`AgentBlackboard` + `0` leaked worktrees), & `debate` -> Ledger.
  *  - R9-3: Quarantine-scanned `ExternalPluginHost` (`PLUGIN_QUARANTINE_BLOCKED` on `child_process`/`process.env`/injection,
- *          hot-install + QuickJS WASM `codemode` execution with `1,073 === 1,073` active schema tokens, & `disablePlugin`).
+ *          hot-install + QuickJS WASM `codemode` execution with `1,053 === 1,053` active schema tokens, & `disablePlugin`).
  *  - R9-4: Hash-chained `SelfLearningLedger` (automatic `/pr` self-heal capture, secret scrubbing, poisoned-lesson
  *          quarantine, Bayesian auto-demotion, append-only `rollbackEntry` tombstone, next-boot `materializeSurfaces`
  *          with `0` live prefix drift, & `.jsonl` tamper detection).
@@ -157,6 +157,9 @@ async function main(): Promise<void> {
               accountE164: "+31600000001",
               rpcUrl: `${mockTransport.baseUrl}/signal-rpc`
             }
+          },
+          baileysSender: {
+            send: async (to, text) => ({ messageId: "baileys_test_msg_id" })
           },
           turnHandler: async ({ envelope }) => `Reply[${envelope.platform}]: ${envelope.text}`
         });
@@ -583,7 +586,7 @@ async function main(): Promise<void> {
         /PLUGIN_QUARANTINE_BLOCKED.*PLUGIN_UNDECLARED_CAPABILITY/
       );
 
-      // Verify inside real QuickJS WASM `codemode` with `1,073 === 1,073` active schema tokens!
+      // Verify inside real QuickJS WASM `codemode` with `1,053 === 1,053` active schema tokens!
       const faux = fauxProvider();
       faux.setResponses([
         fauxAssistantMessage([

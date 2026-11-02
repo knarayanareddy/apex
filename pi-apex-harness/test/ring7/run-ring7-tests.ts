@@ -11,7 +11,7 @@
  *          -> Codex `mergeBase...HEAD` + BugBot P0 gate -> sandboxed CI -> `.harness/prs/<prId>.md`
  *          + QuickJS WASM `codemode` `tools.pr_pipeline`).
  *  - R7-4: All 13 zero-token operator slash commands (`/pr`, `/handoff`, `/preset`, `/bookmark`, `/doctor`)
- *          preserving `1,073 === 1,073 o200k_base` active schema tokens & `0` prefix drift.
+ *          preserving `1,053 === 1,053 o200k_base` active schema tokens & `0` prefix drift.
  *  - R7-5: Mission-Control Cockpit v3 live HTTP/SSE (`/api/pr-pipeline`, `/api/handoff`, `/api/presets`,
  *          `/api/browser` live Chromium CDP, `/api/workspaces` multi-repo switch, zero `localhost` literals).
  *  - R7-6: Portable release archive + `.sha256` + clean extraction & `/doctor`.

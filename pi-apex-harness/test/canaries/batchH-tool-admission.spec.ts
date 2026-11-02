@@ -179,6 +179,16 @@ async function runBatchHTests(): Promise<void> {
         false
       );
 
+      // Authoritative default-deny when no allowlist is supplied: unexpected tools fail closed
+      const unlistedDecision = controller.admit({
+        workspaceRoot: ws,
+        sessionId: "session-switched-456",
+        toolName: "unexpected_malicious_tool",
+        toolCallId: "call_unlisted"
+      });
+      assert.equal(unlistedDecision.allowed, false);
+      assert.match(unlistedDecision.reason!, /TOOL_NOT_ADMITTED/);
+
       console.log("  [PASS] H2 verified: Workspace and session binding enforced strictly.");
     } finally {
       cleanup();
@@ -366,6 +376,81 @@ async function runBatchHTests(): Promise<void> {
         assert.match(rows[0]!.error_text, /TOOL_NOT_ADMITTED/);
 
         console.log("  [PASS] H6 verified: Denied action produces ABORTED_CLEAN in WAL and zero side effects.");
+      } finally {
+        harness.dispose();
+      }
+    } finally {
+      cleanup();
+    }
+  }
+
+  // =========================================================================
+  // H7: Public-Path Default-Deny & Nested Bound Negative Regression
+  // =========================================================================
+  {
+    console.log("--- H7: Default harness unconfigured allowlist & nested depth rejection ---");
+    const { ws, surfaces, cleanup } = setupWorkspace("h7");
+    try {
+      const harness = await createRing0Harness({
+        workspaceRoot: ws,
+        surfacesDir: surfaces,
+        allowUnsandboxedDev: true
+        // Note: NO allowedTools specified; authoritative default-deny must still guard unrecognized tools!
+      });
+
+      try {
+        // 1. Registered tools are permitted
+        assert.equal(harness.admissionController.isToolAllowed("read"), true);
+        assert.equal(harness.admissionController.isToolAllowed("bash"), true);
+        assert.equal(harness.admissionController.isToolAllowed("write"), true);
+        assert.equal(harness.admissionController.isToolAllowed("edit"), true);
+        assert.equal(harness.admissionController.isToolAllowed("codemode"), true);
+
+        // 2. Unregistered/injected tool fails closed with TOOL_NOT_ADMITTED
+        assert.equal(harness.admissionController.isToolAllowed("unauthorized_shell_injector"), false);
+        const deniedDecision = harness.admissionController.admit({
+          toolName: "unauthorized_shell_injector",
+          toolCallId: "call_inj_1"
+        });
+        assert.equal(deniedDecision.allowed, false);
+        assert.match(deniedDecision.reason!, /TOOL_NOT_ADMITTED/);
+
+        // assertAdmitted throws ToolAdmissionError
+        assert.throws(
+          () =>
+            harness.admissionController.assertAdmitted({
+              toolName: "unauthorized_shell_injector",
+              toolCallId: "call_inj_2"
+            }),
+          (err: unknown) =>
+            err instanceof ToolAdmissionError &&
+            err.code === "TOOL_NOT_ADMITTED" &&
+            err.toolName === "unauthorized_shell_injector"
+        );
+
+        // 3. Nested tool execution exceeding depth limit (depth 2) fails closed
+        const nestedExceeded = harness.admissionController.admit({
+          toolName: "read",
+          toolCallId: "call_top/sub_1/sub_deep_2",
+          parentToolCallId: "call_top/sub_1"
+        });
+        assert.equal(nestedExceeded.allowed, false);
+        assert.equal(nestedExceeded.depth, 2);
+        assert.match(nestedExceeded.reason!, /NESTED_DEPTH_EXCEEDED/);
+
+        assert.throws(
+          () =>
+            harness.admissionController.assertAdmitted({
+              toolName: "read",
+              toolCallId: "call_top/sub_1/sub_deep_2",
+              parentToolCallId: "call_top/sub_1"
+            }),
+          (err: unknown) =>
+            err instanceof ToolAdmissionError &&
+            err.code === "NESTED_DEPTH_EXCEEDED"
+        );
+
+        console.log("  [PASS] H7 verified: Default harness enforces default-deny and rejects nested depth > 1.");
       } finally {
         harness.dispose();
       }

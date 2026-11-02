@@ -3,7 +3,7 @@
  * Zero-Token Operator Slash Commands (`src/ring7/ring7-extension.ts`).
  *
  * PRESERVED INVARIANTS:
- *  - `pr_pipeline` registers with `exposure: "deferred"` (`+0` active schema tokens: `1,073 === 1,073`).
+ *  - `pr_pipeline` registers with `exposure: "deferred"` (`+0` active schema tokens: `1,053 === 1,053`).
  *  - `/pr`, `/handoff`, `/preset`, and `/bookmark` register via `ExtensionAPI.registerCommand` (`+0` schema tokens).
  *  - `PresetController` injects `<preset_guidance>` via `before_agent_start`'s `message` field (NOT `systemPrompt`)
  *    and enforces `preset.tools` at the `tool_call` gate, preserving `0` static-prefix SHA-256 drift!

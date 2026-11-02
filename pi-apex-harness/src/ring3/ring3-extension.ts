@@ -2,7 +2,7 @@
  * Ring 3 — Final Self-Evolution, Skill Curation, Memory Dreaming & Computer-Use Extension Pack.
  *
  * Composes `Ring 0 + Ring 1 + Ring 2 + Ring 3` while preserving ALL locked architectural invariants:
- *  - `1,073 === 1,073` `o200k_base` active tool schema tokens (`exposure: "deferred"` across all
+ *  - `1,053 === 1,053` `o200k_base` active tool schema tokens (`exposure: "deferred"` across all
  *    14 specialist tools from Ring 1, Ring 2, and Ring 3 + QuickJS `Codemode`).
  *  - `<= 2,100` `o200k_base` boot-pinned static prefix with `0` mid-session SHA-256 drift.
  *  - Cryptographically pinned `surfaces-immutable/GUARDRAILS.yaml` (`0444`, SHA-256 verified)

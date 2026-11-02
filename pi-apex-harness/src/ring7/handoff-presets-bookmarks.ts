@@ -16,7 +16,7 @@
  *     - Apex Upgrade (Prompt-Cache & Invariant I-01 Fix): Upstream `preset.ts` mutates
  *       `event.systemPrompt` inside `before_agent_start`, invalidating the prompt cache mid-session
  *       and violating `0` static-prefix drift. `PresetController` restricts active tools to the
- *       Ring 0 `<= 1,073`-token core set and injects preset `instructions` at the *turn tail*
+ *       Ring 0 `<= 1,053`-token core set and injects preset `instructions` at the *turn tail*
  *       (`before_agent_start` `message` field, NOT `systemPrompt`) so `session.systemPrompt` SHA-256
  *       remains 100% invariant (`0` drift)!
  *  3. `@earendil-works/pi-coding-agent@1.4.0` — `examples/extensions/bookmark.ts` (MIT License):
@@ -346,7 +346,7 @@ export interface ApexPreset {
   provider?: string;
   model?: string;
   thinkingLevel?: ThinkingLevelName;
-  /** Restricted strictly to Ring 0 direct core tools so active schema tokens stay <= 1,073! */
+  /** Restricted strictly to Ring 0 direct core tools so active schema tokens stay <= 1,053! */
   tools?: string[];
   /** Injected at turn tail (`<preset_guidance>`) — NEVER mutates `session.systemPrompt`! */
   instructions?: string;
@@ -473,7 +473,7 @@ export class PresetController {
 
   /**
    * Enforces `preset.tools` at the `tool_call` gate WITHOUT mutating `session.agent.state.tools`
-   * mid-session — keeping `1,073 === 1,073` schema tokens and `0` prompt-cache prefix SHA-256 drift!
+   * mid-session — keeping `1,053 === 1,053` schema tokens and `0` prompt-cache prefix SHA-256 drift!
    */
   public checkToolCallAllowed(toolName: string): { allowed: boolean; reason?: string } {
     if (!this.activePresetName || !this.activeAllowedTools) {

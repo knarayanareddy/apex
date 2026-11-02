@@ -137,7 +137,7 @@ async function runRing4Suite(): Promise<void> {
     runGitOrThrow(ws, ["commit", "-m", "initial ring4 commit"]);
 
     // =========================================================================
-    // R4-1. Zero Active Schema Bloat (`1,073 === 1,073` o200k_base tokens) +
+    // R4-1. Zero Active Schema Bloat (`1,053 === 1,053` o200k_base tokens) +
     //       All 7 Slash Commands, Tab Completions & Ctrl+Alt+P Registered
     // =========================================================================
     const r0Base = await createRing0Harness({

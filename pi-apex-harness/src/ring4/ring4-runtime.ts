@@ -9,7 +9,7 @@
  *
  * LIFECYCLE GUARANTEES:
  *  - Composes `createRing3Harness` + `createRing4SlashCommandsExtension` + `createRing6Extension`
- *    + `createRing7Extension` (`+0` active schema tokens: `1,073 === 1,073 o200k_base` tokens;
+ *    + `createRing7Extension` (`+0` active schema tokens: `1,053 === 1,053 o200k_base` tokens;
  *    `0` live static-prefix SHA-256 drift across all 14 deferred tools & 13 slash commands).
  *  - Hooks `session_shutdown` idempotently so `runtimeHost.newSession()`, `switchSession()`,
  *    `switchWorkspace()`, `fork()`, and `dispose()` cleanly close `ConfinedMcpHub`,

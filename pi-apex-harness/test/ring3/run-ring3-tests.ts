@@ -87,7 +87,7 @@ async function runRing3Suite(): Promise<void> {
 
     // =========================================================================
     // R3-1. Zero Active Schema Bloat Across Ring 1-3 Deferred Specialist Tools
-    //       (`1,073 === 1,073` o200k_base tokens) + QuickJS `codemode` execution
+    //       (`1,053 === 1,053` o200k_base tokens) + QuickJS `codemode` execution
     // =========================================================================
     const r0Base = await createRing0Harness({
       workspaceRoot: wsR0,

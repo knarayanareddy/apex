@@ -3,7 +3,7 @@
  * + `#<num>` Interactive Issue Autocomplete (`src/ring8/ring8-extension.ts`).
  *
  * PRESERVED INVARIANTS:
- *  - `github_issue` registers with `exposure: "deferred"` (`+0` active schema tokens: `1,073 === 1,073`).
+ *  - `github_issue` registers with `exposure: "deferred"` (`+0` active schema tokens: `1,053 === 1,053`).
  *  - `/issue` and `/bench` register via `ExtensionAPI.registerCommand` (`+0` active schema tokens).
  *  - Zero mutation to `session.systemPrompt` (`0` static-prefix SHA-256 drift!).
  */

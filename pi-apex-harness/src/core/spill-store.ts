@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { validatePrivateStatePreflight } from "./private-state-boundary.ts";
 
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/sk-ant-[A-Za-z0-9_-]{12,}/g, "[REDACTED:ANTHROPIC_KEY]"],
@@ -59,6 +60,8 @@ export interface SpillOptions {
   cleanupDays?: number;
   /** Fault-injection hook for testing post-effect spill failures (e.g. ENOSPC). */
   simulateWriteFailure?: boolean;
+  workspaceRoot?: string;
+  allowSameDeviceDev?: boolean;
 }
 
 export interface SpillOutcome {
@@ -83,6 +86,14 @@ export class PrivateSpillStore {
     this.previewBytes = opts.previewBytes ?? 2_048;
     this.cleanupDays = opts.cleanupDays ?? 30;
     this.simulateWriteFailure = opts.simulateWriteFailure ?? false;
+
+    if (opts.workspaceRoot) {
+      validatePrivateStatePreflight(opts.workspaceRoot, path.dirname(this.rootDir), {
+        allowSameDeviceDev:
+          opts.allowSameDeviceDev ??
+          (process.env.PI_APEX_ALLOW_SAME_DEVICE_DEV === "1")
+      });
+    }
 
     fs.mkdirSync(this.rootDir, { recursive: true, mode: 0o700 });
     fs.chmodSync(this.rootDir, 0o700);

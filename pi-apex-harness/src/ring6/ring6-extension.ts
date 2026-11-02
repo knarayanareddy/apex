@@ -3,7 +3,7 @@
  * (`src/ring6/ring6-extension.ts`).
  *
  * PRESERVED INVARIANTS:
- *  - `mcp_hub` registers with `exposure: "deferred"` (`+0` active schema tokens: `1,073 === 1,073`).
+ *  - `mcp_hub` registers with `exposure: "deferred"` (`+0` active schema tokens: `1,053 === 1,053`).
  *  - `/mcp` and `/router` register via `ExtensionAPI.registerCommand` (`+0` active schema tokens).
  *  - `session_shutdown` closes all active MCP transports (`mcpHub.closeAll()`) cleanly.
  */

@@ -275,6 +275,7 @@ export class ChromiumCdpSession {
   private activeRefs: Record<string, RefTargetMetadata> = {};
   private closed = false;
   private startupMetrics: BrowserStartupPhases | null = null;
+  private lastNavigationDurationMs = 0;
 
   constructor(opts: ChromiumCdpSessionOptions = {}) {
     const resolvedBin = opts.chromiumPath ?? findLocalChromiumBinary();
@@ -298,6 +299,10 @@ export class ChromiumCdpSession {
 
   public getStartupMetrics(): BrowserStartupPhases | null {
     return this.startupMetrics;
+  }
+
+  public getLastNavigationDurationMs(): number {
+    return this.lastNavigationDurationMs;
   }
 
   public async ensureStarted(): Promise<void> {
@@ -324,6 +329,9 @@ export class ChromiumCdpSession {
         "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
+        // Bypasses macOS SystemConfiguration dynamic store resolution (SCDynamicStore)
+        // which synchronously queries system proxy settings during socket creation and navigations,
+        // causing intermittent 5-10s stalls in headless sandboxes. The 12-second deadline is strictly preserved.
         "--no-proxy-server",
         "--remote-allow-origins=*",
         "--disable-dev-shm-usage",
@@ -588,27 +596,32 @@ export class ChromiumCdpSession {
     this.activeSnapshotId = null;
     this.activeSnapshotDomRevision = -1;
     this.activeRefs = {};
-    const navigation = await this.sendCdp("Page.navigate", { url: safeUrl });
-    if (typeof navigation.errorText === "string" && navigation.errorText) {
-      const safeError = /^net::ERR_[A-Z0-9_]+$/.test(navigation.errorText) ? navigation.errorText : "NAVIGATION_ERROR";
-      throw new Error(`CDP_NAVIGATION_FAILED: ${safeError}`);
-    }
+    const navStart = performance.now();
+    try {
+      const navigation = await this.sendCdp("Page.navigate", { url: safeUrl });
+      if (typeof navigation.errorText === "string" && navigation.errorText) {
+        const safeError = /^net::ERR_[A-Z0-9_]+$/.test(navigation.errorText) ? navigation.errorText : "NAVIGATION_ERROR";
+        throw new Error(`CDP_NAVIGATION_FAILED: ${safeError}`);
+      }
 
-    // Wait until document.readyState === 'complete' (bounded)
-    for (let i = 0; i < 40; i++) {
-      const stateRes = await this.sendCdp("Runtime.evaluate", {
-        expression: "document.readyState",
-        returnByValue: true
-      }).catch((): Record<string, unknown> => ({}));
-      const val = (stateRes["result"] as { value?: unknown } | undefined)?.value;
-      if (val === "complete") break;
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    await new Promise((r) => setTimeout(r, 30));
+      // Wait until document.readyState === 'complete' (bounded)
+      for (let i = 0; i < 40; i++) {
+        const stateRes = await this.sendCdp("Runtime.evaluate", {
+          expression: "document.readyState",
+          returnByValue: true
+        }).catch((): Record<string, unknown> => ({}));
+        const val = (stateRes["result"] as { value?: unknown } | undefined)?.value;
+        if (val === "complete") break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await new Promise((r) => setTimeout(r, 30));
 
-    this.currentUrl = await this.getLiveLocationHref();
-    const domRevision = await this.getLiveDomRevision();
-    return { url: this.currentUrl, domRevision };
+      this.currentUrl = await this.getLiveLocationHref();
+      const domRevision = await this.getLiveDomRevision();
+      return { url: this.currentUrl, domRevision };
+    } finally {
+      this.lastNavigationDurationMs = performance.now() - navStart;
+    }
   }
 
   public async snapshot(options: SnapshotOptions = {}): Promise<BrowserSnapshotResult> {

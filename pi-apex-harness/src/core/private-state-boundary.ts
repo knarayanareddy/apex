@@ -70,6 +70,21 @@ export function inspectMountTopology(
     } catch (err) {
       violations.push(`Control-plane stat error: ${String(err)}`);
     }
+  } else {
+    // Missing control plane directory (first boot / unprovisioned state)
+    // Inspect nearest existing ancestor of cpDir to determine target device
+    let parent = path.dirname(cpDir);
+    while (!fs.existsSync(parent) && parent !== path.dirname(parent)) {
+      parent = path.dirname(parent);
+    }
+    if (fs.existsSync(parent)) {
+      try {
+        const pst = fs.statSync(parent);
+        cpDev = pst.dev;
+      } catch (err) {
+        violations.push(`Control-plane target parent stat error: ${String(err)}`);
+      }
+    }
   }
 
   // Check if any ancestor between realWs and cpDir is a symlink
@@ -183,6 +198,8 @@ export interface MigrationSummary {
   bytesCopied: number;
   verifiedHashes: boolean;
   sourceRetained: boolean;
+  dryRun?: boolean;
+  integrityVerified?: boolean;
 }
 
 function copyFileWithVerification(src: string, dst: string): { bytes: number; hash: string } {
@@ -202,73 +219,134 @@ function copyFileWithVerification(src: string, dst: string): { bytes: number; ha
 /**
  * Rehearses and performs offline, non-destructive migration of private state (ADR 0001 / R06).
  * Retains source state intact, uses SQLite backup() API for consistent database checkpoints,
- * and cryptographically verifies all copied sessions and spills.
+ * verifies destination PRAGMA integrity_check, and cryptographically verifies all copied sessions and spills.
+ * Automatically rolls back destination state on any failure.
  */
 export async function migratePrivateStateOffline(params: {
   sourceDir: string;
   destinationDir: string;
   stateDbPath?: string;
+  dryRun?: boolean;
+  rollbackOnError?: boolean;
 }): Promise<MigrationSummary> {
   const srcDir = path.resolve(params.sourceDir);
   const dstDir = path.resolve(params.destinationDir);
+  const dryRun = Boolean(params.dryRun);
+  const rollbackOnError = params.rollbackOnError ?? true;
 
   if (!fs.existsSync(srcDir)) {
     throw new Error(`MIGRATION_SOURCE_NOT_FOUND: Source directory '${srcDir}' does not exist`);
   }
 
-  fs.mkdirSync(dstDir, { recursive: true, mode: 0o700 });
+  const dstAlreadyExisted = fs.existsSync(dstDir);
+  const createdPaths: string[] = [];
   let filesCopied = 0;
   let bytesCopied = 0;
+  let integrityVerified = false;
 
-  // 1. Migrate SQLite database using SQLite backup() API if present
-  const srcDbPath = params.stateDbPath ?? path.join(srcDir, "state.db");
-  const dstDbPath = path.join(dstDir, "state.db");
-  if (fs.existsSync(srcDbPath)) {
-    fs.mkdirSync(path.dirname(dstDbPath), { recursive: true, mode: 0o700 });
-    const srcDb = new DatabaseSync(srcDbPath);
-    try {
-      await backup(srcDb, dstDbPath);
-      filesCopied += 1;
-      bytesCopied += fs.statSync(dstDbPath).size;
-    } finally {
-      srcDb.close();
+  try {
+    if (!dryRun) {
+      fs.mkdirSync(dstDir, { recursive: true, mode: 0o700 });
     }
-  }
 
-  // 2. Recursively copy sessions, spills, and credentials with SHA-256 verification
-  const walkAndCopy = (dir: string) => {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isSymbolicLink()) continue; // Never follow symlinks
-      const srcFull = path.join(dir, entry.name);
-      const rel = path.relative(srcDir, srcFull);
-      const dstFull = path.join(dstDir, rel);
-
-      if (entry.isDirectory()) {
-        fs.mkdirSync(dstFull, { recursive: true, mode: 0o700 });
-        walkAndCopy(srcFull);
-      } else if (entry.isFile()) {
-        // Skip SQLite DB and WAL files because backup() already checkpointed them cleanly
-        if (entry.name === "state.db" || entry.name === "state.db-wal" || entry.name === "state.db-shm") {
-          continue;
+    // 1. Migrate SQLite database using SQLite backup() API if present
+    const srcDbPath = params.stateDbPath ?? path.join(srcDir, "state.db");
+    const dstDbPath = path.join(dstDir, "state.db");
+    if (fs.existsSync(srcDbPath)) {
+      const srcDb = new DatabaseSync(srcDbPath);
+      try {
+        const srcIntegrity = srcDb.prepare("PRAGMA integrity_check").get() as { integrity_check?: string };
+        if (srcIntegrity?.integrity_check !== "ok") {
+          throw new Error(`MIGRATION_SOURCE_CORRUPT: Source database failed integrity check: ${srcIntegrity?.integrity_check}`);
         }
-        const { bytes } = copyFileWithVerification(srcFull, dstFull);
-        filesCopied += 1;
-        bytesCopied += bytes;
+        if (!dryRun) {
+          fs.mkdirSync(path.dirname(dstDbPath), { recursive: true, mode: 0o700 });
+          await backup(srcDb, dstDbPath);
+          createdPaths.push(dstDbPath);
+          filesCopied += 1;
+          bytesCopied += fs.statSync(dstDbPath).size;
+
+          const dstDb = new DatabaseSync(dstDbPath);
+          try {
+            const dstIntegrity = dstDb.prepare("PRAGMA integrity_check").get() as { integrity_check?: string };
+            if (dstIntegrity?.integrity_check !== "ok") {
+              throw new Error(`MIGRATION_INTEGRITY_ERROR: Destination SQLite integrity check failed: ${dstIntegrity?.integrity_check}`);
+            }
+            integrityVerified = true;
+          } finally {
+            dstDb.close();
+          }
+        } else {
+          filesCopied += 1;
+          bytesCopied += fs.statSync(srcDbPath).size;
+          integrityVerified = true;
+        }
+      } finally {
+        srcDb.close();
       }
     }
-  };
 
-  walkAndCopy(srcDir);
+    // 2. Recursively copy sessions, spills, and credentials with SHA-256 verification
+    const walkAndCopy = (dir: string) => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue; // Never follow symlinks
+        const srcFull = path.join(dir, entry.name);
+        const rel = path.relative(srcDir, srcFull);
+        const dstFull = path.join(dstDir, rel);
 
-  // 3. Verify source files are completely retained
-  const sourceRetained = fs.existsSync(srcDir);
+        if (entry.isDirectory()) {
+          if (!dryRun) {
+            fs.mkdirSync(dstFull, { recursive: true, mode: 0o700 });
+          }
+          walkAndCopy(srcFull);
+        } else if (entry.isFile()) {
+          // Skip SQLite DB and WAL files because backup() already checkpointed them cleanly
+          if (entry.name === "state.db" || entry.name === "state.db-wal" || entry.name === "state.db-shm") {
+            continue;
+          }
+          if (!dryRun) {
+            const { bytes } = copyFileWithVerification(srcFull, dstFull);
+            createdPaths.push(dstFull);
+            filesCopied += 1;
+            bytesCopied += bytes;
+          } else {
+            filesCopied += 1;
+            bytesCopied += fs.statSync(srcFull).size;
+          }
+        }
+      }
+    };
 
-  return {
-    success: true,
-    filesCopied,
-    bytesCopied,
-    verifiedHashes: true,
-    sourceRetained
-  };
+    walkAndCopy(srcDir);
+
+    // 3. Verify source files are completely retained
+    const sourceRetained = fs.existsSync(srcDir);
+
+    return {
+      success: true,
+      filesCopied,
+      bytesCopied,
+      verifiedHashes: true,
+      sourceRetained,
+      dryRun,
+      integrityVerified
+    };
+  } catch (error) {
+    if (!dryRun && rollbackOnError) {
+      // Non-destructive rollback: clean up destination paths created during failed migration
+      try {
+        if (!dstAlreadyExisted) {
+          fs.rmSync(dstDir, { recursive: true, force: true });
+        } else {
+          for (const p of createdPaths.reverse()) {
+            try {
+              if (fs.existsSync(p)) fs.rmSync(p, { force: true });
+            } catch {}
+          }
+        }
+      } catch {}
+    }
+    throw error;
+  }
 }

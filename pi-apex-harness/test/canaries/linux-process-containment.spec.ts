@@ -219,7 +219,7 @@ try {
 
     // Supervisor script running inside bwrap: holds fd 3, monitors control pipe for EOF
     const supervisorScript = [
-      "import os,pathlib,poll,select,socket,subprocess,sys,time",
+      "import os,pathlib,select,socket,subprocess,sys,time",
       "p=subprocess.Popen(['python3', '-c',",
       `    'import os,pathlib,socket,time; os.setsid(); s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(${JSON.stringify(srv.socketPath)}); s.sendall(b\"x\"); assert s.recv(1)==b\"1\"; s.close(); pathlib.Path(${JSON.stringify(childReady)}).write_text(\"ready\"); time.sleep(20); pathlib.Path(${JSON.stringify(childDone)}).write_text(\"finished\")'],`,
       "    close_fds=True)",
@@ -272,7 +272,19 @@ try {
       stdio: ["ignore", "pipe", "pipe", "pipe"] // fd 3 is a writable stream from parent!
     });
 
-    assert.ok(await waitUntil(() => fs.existsSync(childReady), 5000), "Child must be ready");
+    let childStderr = "";
+    childProc.stderr?.on("data", (chunk: Buffer) => {
+      childStderr += chunk.toString("utf8");
+    });
+
+    assert.ok(
+      await waitUntil(() => fs.existsSync(supervisorReady), 5000),
+      `Supervisor must be ready (stderr: ${childStderr})`
+    );
+    assert.ok(
+      await waitUntil(() => fs.existsSync(childReady), 5000),
+      `Child must be ready (stderr: ${childStderr})`
+    );
     const identity = await srv.getIdentity();
     assert.ok(readOwnedChildStat(identity).alive, "Child must be alive before control EOF");
 

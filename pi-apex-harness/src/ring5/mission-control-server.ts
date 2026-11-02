@@ -7,7 +7,7 @@
  *  - `anomalyco/opencode` SSE control-plane event-bus pattern over live `AgentSessionRuntime`.
  *
  * PREVIEW & SECURITY INVARIANTS:
- *  1. Out-of-band operator server: adds `+0` tools to `session.agent.state.tools` (`1,073 === 1,073`
+ *  1. Out-of-band operator server: adds `+0` tools to `session.agent.state.tools` (`1,053 === 1,053`
  *     `o200k_base` active schema tokens) and `0` live static-prefix SHA-256 drift.
  *  2. Binds `0.0.0.0` by default, accepts reverse-proxied preview hosts (`https://{port}-{sandboxId}.e2b.app`)
  *     without host-header rejection, and omits `X-Frame-Options` blocks so embedded browser previews work cleanly.

@@ -3,7 +3,7 @@
  *
  * Verifies `R5-1` through `R5-6` from `SPEC_BIBLE.md §6.5`:
  *  - R5-1: `MissionControlServer` HTTP + Live Preview Proxy Compliance (`0.0.0.0`, no `X-Frame-Options`,
- *          zero `localhost`/`127.0.0.1` in browser UI, `1,073` active schema tokens, `0` prefix drift)
+ *          zero `localhost`/`127.0.0.1` in browser UI, `1,053` active schema tokens, `0` prefix drift)
  *  - R5-2: Real-Time SSE `toJsonEvent` O(1) delta stream + inline Trust Artifact `steer()` & Plan approval
  *  - R5-3: `.skills-quarantine` Web promotion (`safe` pass / `dangerous` `skills-guard-v10` block),
  *          `/tree` Git Rewind working-tree restoration, & `Dreaming` -> `/new` session reload

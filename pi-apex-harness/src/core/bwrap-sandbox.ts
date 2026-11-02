@@ -388,6 +388,24 @@ export function buildMinimalBwrapArgv(
   return args;
 }
 
+export function buildMinimalBwrapCommandArgv(
+  executable: string,
+  execArgs: readonly string[],
+  cwd: string,
+  cfg: BwrapSandboxConfig
+): string[] {
+  const mode = cfg.mode ?? "workspace-write";
+  if (mode === "danger-full-access") {
+    return [executable, ...execArgs];
+  }
+  const base = buildMinimalBwrapArgv("", cwd, cfg);
+  const sepIdx = base.lastIndexOf("--");
+  if (sepIdx !== -1) {
+    return [...base.slice(0, sepIdx), "--", executable, ...execArgs];
+  }
+  return [...base, "--", executable, ...execArgs];
+}
+
 export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperations {
   return {
     exec: async (command, cwd, options) => {

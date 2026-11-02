@@ -2,13 +2,19 @@
  * Batch G Remediation Canary Suite (`test/canaries/batchG-delivery-truth.spec.ts`)
  *
  * Verifies R02 (Truthful Delivery Status):
- *  - Distinguishes confirmed external send from staged, unconfigured, or failed delivery.
+ *  - Distinguishes confirmed, queued, unavailable, failed, and unknown outcomes.
  *  - Never reports `delivered: true` without verified external confirmation.
- *  - Synthetic-adapter regression + confirmed-send positive control.
+ *  - Slack HTTP 200 with `{ ok: false, error: ... }` MUST report `delivered: false, deliveryStatus: "failed"`.
+ *  - WhatsApp Baileys pairing without active socket sender MUST report `delivered: false, deliveryStatus: "queued"`.
+ *  - WhatsApp Baileys with active socket sender confirms `delivered: true, deliveryStatus: "confirmed"`.
+ *  - Unconfigured / absent credentials report `delivered: false, deliveryStatus: "unavailable"`.
+ *  - Network timeouts report `delivered: false, deliveryStatus: "unknown"`.
+ *  - Never sends real messages across the internet; uses synthetic local HTTP mock servers.
  */
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { StateDb } from "../../src/core/state-db.ts";
@@ -17,46 +23,252 @@ import { OmniChannelGateway } from "../../src/ring9/messaging-gateway.ts";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "apex-r02-delivery-"));
 let passed = false;
 
+// Mock HTTP server to simulate Slack, Telegram, Discord, WhatsApp Cloud APIs
+let mockResponses: Record<string, { status: number; body: Record<string, unknown>; delayMs?: number }> = {};
+const mockServer = http.createServer((req, res) => {
+  const urlPath = req.url ?? "/";
+  const matched = Object.entries(mockResponses).find(([prefix]) => urlPath.startsWith(prefix));
+  if (matched) {
+    const config = matched[1];
+    if (config.delayMs) {
+      setTimeout(() => {
+        res.writeHead(config.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(config.body));
+      }, config.delayMs);
+    } else {
+      res.writeHead(config.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(config.body));
+    }
+  } else {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "not_found" }));
+  }
+});
+
+await new Promise<void>((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+const addr = mockServer.address() as import("node:net").AddressInfo;
+const mockBaseUrl = `http://127.0.0.1:${addr.port}`;
+
 try {
   const db = new StateDb(path.join(tmp, "state.db"));
 
-  // 1. Negative control: Unconfigured channel (no credentials, no adapter)
+  // 1. Negative control: Unconfigured channels (no credentials, no adapter) -> unavailable
   const unconfiguredGw = new OmniChannelGateway({
     workspaceRoot: tmp,
     db: db.db,
     credentials: {}
   });
 
-  const unconfReceipt = await unconfiguredGw.send({
+  const unconfTelegram = await unconfiguredGw.send({
     platform: "telegram",
     channelId: "chat_123",
     text: "Testing unconfigured send"
   });
+  assert.equal(unconfTelegram.delivered, false, "Unconfigured platform must NOT report delivered: true");
+  assert.equal(unconfTelegram.deliveryStatus, "unavailable");
+  assert.equal(unconfTelegram.transportDetail, "unconfigured-telegram");
 
-  assert.equal(
-    unconfReceipt.delivered,
-    false,
-    "Unconfigured platform must NOT report delivered: true without transport confirmation"
-  );
-  assert.equal(unconfReceipt.deliveryStatus, "unconfigured");
-  assert.equal(unconfReceipt.transportDetail, "unconfigured-telegram");
+  const unconfSlack = await unconfiguredGw.send({
+    platform: "slack",
+    channelId: "C12345",
+    text: "Testing unconfigured slack"
+  });
+  assert.equal(unconfSlack.delivered, false);
+  assert.equal(unconfSlack.deliveryStatus, "unavailable");
 
-  // 2. Staged control: WhatsApp Baileys when disconnected
-  const stagedReceipt = await unconfiguredGw.send({
+  // 2. WhatsApp Baileys: Paired locally, but NO active socket sender attached -> queued
+  unconfiguredGw.initWhatsAppBaileysPairing("+31600000000");
+  assert.equal(unconfiguredGw.getWhatsAppBaileysState().connected, true);
+
+  const baileysQueued = await unconfiguredGw.send({
     platform: "whatsapp_baileys",
     channelId: "+31600000000",
-    text: "Testing staged baileys"
+    text: "Testing baileys paired without socket"
+  });
+  assert.equal(
+    baileysQueued.delivered,
+    false,
+    "Baileys pairing without active socket transmission MUST report delivered: false"
+  );
+  assert.equal(baileysQueued.deliveryStatus, "queued");
+  assert.equal(baileysQueued.transportDetail, "whatsapp-baileys-queued-offline");
+
+  // 3. WhatsApp Baileys: With active live socket sender -> confirmed
+  const liveBaileysGw = new OmniChannelGateway({
+    workspaceRoot: tmp,
+    db: db.db,
+    baileysSender: {
+      send: async (to, text) => {
+        assert.equal(to, "+31611111111");
+        assert.ok(text.includes("verified socket message"));
+        return { messageId: "wa_sock_msg_9876" };
+      }
+    }
+  });
+  liveBaileysGw.initWhatsAppBaileysPairing("+31611111111");
+  const baileysConfirmed = await liveBaileysGw.send({
+    platform: "whatsapp_baileys",
+    channelId: "+31611111111",
+    text: "verified socket message"
+  });
+  assert.equal(baileysConfirmed.delivered, true, "Baileys with active socket acknowledgment must be confirmed");
+  assert.equal(baileysConfirmed.deliveryStatus, "confirmed");
+  assert.equal(baileysConfirmed.externalMessageId, "wa_sock_msg_9876");
+  assert.equal(baileysConfirmed.transportDetail, "whatsapp-baileys-md-bridge");
+
+  // 4. Slack: HTTP 200 with { ok: false, error: "channel_not_found" } -> failed
+  mockResponses["/slack-api/chat.postMessage"] = {
+    status: 200,
+    body: { ok: false, error: "channel_not_found" }
+  };
+
+  const configuredGw = new OmniChannelGateway({
+    workspaceRoot: tmp,
+    db: db.db,
+    credentials: {
+      slack: {
+        botToken: "xoxb-mock-token",
+        signingSecret: "mock-secret",
+        apiBaseUrl: `${mockBaseUrl}/slack-api`
+      },
+      telegram: {
+        botToken: "mock-bot-token",
+        apiBaseUrl: `${mockBaseUrl}/tg-api`
+      },
+      discord: {
+        botToken: "mock-discord-token",
+        apiBaseUrl: `${mockBaseUrl}/discord-api`
+      },
+      whatsappCloud: {
+        accessToken: "mock-wa-token",
+        phoneNumberId: "10001",
+        appSecret: "mock-wa-secret",
+        verifyToken: "mock-wa-verify",
+        apiBaseUrl: `${mockBaseUrl}/wa-cloud-api`
+      }
+    }
   });
 
+  const slackFailedReceipt = await configuredGw.send({
+    platform: "slack",
+    channelId: "C_UNKNOWN",
+    text: "Slack message to non-existent channel"
+  });
   assert.equal(
-    stagedReceipt.delivered,
+    slackFailedReceipt.delivered,
     false,
-    "Disconnected Baileys bridge must report delivered: false while staged"
+    "Slack HTTP 200 with { ok: false } MUST report delivered: false"
   );
-  assert.equal(stagedReceipt.deliveryStatus, "staged");
-  assert.equal(stagedReceipt.transportDetail, "whatsapp-baileys-staged");
+  assert.equal(slackFailedReceipt.deliveryStatus, "failed");
+  assert.equal(slackFailedReceipt.transportDetail, "slack:channel_not_found");
 
-  // 3. Positive control: Custom platform adapter confirms send
+  // 5. Slack: HTTP 200 with { ok: true, ts: "1700000000.000100" } -> confirmed
+  mockResponses["/slack-api/chat.postMessage"] = {
+    status: 200,
+    body: { ok: true, ts: "1700000000.000100" }
+  };
+
+  const slackSuccessReceipt = await configuredGw.send({
+    platform: "slack",
+    channelId: "C_VALID",
+    text: "Slack successful message"
+  });
+  assert.equal(slackSuccessReceipt.delivered, true);
+  assert.equal(slackSuccessReceipt.deliveryStatus, "confirmed");
+  assert.equal(slackSuccessReceipt.externalMessageId, "1700000000.000100");
+  assert.equal(slackSuccessReceipt.transportDetail, "slack-web-api");
+
+  // 6. Telegram: HTTP 200 with { ok: false, description: "Bad Request: chat not found" } -> failed
+  mockResponses["/tg-api/botmock-bot-token/sendMessage"] = {
+    status: 200,
+    body: { ok: false, description: "Bad Request: chat not found" }
+  };
+  const tgFailedReceipt = await configuredGw.send({
+    platform: "telegram",
+    channelId: "-999999",
+    text: "Telegram fail"
+  });
+  assert.equal(tgFailedReceipt.delivered, false);
+  assert.equal(tgFailedReceipt.deliveryStatus, "failed");
+  assert.match(tgFailedReceipt.transportDetail, /chat not found/);
+
+  // 7. Telegram: HTTP 200 with { ok: true, result: { message_id: 42 } } -> confirmed
+  mockResponses["/tg-api/botmock-bot-token/sendMessage"] = {
+    status: 200,
+    body: { ok: true, result: { message_id: 42 } }
+  };
+  const tgSuccessReceipt = await configuredGw.send({
+    platform: "telegram",
+    channelId: "12345",
+    text: "Telegram success"
+  });
+  assert.equal(tgSuccessReceipt.delivered, true);
+  assert.equal(tgSuccessReceipt.deliveryStatus, "confirmed");
+  assert.equal(tgSuccessReceipt.externalMessageId, "42");
+
+  // 8. Discord: HTTP 404 with { code: 10003, message: "Unknown Channel" } -> failed
+  mockResponses["/discord-api/channels/invalid-chan/messages"] = {
+    status: 404,
+    body: { code: 10003, message: "Unknown Channel" }
+  };
+  const discordFailedReceipt = await configuredGw.send({
+    platform: "discord",
+    channelId: "invalid-chan",
+    text: "Discord fail"
+  });
+  assert.equal(discordFailedReceipt.delivered, false);
+  assert.equal(discordFailedReceipt.deliveryStatus, "failed");
+  assert.match(discordFailedReceipt.transportDetail, /Unknown Channel/);
+
+  // 9. Discord: HTTP 200 with { id: "msg_disc_123" } -> confirmed
+  mockResponses["/discord-api/channels/valid-chan/messages"] = {
+    status: 200,
+    body: { id: "msg_disc_123" }
+  };
+  const discordSuccessReceipt = await configuredGw.send({
+    platform: "discord",
+    channelId: "valid-chan",
+    text: "Discord success"
+  });
+  assert.equal(discordSuccessReceipt.delivered, true);
+  assert.equal(discordSuccessReceipt.deliveryStatus, "confirmed");
+  assert.equal(discordSuccessReceipt.externalMessageId, "msg_disc_123");
+
+  // 10. WhatsApp Cloud: HTTP 401 with { error: { message: "Invalid OAuth access token" } } -> failed
+  mockResponses["/wa-cloud-api/10001/messages"] = {
+    status: 401,
+    body: { error: { message: "Invalid OAuth access token" } }
+  };
+  const waCloudFailed = await configuredGw.send({
+    platform: "whatsapp_cloud",
+    channelId: "+15551234567",
+    text: "WA Cloud fail"
+  });
+  assert.equal(waCloudFailed.delivered, false);
+  assert.equal(waCloudFailed.deliveryStatus, "failed");
+  assert.match(waCloudFailed.transportDetail, /Invalid OAuth access token/);
+
+  // 11. Network error / connection refused -> unknown
+  const unreachableGw = new OmniChannelGateway({
+    workspaceRoot: tmp,
+    db: db.db,
+    credentials: {
+      slack: {
+        botToken: "xoxb-test",
+        signingSecret: "test",
+        apiBaseUrl: "http://127.0.0.1:1" // guaranteed connection refused
+      }
+    }
+  });
+  const unreachableReceipt = await unreachableGw.send({
+    platform: "slack",
+    channelId: "C123",
+    text: "Unreachable endpoint"
+  });
+  assert.equal(unreachableReceipt.delivered, false);
+  assert.equal(unreachableReceipt.deliveryStatus, "unknown");
+
+  // 12. Positive control: Custom platform adapter confirms send
   unconfiguredGw.registerAdapter({
     platform: "plugin:custom-relay:matrix" as any,
     send: async (req) => ({
@@ -76,22 +288,11 @@ try {
   assert.equal(confirmedReceipt.externalMessageId, "mtx_confirmed_999");
   assert.equal(confirmedReceipt.transportDetail, "matrix-synapse-v1");
 
-  // 4. Positive control: Connected Baileys state confirms send
-  (unconfiguredGw as any).baileysState.connected = true;
-  const connectedBaileysReceipt = await unconfiguredGw.send({
-    platform: "whatsapp_baileys",
-    channelId: "+31600000000",
-    text: "Testing connected baileys"
-  });
-
-  assert.equal(connectedBaileysReceipt.delivered, true);
-  assert.equal(connectedBaileysReceipt.deliveryStatus, "confirmed");
-  assert.equal(connectedBaileysReceipt.transportDetail, "whatsapp-baileys-md-bridge");
-
   db.close();
   passed = true;
-  console.log("R02 Truthful messaging delivery status: PASS");
+  console.log("R02 Truthful messaging delivery status (all 12 controls): PASS");
 } finally {
+  mockServer.close();
   if (passed) {
     fs.rmSync(tmp, { recursive: true, force: true });
   } else {

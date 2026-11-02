@@ -2130,7 +2130,7 @@ description: Safe SQLite WAL migration checklist
         const pBox = document.getElementById("pluginsListBox");
         pBox.innerHTML = "";
         if (!plugData.plugins || plugData.plugins.length === 0) {
-          pBox.innerHTML = "<div class='muted'>No external plugins installed yet (active schema stays strictly 1,073 o200k tokens).</div>";
+          pBox.innerHTML = "<div class='muted'>No external plugins installed yet (active schema stays strictly 1,053 o200k tokens).</div>";
         } else {
           plugData.plugins.forEach((p) => {
             const d = document.createElement("div");

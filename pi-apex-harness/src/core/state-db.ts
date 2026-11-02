@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
+import { validatePrivateStatePreflight } from "./private-state-boundary.ts";
 import type { DurabilityMode, GitObjectFormat, WalIntentRow } from "../types.ts";
 
 export class StateDb {
@@ -9,10 +10,22 @@ export class StateDb {
   readonly dbPath: string;
   readonly durabilityMode: DurabilityMode;
 
-  constructor(dbPath: string, durabilityMode: DurabilityMode = "crash-safe") {
+  constructor(
+    dbPath: string,
+    durabilityMode: DurabilityMode = "crash-safe",
+    options?: { workspaceRoot?: string; allowSameDeviceDev?: boolean }
+  ) {
     this.dbPath = dbPath;
     this.durabilityMode = durabilityMode;
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
+    const dir = path.dirname(dbPath);
+    if (options?.workspaceRoot) {
+      validatePrivateStatePreflight(options.workspaceRoot, dir, {
+        allowSameDeviceDev:
+          options.allowSameDeviceDev ??
+          (process.env.PI_APEX_ALLOW_SAME_DEVICE_DEV === "1")
+      });
+    }
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(dbPath);
     this._initPragmasAndSchema();
   }

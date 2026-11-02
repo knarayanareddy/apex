@@ -80,6 +80,7 @@ export interface ToolAdmissionOptions {
   readonly sessionId: string;
   readonly limits?: Partial<ToolAdmissionLimits>;
   readonly allowedTools?: readonly string[];
+  readonly explicitAllowlist?: boolean;
   readonly deniedTools?: readonly string[];
   readonly readOnly?: boolean;
   readonly defaultPrincipal?: ToolExecutionPrincipal;
@@ -95,11 +96,15 @@ const MUTATING_CORE_TOOLS = new Set<string>([
   "autonomous_pr"
 ]);
 
+/** Default core tools admitted when no custom allowlist is provided */
+export const DEFAULT_CORE_TOOLS = ["read", "bash", "edit", "write"] as const;
+
 export class ToolAdmissionController {
   private workspaceRoot: string;
   private sessionId: string;
   private limits: ToolAdmissionLimits;
-  private allowedToolsSet: Set<string> | null = null;
+  private allowedToolsSet: Set<string>;
+  private isExplicitAllowlist: boolean;
   private deniedToolsSet: Set<string>;
   private readOnly: boolean;
   private defaultPrincipal: ToolExecutionPrincipal;
@@ -119,6 +124,10 @@ export class ToolAdmissionController {
     };
     if (opts.allowedTools) {
       this.allowedToolsSet = new Set(opts.allowedTools);
+      this.isExplicitAllowlist = opts.explicitAllowlist ?? true;
+    } else {
+      this.allowedToolsSet = new Set(DEFAULT_CORE_TOOLS);
+      this.isExplicitAllowlist = opts.explicitAllowlist ?? false;
     }
     this.deniedToolsSet = new Set(opts.deniedTools ?? []);
     this.readOnly = opts.readOnly ?? false;
@@ -167,8 +176,28 @@ export class ToolAdmissionController {
     this.admittedToolCallIds.clear();
   }
 
+  public registerAllowedTool(toolName: string, force = false): void {
+    if (!this.isExplicitAllowlist || force) {
+      this.allowedToolsSet.add(toolName);
+    }
+  }
+
+  public unregisterAllowedTool(toolName: string): void {
+    this.allowedToolsSet.delete(toolName);
+  }
+
+  public isToolAllowed(toolName: string): boolean {
+    return this.allowedToolsSet.has(toolName) && !this.deniedToolsSet.has(toolName);
+  }
+
   public setAllowedTools(tools: readonly string[] | null): void {
-    this.allowedToolsSet = tools ? new Set(tools) : null;
+    if (tools === null) {
+      this.isExplicitAllowlist = false;
+      this.allowedToolsSet = new Set(DEFAULT_CORE_TOOLS);
+    } else {
+      this.isExplicitAllowlist = true;
+      this.allowedToolsSet = new Set(tools);
+    }
   }
 
   public setReadOnly(readOnly: boolean): void {
@@ -181,7 +210,8 @@ export class ToolAdmissionController {
     turnElapsedMs: number;
     activeSessionId: string;
     readOnly: boolean;
-    allowedTools: string[] | null;
+    allowedTools: string[];
+    isExplicitAllowlist: boolean;
   } {
     return {
       turnToolCalls: this.turnToolCallCount,
@@ -189,7 +219,8 @@ export class ToolAdmissionController {
       turnElapsedMs: Date.now() - this.currentTurnStartMs,
       activeSessionId: this.sessionId,
       readOnly: this.readOnly,
-      allowedTools: this.allowedToolsSet ? Array.from(this.allowedToolsSet) : null
+      allowedTools: Array.from(this.allowedToolsSet),
+      isExplicitAllowlist: this.isExplicitAllowlist
     };
   }
 
@@ -310,8 +341,8 @@ export class ToolAdmissionController {
       };
     }
 
-    // 9. Authoritative Allowlist check (Default-Deny when allowedTools is specified)
-    if (this.allowedToolsSet !== null && !this.allowedToolsSet.has(fullReq.toolName)) {
+    // 9. Authoritative Allowlist check (Default-Deny)
+    if (!this.allowedToolsSet.has(fullReq.toolName)) {
       return {
         allowed: false,
         reason: `TOOL_NOT_ADMITTED: Tool '${fullReq.toolName}' is not permitted by active tool admission policy (allowed: [${Array.from(this.allowedToolsSet).join(", ")}])`,

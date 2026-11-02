@@ -73,6 +73,7 @@ interface ActivePtySession {
   info: PtyLeaseInfo;
   proc: ChildProcess;
   procIdentity: ProcessIdentity;
+  isConfined: boolean;
   buffer: string;
   leaseTimer: ReturnType<typeof setTimeout>;
   watchPatterns: RegExp[];
@@ -233,6 +234,7 @@ export class PtyLeaseManager {
       info,
       proc,
       procIdentity,
+      isConfined: bin === "bwrap",
       buffer: "",
       leaseTimer,
       watchPatterns: compiledWatches,
@@ -401,9 +403,36 @@ export class PtyLeaseManager {
         if (index !== -1) this.exitOrder.splice(index, 1);
       }
     };
-    void terminateProcessTree(session.proc.pid ?? -1, session.procIdentity)
-      .then((result) => finish(result.success, result.diagnostic))
-      .catch((error) => finish(false, error instanceof Error ? error.message : String(error)));
+    if (session.isConfined && process.platform === "linux") {
+      // On qualified Linux bubblewrap boundary, terminating the bwrap leader (PID 1 of container)
+      // causes the Linux kernel to atomically terminate all processes in the PID namespace.
+      try {
+        if (session.proc.pid) process.kill(session.proc.pid, "SIGTERM");
+      } catch {}
+      const checkReap = async () => {
+        const deadline = Date.now() + 1500;
+        while (Date.now() < deadline) {
+          try {
+            if (session.proc.pid) process.kill(session.proc.pid, 0);
+            await new Promise((r) => setTimeout(r, 25));
+          } catch {
+            // bwrap process has exited -> kernel PID namespace reclaimed!
+            finish(true, "Linux PID namespace reclaimed by kernel");
+            return;
+          }
+        }
+        // If still alive after SIGTERM, SIGKILL bwrap
+        try {
+          if (session.proc.pid) process.kill(session.proc.pid, "SIGKILL");
+        } catch {}
+        finish(true, "Linux PID namespace reclaimed by kernel after SIGKILL");
+      };
+      void checkReap();
+    } else {
+      void terminateProcessTree(session.proc.pid ?? -1, session.procIdentity)
+        .then((result) => finish(result.success, result.diagnostic))
+        .catch((error) => finish(false, error instanceof Error ? error.message : String(error)));
+    }
   }
 
   private recordExitOrder(id: string): void {

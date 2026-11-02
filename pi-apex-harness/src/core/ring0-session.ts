@@ -354,13 +354,18 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
   validatePrivateStatePreflight(opts.workspaceRoot, harnessDir, {
     allowSameDeviceDev: opts.allowSameDeviceDev ?? (opts.allowUnsandboxedDev || process.env.PI_APEX_ALLOW_SAME_DEVICE_DEV === "1")
   });
-  const stateDb = new StateDb(path.join(harnessDir, "state.db"), durabilityMode);
+  const stateDb = new StateDb(path.join(harnessDir, "state.db"), durabilityMode, {
+    workspaceRoot: opts.workspaceRoot,
+    allowSameDeviceDev: opts.allowSameDeviceDev ?? (opts.allowUnsandboxedDev || process.env.PI_APEX_ALLOW_SAME_DEVICE_DEV === "1")
+  });
   const spillStore = new PrivateSpillStore({
     rootDir: path.join(harnessDir, "spill"),
     maxInlineBytes: guardrails.spill.max_inline_bytes,
     maxInlineLines: guardrails.spill.max_inline_lines,
     previewBytes: guardrails.spill.preview_bytes,
-    cleanupDays: guardrails.spill.cleanup_days
+    cleanupDays: guardrails.spill.cleanup_days,
+    workspaceRoot: opts.workspaceRoot,
+    allowSameDeviceDev: opts.allowSameDeviceDev ?? (opts.allowUnsandboxedDev || process.env.PI_APEX_ALLOW_SAME_DEVICE_DEV === "1")
   });
   spillStore.sweepExpiredSync();
 
@@ -404,11 +409,17 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     ...(opts.extraTools ?? [])
   ];
 
+  const initialAllowedTools = opts.allowedTools ?? [
+    ...rawBuiltins.map((t) => t.name),
+    "codemode"
+  ];
+
   const admissionController = new ToolAdmissionController({
     workspaceRoot: opts.workspaceRoot,
     sessionId,
     limits: opts.admissionLimits,
-    allowedTools: opts.allowedTools,
+    allowedTools: initialAllowedTools,
+    explicitAllowlist: opts.allowedTools !== undefined,
     deniedTools: opts.deniedTools,
     readOnly: sandboxMode === "read-only"
   });
@@ -629,6 +640,27 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
       defaultTools: activeDirectToolNames
     });
 
+  const wrapExtensionWithAdmission = (factory: ExtensionFactory): ExtensionFactory => {
+    return (pi) => {
+      const origRegisterTool = pi.registerTool?.bind(pi);
+      if (origRegisterTool) {
+        pi.registerTool = (toolDef: any) => {
+          if (toolDef && typeof toolDef.name === "string") {
+            admissionController.registerAllowedTool(toolDef.name);
+          }
+          return origRegisterTool(toolDef);
+        };
+      }
+      return factory(pi);
+    };
+  };
+
+  const rawExtensionFactories: ExtensionFactory[] = [
+    createNormalizedCodemodeExtension({ mode: "on" }),
+    ring0CoreExtension,
+    ...(opts.extraExtensions ?? [])
+  ];
+
   const resourceLoader = new DefaultResourceLoader({
     cwd: opts.workspaceRoot,
     agentDir,
@@ -636,11 +668,7 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
     skillsOverride: () => ({ skills: [], diagnostics: [] }),
     agentsFilesOverride: () => ({ agentsFiles: [] }),
     promptsOverride: () => ({ prompts: [], diagnostics: [] }),
-    extensionFactories: [
-      createNormalizedCodemodeExtension({ mode: "on" }),
-      ring0CoreExtension,
-      ...(opts.extraExtensions ?? [])
-    ]
+    extensionFactories: rawExtensionFactories.map(wrapExtensionWithAdmission)
   });
   await resourceLoader.reload();
 
@@ -660,6 +688,13 @@ export async function createRing0Harness(opts: Ring0HarnessOptions): Promise<Rin
   });
   session.setActiveToolsByName(activeDirectToolNames);
   sessionRef = session;
+
+  // Register dynamically loaded tools into admission controller unless caller supplied an explicit allowlist
+  if (!opts.allowedTools) {
+    for (const t of session.agent.state.tools) {
+      admissionController.registerAllowedTool(t.name);
+    }
+  }
 
   // Normalize machine-dependent absolute filesystem paths in tool descriptions (e.g. codemode.md)
   // to ensure the default o200k schema count is reproducible across checkouts.

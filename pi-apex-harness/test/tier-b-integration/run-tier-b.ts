@@ -38,6 +38,7 @@ const HARNESS_ROOT = path.resolve(__dirname, "../..");
 
 async function runTierB(): Promise<void> {
   const t0 = performance.now();
+  process.env.PI_APEX_ALLOW_SAME_DEVICE_DEV = "1";
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-apex-tier-b-"));
   const checks: string[] = [];
 
@@ -887,6 +888,7 @@ async function runTierB(): Promise<void> {
       durabilityMode: "power-loss-safe",
       modelRuntime: sharedRuntime,
       model: faux.getModel(),
+      allowSameDeviceDev: true,
       extraExtensions: [
         (pi) => {
           for (let i = 0; i < 50; i++) {
@@ -926,7 +928,8 @@ async function runTierB(): Promise<void> {
       workspaceRoot: b4Ws,
       surfacesDir: b4Surfaces,
       modelRuntime: sharedRuntime,
-      model: faux.getModel()
+      model: faux.getModel(),
+      allowSameDeviceDev: true
     });
     const baselineSchemaTokens = countO200kTokens(
       JSON.stringify(
