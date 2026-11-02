@@ -347,17 +347,18 @@ try {
     // Process A (bwrap PID 1) forks Process B. Process B forks Process C (grandchild, setsid), then B immediately exits.
     // Process C reparents to Process A (namespace PID 1).
     // When Process A exits, Process C must be terminated by kernel!
-    const reparentPy = [
-      "import os,pathlib,socket,time",
-      "p2=os.fork()",
-      "if p2==0:",
-      "    p3=os.fork()",
-      "    if p3==0:",
+    const reparentFile = path.join(ws, "reparent-g4.py");
+    const reparentScript = [
+      "import os, pathlib, socket, time",
+      "p2 = os.fork()",
+      "if p2 == 0:",
+      "    p3 = os.fork()",
+      "    if p3 == 0:",
       "        os.setsid()",
-      "        s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)",
+      "        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
       `        s.connect(${JSON.stringify(srv.socketPath)})`,
       "        s.sendall(b'x')",
-      "        assert s.recv(1)==b'1'",
+      "        assert s.recv(1) == b'1'",
       "        s.close()",
       `        pathlib.Path(${JSON.stringify(grandchildReady)}).write_text('ready')`,
       "        time.sleep(20)",
@@ -365,13 +366,17 @@ try {
       "        os._exit(0)",
       "    os._exit(0)", // B exits immediately, orphaning C!
       "os.waitpid(p2, 0)",
-      `i=0; while not pathlib.Path(${JSON.stringify(grandchildReady)}).exists() and i<100: time.sleep(0.05); i+=1`,
+      "i = 0",
+      `while not pathlib.Path(${JSON.stringify(grandchildReady)}).exists() and i < 100:`,
+      "    time.sleep(0.05)",
+      "    i += 1",
       "time.sleep(0.2)",
       "os._exit(0)" // A exits, which must trigger kernel cleanup of reparented grandchild C!
     ].join("\n");
+    fs.writeFileSync(reparentFile, reparentScript, { mode: 0o755 });
 
     const command = [
-      `python3 -c ${quote(reparentPy)} </dev/null >/dev/null 2>&1`,
+      `python3 ${quote(reparentFile)}`,
       "exit 0"
     ].join("\n");
 
