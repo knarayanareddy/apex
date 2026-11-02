@@ -397,7 +397,9 @@ const exitWatchdog = setTimeout(() => {
     readable: handle.readable,
     writable: handle.writable
   }));
-  console.error("BATCH_K_EXIT_TIMEOUT", JSON.stringify({ resources: process.getActiveResourcesInfo(), handles }));
+  const report = process.report.getReport() as { libuv?: Array<{ type?: string; is_referenced?: boolean; [key: string]: unknown }> };
+  const referencedLibuv = report.libuv?.filter((handle) => handle.is_referenced) ?? [];
+  console.error("BATCH_K_EXIT_TIMEOUT", JSON.stringify({ resources: process.getActiveResourcesInfo(), handles, referencedLibuv }));
   throw new Error("BATCH_K_EXIT_TIMEOUT: test assertions finished but the process did not exit");
 }, 15_000);
 exitWatchdog.unref();
