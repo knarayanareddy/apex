@@ -217,7 +217,7 @@ try {
     const childReady = path.join(ws, "g2-child-ready");
     const childDone = path.join(ws, "g2-child-done");
 
-    // Supervisor script running inside bwrap: holds fd 3, monitors control pipe for EOF
+    // Supervisor script running inside bwrap: monitors stdin (fd 0) control pipe for EOF
     const supervisorScript = [
       "import os,pathlib,select,socket,subprocess,sys,time",
       "p=subprocess.Popen(['python3', '-c',",
@@ -225,11 +225,11 @@ try {
       "    close_fds=True)",
       `pathlib.Path(${JSON.stringify(supervisorReady)}).write_text('ready')`,
       "poller=select.poll()",
-      "poller.register(3, select.POLLIN | select.POLLHUP)",
+      "poller.register(0, select.POLLIN | select.POLLHUP)",
       "while True:",
       "    events=poller.poll(50)",
       "    if events:",
-      "        buf=os.read(3, 1)",
+      "        buf=os.read(0, 1)",
       "        if not buf:",
       "            sys.exit(0)", // EOF received! Exit normally, causing kernel to reclaim PID namespace!
       "    if p.poll() is not None:",
@@ -238,17 +238,6 @@ try {
 
     const supervisorFile = path.join(ws, "supervisor-g2.py");
     fs.writeFileSync(supervisorFile, supervisorScript, { mode: 0o755 });
-
-    // Open control pipe (pipe[0] is read end, pipe[1] is write end)
-    const [pipeRead, pipeWrite] = [
-      fs.openSync("/dev/null", "r"), // placeholder
-      fs.openSync("/dev/null", "r")  // placeholder
-    ];
-    // Create an actual OS pipe using Python helper
-    const pipeInitPy = `import os; r, w = os.pipe(); print(f"{r},{w}")`;
-    // Alternatively, use node child_process with stdio: ['ignore', 'pipe', 'pipe', 'pipe']
-    // In Node.js, passing fd 3 is directly supported via stdio array:
-    // stdio: ['ignore', 'pipe', 'pipe', 'pipe'] -> fd 3 is created as a duplex/pipe!
 
     const bwrapArgs = [
       "--unshare-pid",
@@ -260,7 +249,6 @@ try {
       "--ro-bind", "/lib", "/lib",
       "--ro-bind-try", "/lib64", "/lib64",
       "--bind", ws, ws,
-      "--sync-fd", "3",
       "--die-with-parent",
       "--clearenv",
       "--setenv", "PATH", "/usr/bin:/bin",
@@ -269,7 +257,7 @@ try {
     ];
 
     const childProc = spawn("bwrap", bwrapArgs, {
-      stdio: ["ignore", "pipe", "pipe", "pipe"] // fd 3 is a writable stream from parent!
+      stdio: ["pipe", "pipe", "pipe"] // stdin (fd 0) is the control pipe from parent!
     });
 
     let childStderr = "";
@@ -288,9 +276,8 @@ try {
     const identity = await srv.getIdentity();
     assert.ok(readOwnedChildStat(identity).alive, "Child must be alive before control EOF");
 
-    // Close only descriptor 3 (parent's pipe writer)
-    const controlPipeStream = childProc.stdio[3] as import("node:stream").Writable;
-    controlPipeStream.end();
+    // Close stdin (parent's pipe writer) to send EOF without signals
+    childProc.stdin?.end();
 
     // Verify supervisor and setsid child terminate promptly (within 2000ms), long before 20s natural exit
     const terminated = await waitUntil(() => !readOwnedChildStat(identity).alive, 2500);
