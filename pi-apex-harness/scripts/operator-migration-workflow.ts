@@ -74,8 +74,9 @@ async function main(): Promise<void> {
     const dstDev = fs.statSync(destinationDir).dev;
     console.log(`  Target st_dev:       ${dstDev}`);
     if (dstDev === sourceTopology.workspaceDev) {
-      console.warn("  [WARNING] Target destination is on the SAME filesystem device as workspace.");
-      console.warn("  ADR 0001 requires a dedicated persistent filesystem mount to physically prevent hardlink aliases.");
+      console.error("  [SAFETY REFUSAL] Target destination is on the SAME filesystem device as workspace (st_dev=" + dstDev + ").");
+      console.error("  ADR 0001 requires confirmed filesystem separation (distinct st_dev) before migration can proceed.");
+      process.exit(1);
     } else {
       console.log("  [PASS] Target destination resides on a distinct filesystem device.");
     }
@@ -92,6 +93,7 @@ async function main(): Promise<void> {
   const summary = await migratePrivateStateOffline({
     sourceDir: sourceControlPlane,
     destinationDir,
+    workspaceRoot,
     dryRun: isRehearsal,
     rollbackOnError: true
   });

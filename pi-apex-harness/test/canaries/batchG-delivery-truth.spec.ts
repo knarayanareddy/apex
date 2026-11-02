@@ -268,12 +268,14 @@ try {
   assert.equal(unreachableReceipt.delivered, false);
   assert.equal(unreachableReceipt.deliveryStatus, "unknown");
 
-  // 12. Positive control: Custom platform adapter confirms send
+  // 12. Positive control: Custom platform adapter explicitly confirms send
   unconfiguredGw.registerAdapter({
     platform: "plugin:custom-relay:matrix" as any,
     send: async (req) => ({
       externalMessageId: "mtx_confirmed_999",
-      transportDetail: "matrix-synapse-v1"
+      transportDetail: "matrix-synapse-v1",
+      outcome: "confirmed",
+      delivered: true
     })
   });
 
@@ -288,9 +290,102 @@ try {
   assert.equal(confirmedReceipt.externalMessageId, "mtx_confirmed_999");
   assert.equal(confirmedReceipt.transportDetail, "matrix-synapse-v1");
 
+  // 13. Custom adapter returning queued-local-adapter produces delivered: false and deliveryStatus: "queued"
+  unconfiguredGw.registerAdapter({
+    platform: "plugin:custom-relay:queued-transport" as any,
+    send: async () => ({
+      externalMessageId: "local_queued_123",
+      transportDetail: "queued-local-adapter"
+    })
+  });
+
+  const queuedReceipt = await unconfiguredGw.send({
+    platform: "plugin:custom-relay:queued-transport" as any,
+    channelId: "chan_q",
+    text: "Queued payload"
+  });
+
+  assert.equal(queuedReceipt.delivered, false, "Queued adapter must NOT produce delivered: true");
+  assert.equal(queuedReceipt.deliveryStatus, "queued");
+  assert.equal(queuedReceipt.transportDetail, "queued-local-adapter");
+
+  // 14. Custom adapter returning explicit outcome: "queued" produces delivered: false
+  unconfiguredGw.registerAdapter({
+    platform: "plugin:custom-relay:explicit-queue" as any,
+    send: async () => ({
+      externalMessageId: "msg_eq_456",
+      transportDetail: "local-spool",
+      outcome: "queued"
+    })
+  });
+
+  const explicitQueueReceipt = await unconfiguredGw.send({
+    platform: "plugin:custom-relay:explicit-queue" as any,
+    channelId: "chan_eq",
+    text: "Explicit queue payload"
+  });
+
+  assert.equal(explicitQueueReceipt.delivered, false);
+  assert.equal(explicitQueueReceipt.deliveryStatus, "queued");
+
+  // 15. Ambiguous / zero-network-call return without explicit confirmation produces unknown
+  unconfiguredGw.registerAdapter({
+    platform: "plugin:custom-relay:zero-net" as any,
+    send: async () => ({
+      externalMessageId: "local_noop_789",
+      transportDetail: "local-mock-no-network"
+    })
+  });
+
+  const ambiguousReceipt = await unconfiguredGw.send({
+    platform: "plugin:custom-relay:zero-net" as any,
+    channelId: "chan_zero",
+    text: "Zero network payload"
+  });
+
+  assert.equal(ambiguousReceipt.delivered, false, "Ambiguous outcome without confirmation must NOT report delivered: true");
+  assert.equal(ambiguousReceipt.deliveryStatus, "unknown");
+
+  // 16. Custom adapter returning outcome: "failed" produces delivered: false, failed
+  unconfiguredGw.registerAdapter({
+    platform: "plugin:custom-relay:failed-transport" as any,
+    send: async () => ({
+      externalMessageId: "msg_fail_999",
+      transportDetail: "upstream-rejected",
+      outcome: "failed"
+    })
+  });
+
+  const failedReceipt = await unconfiguredGw.send({
+    platform: "plugin:custom-relay:failed-transport" as any,
+    channelId: "chan_fail",
+    text: "Failed payload"
+  });
+
+  assert.equal(failedReceipt.delivered, false);
+  assert.equal(failedReceipt.deliveryStatus, "failed");
+
+  // 17. Custom adapter throwing an error produces failed
+  unconfiguredGw.registerAdapter({
+    platform: "plugin:custom-relay:throw-transport" as any,
+    send: async () => {
+      throw new Error("Simulated connection reset by peer");
+    }
+  });
+
+  const thrownReceipt = await unconfiguredGw.send({
+    platform: "plugin:custom-relay:throw-transport" as any,
+    channelId: "chan_throw",
+    text: "Throwing payload"
+  });
+
+  assert.equal(thrownReceipt.delivered, false);
+  assert.equal(thrownReceipt.deliveryStatus, "failed");
+  assert.ok(thrownReceipt.transportDetail.includes("custom-adapter-failed: Simulated connection reset by peer"));
+
   db.close();
   passed = true;
-  console.log("R02 Truthful messaging delivery status (all 12 controls): PASS");
+  console.log("R02 Truthful messaging delivery status (all 17 controls): PASS");
 } finally {
   mockServer.close();
   if (passed) {

@@ -164,10 +164,77 @@ const spillFile = path.join(spillDir, "spill-tool-0.txt");
 const spillBytes = "SYNTHETIC_LARGE_TOOL_OUTPUT_TO_BE_MIGRATED\n";
 fs.writeFileSync(spillFile, spillBytes, "utf8");
 
-// 3. Execute offline migration
+// 3a. Same-device destination must be rejected when allowSameDeviceDev is omitted
+await assert.rejects(
+  async () => migratePrivateStateOffline({
+    sourceDir: srcHarness,
+    destinationDir: dstHarness
+  }),
+  (err: unknown) => {
+    assert.ok(err instanceof PrivateStateBoundaryError);
+    assert.match((err as Error).message, /PRIVATE_STATE_BOUNDARY_VIOLATION/);
+    return true;
+  },
+  "Migration to same filesystem device without override must fail closed"
+);
+
+// 3b. Overlapping source and destination must be rejected
+await assert.rejects(
+  async () => migratePrivateStateOffline({
+    sourceDir: srcHarness,
+    destinationDir: path.join(srcHarness, "nested-dst"),
+    allowSameDeviceDev: true
+  }),
+  (err: unknown) => {
+    assert.ok(err instanceof PrivateStateBoundaryError);
+    assert.match((err as Error).message, /MIGRATION_PATH_OVERLAP/);
+    return true;
+  },
+  "Overlapping destination inside source must fail before mutation"
+);
+
+// 3c. Non-empty destination must fail before mutation, preserving pre-existing data
+const nonEmptyDst = path.join(realWs, "non-empty-dst");
+fs.mkdirSync(nonEmptyDst, { recursive: true });
+const existingFile = path.join(nonEmptyDst, "pre-existing-user-file.txt");
+fs.writeFileSync(existingFile, "IMPORTANT_PREEXISTING_USER_DATA\n", "utf8");
+
+await assert.rejects(
+  async () => migratePrivateStateOffline({
+    sourceDir: srcHarness,
+    destinationDir: nonEmptyDst,
+    allowSameDeviceDev: true
+  }),
+  (err: unknown) => {
+    assert.ok(err instanceof PrivateStateBoundaryError);
+    assert.match((err as Error).message, /MIGRATION_DESTINATION_NOT_EMPTY/);
+    return true;
+  },
+  "Non-empty destination must fail closed before mutation"
+);
+assert.equal(
+  fs.readFileSync(existingFile, "utf8"),
+  "IMPORTANT_PREEXISTING_USER_DATA\n",
+  "Pre-existing destination content must be preserved intact"
+);
+
+// 3d. Dry-run must report summary and verify without creating files in an uncreated destination
+const dryRunDst = path.join(realWs, "dry-run-dst");
+const drySummary = await migratePrivateStateOffline({
+  sourceDir: srcHarness,
+  destinationDir: dryRunDst,
+  dryRun: true,
+  allowSameDeviceDev: true
+});
+assert.equal(drySummary.success, true);
+assert.equal(drySummary.dryRun, true);
+assert.equal(fs.existsSync(dryRunDst), false, "Dry run must NOT create destination directory");
+
+// 3e. Execute offline migration to clean destination with dev override
 const summary = await migratePrivateStateOffline({
   sourceDir: srcHarness,
-  destinationDir: dstHarness
+  destinationDir: dstHarness,
+  allowSameDeviceDev: true
 });
 
 assert.equal(summary.success, true);

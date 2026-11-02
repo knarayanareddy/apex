@@ -24,7 +24,8 @@ import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildMinimalBwrapArgv, probeBwrapFunctional } from "../../src/core/bwrap-sandbox.ts";
+import { buildMinimalBwrapArgv, createBwrapBashOperations, probeBwrapFunctional } from "../../src/core/bwrap-sandbox.ts";
+import { recordProcessIdentity, terminateProcessTree } from "../../src/core/process-tree.ts";
 
 console.log("=== Linux Kernel Process Ownership Qualification (ADR 0002 / R07) ===");
 
@@ -157,9 +158,9 @@ let passedAllGates = false;
 
 try {
   // =========================================================================
-  // Gate 1: Natural Leader Exit with setsid Child (PID Namespace Invariant)
+  // Gate 1: Natural Leader Exit with setsid Child (Public bashOps Path)
   // =========================================================================
-  console.log("\n[Gate 1] Testing natural leader exit with setsid child...");
+  console.log("\n[Gate 1] Testing natural leader exit with setsid child via public bashOps...");
   {
     const srv = startIdentityServer(ws, "g1");
     assert.ok(await waitUntil(() => fs.existsSync(srv.readyFile), 3000), "Identity server must be ready");
@@ -187,10 +188,14 @@ try {
       "exit 0"
     ].join("\n");
 
-    execFileSync("bwrap", buildMinimalBwrapArgv(command, ws, { workspaceRoot: ws, mode: "workspace-write" }), {
-      stdio: "pipe",
-      timeout: 10_000
+    const bashOps = createBwrapBashOperations({
+      workspaceRoot: ws,
+      mode: "workspace-write",
+      unshareNet: true
     });
+
+    const res = await bashOps.exec(command, ws, { onData: () => {} });
+    assert.equal(res.exitCode, 0, "Natural leader exit must return exitCode 0");
 
     const identity = await srv.getIdentity();
     assert.ok(Number.isInteger(identity.pid) && identity.pid > 0);
@@ -206,85 +211,119 @@ try {
   }
 
   // =========================================================================
-  // Gate 2: Control Pipe Cancellation (Zero Signals)
+  // Gate 2: Production Process Cancellation via AbortSignal (Public bashOps Path)
   // =========================================================================
-  console.log("\n[Gate 2] Testing control pipe cancellation without process signals...");
+  console.log("\n[Gate 2] Testing production process cancellation via AbortSignal on public bashOps path...");
   {
     const srv = startIdentityServer(ws, "g2");
     assert.ok(await waitUntil(() => fs.existsSync(srv.readyFile), 3000), "Identity server must be ready");
 
-    const supervisorReady = path.join(ws, "g2-supervisor-ready");
     const childReady = path.join(ws, "g2-child-ready");
     const childDone = path.join(ws, "g2-child-done");
 
-    // Supervisor script running inside bwrap: monitors stdin (fd 0) control pipe for EOF
-    const supervisorScript = [
-      "import os,pathlib,select,socket,subprocess,sys,time",
-      "p=subprocess.Popen(['python3', '-c',",
-      `    'import os,pathlib,socket,time; os.setsid(); s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(${JSON.stringify(srv.socketPath)}); s.sendall(b\"x\"); assert s.recv(1)==b\"1\"; s.close(); pathlib.Path(${JSON.stringify(childReady)}).write_text(\"ready\"); time.sleep(20); pathlib.Path(${JSON.stringify(childDone)}).write_text(\"finished\")'],`,
-      "    close_fds=True)",
-      `pathlib.Path(${JSON.stringify(supervisorReady)}).write_text('ready')`,
-      "poller=select.poll()",
-      "poller.register(0, select.POLLIN | select.POLLHUP)",
-      "while True:",
-      "    events=poller.poll(50)",
-      "    if events:",
-      "        buf=os.read(0, 1)",
-      "        if not buf:",
-      "            sys.exit(0)", // EOF received! Exit normally, causing kernel to reclaim PID namespace!
-      "    if p.poll() is not None:",
-      "        sys.exit(42)"
+    const childPy = [
+      "import os,pathlib,socket,time",
+      "os.setsid()",
+      "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)",
+      `s.connect(${JSON.stringify(srv.socketPath)})`,
+      "s.sendall(b'x')",
+      "assert s.recv(1)==b'1'",
+      "s.close()",
+      `pathlib.Path(${JSON.stringify(childReady)}).write_text('ready')`,
+      "time.sleep(25)",
+      `pathlib.Path(${JSON.stringify(childDone)}).write_text('finished')`
+    ].join(";");
+
+    const command = [
+      `python3 -c ${quote(childPy)} </dev/null >/dev/null 2>&1 &`,
+      `i=0; while [ ! -f ${quote(childReady)} ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done`,
+      `[ -f ${quote(childReady)} ] || exit 2`,
+      "sleep 30"
     ].join("\n");
 
-    const supervisorFile = path.join(ws, "supervisor-g2.py");
-    fs.writeFileSync(supervisorFile, supervisorScript, { mode: 0o755 });
-
-    const bwrapArgs = [
-      "--unshare-pid",
-      "--proc", "/proc",
-      "--dev", "/dev",
-      "--tmpfs", "/tmp",
-      "--ro-bind", "/usr", "/usr",
-      "--ro-bind", "/bin", "/bin",
-      "--ro-bind", "/lib", "/lib",
-      "--ro-bind-try", "/lib64", "/lib64",
-      "--bind", ws, ws,
-      "--die-with-parent",
-      "--clearenv",
-      "--setenv", "PATH", "/usr/bin:/bin",
-      "--",
-      "python3", supervisorFile
-    ];
-
-    const childProc = spawn("bwrap", bwrapArgs, {
-      stdio: ["pipe", "pipe", "pipe"] // stdin (fd 0) is the control pipe from parent!
+    const bashOps = createBwrapBashOperations({
+      workspaceRoot: ws,
+      mode: "workspace-write",
+      unshareNet: true
     });
 
-    let childStderr = "";
-    childProc.stderr?.on("data", (chunk: Buffer) => {
-      childStderr += chunk.toString("utf8");
+    const controller = new AbortController();
+    const execPromise = bashOps.exec(command, ws, {
+      signal: controller.signal,
+      onData: () => {}
     });
 
-    assert.ok(
-      await waitUntil(() => fs.existsSync(supervisorReady), 5000),
-      `Supervisor must be ready (stderr: ${childStderr})`
-    );
-    assert.ok(
-      await waitUntil(() => fs.existsSync(childReady), 5000),
-      `Child must be ready (stderr: ${childStderr})`
-    );
+    assert.ok(await waitUntil(() => fs.existsSync(childReady), 5000), "Child must be ready");
     const identity = await srv.getIdentity();
-    assert.ok(readOwnedChildStat(identity).alive, "Child must be alive before control EOF");
+    assert.ok(readOwnedChildStat(identity).alive, "Child must be alive before cancellation");
 
-    // Close stdin (parent's pipe writer) to send EOF without signals
-    childProc.stdin?.end();
+    // Trigger production cancellation
+    controller.abort();
+    const res = await execPromise;
+    assert.equal(res.exitCode, 137, "Cancelled execution must resolve with exitCode 137");
 
-    // Verify supervisor and setsid child terminate promptly (within 2000ms), long before 20s natural exit
+    // Verify setsid child is terminated promptly by kernel namespace reclamation
     const terminated = await waitUntil(() => !readOwnedChildStat(identity).alive, 2500);
-    assert.ok(terminated, "Closing control pipe must terminate the setsid child via PID namespace reclamation");
+    assert.ok(terminated, "Production cancellation must terminate the setsid child via kernel PID namespace reclamation");
     assert.equal(fs.existsSync(childDone), false, "Setsid child must not run to completion");
     await srv.close();
-    console.log("  [PASS] Gate 2: Control pipe EOF cancels detached setsid child without signals.");
+    console.log("  [PASS] Gate 2: Production AbortSignal cancellation terminates detached setsid child.");
+  }
+
+  // =========================================================================
+  // Gate 2B: Production Timeout via options.timeout (Public bashOps Path)
+  // =========================================================================
+  console.log("\n[Gate 2B] Testing production timeout via options.timeout on public bashOps path...");
+  {
+    const srv = startIdentityServer(ws, "g2b");
+    assert.ok(await waitUntil(() => fs.existsSync(srv.readyFile), 3000), "Identity server must be ready");
+
+    const childReady = path.join(ws, "g2b-child-ready");
+    const childDone = path.join(ws, "g2b-child-done");
+
+    const childPy = [
+      "import os,pathlib,socket,time",
+      "os.setsid()",
+      "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)",
+      `s.connect(${JSON.stringify(srv.socketPath)})`,
+      "s.sendall(b'x')",
+      "assert s.recv(1)==b'1'",
+      "s.close()",
+      `pathlib.Path(${JSON.stringify(childReady)}).write_text('ready')`,
+      "time.sleep(25)",
+      `pathlib.Path(${JSON.stringify(childDone)}).write_text('finished')`
+    ].join(";");
+
+    const command = [
+      `python3 -c ${quote(childPy)} </dev/null >/dev/null 2>&1 &`,
+      `i=0; while [ ! -f ${quote(childReady)} ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done`,
+      `[ -f ${quote(childReady)} ] || exit 2`,
+      "sleep 30"
+    ].join("\n");
+
+    const bashOps = createBwrapBashOperations({
+      workspaceRoot: ws,
+      mode: "workspace-write",
+      unshareNet: true
+    });
+
+    const execPromise = bashOps.exec(command, ws, {
+      timeout: 1,
+      onData: () => {}
+    });
+
+    assert.ok(await waitUntil(() => fs.existsSync(childReady), 5000), "Child must be ready");
+    const identity = await srv.getIdentity();
+    assert.ok(readOwnedChildStat(identity).alive, "Child must be alive before timeout");
+
+    const res = await execPromise;
+    assert.equal(res.exitCode, 124, "Timed-out execution must resolve with exitCode 124");
+
+    const terminated = await waitUntil(() => !readOwnedChildStat(identity).alive, 2500);
+    assert.ok(terminated, "Production timeout must terminate the setsid child via kernel PID namespace reclamation");
+    assert.equal(fs.existsSync(childDone), false, "Setsid child must not run to completion");
+    await srv.close();
+    console.log("  [PASS] Gate 2B: Production timeout terminates detached setsid child.");
   }
 
   // =========================================================================
@@ -380,10 +419,14 @@ try {
       "exit 0"
     ].join("\n");
 
-    execFileSync("bwrap", buildMinimalBwrapArgv(command, ws, { workspaceRoot: ws, mode: "workspace-write" }), {
-      stdio: "pipe",
-      timeout: 10_000
+    const bashOps = createBwrapBashOperations({
+      workspaceRoot: ws,
+      mode: "workspace-write",
+      unshareNet: true
     });
+
+    const res = await bashOps.exec(command, ws, { onData: () => {} });
+    assert.equal(res.exitCode, 0, "Reparenting leader exit must resolve exitCode 0");
 
     const identity = await srv.getIdentity();
     assert.ok(Number.isInteger(identity.pid) && identity.pid > 0);
@@ -396,8 +439,52 @@ try {
     console.log("  [PASS] Gate 4: Orphaned and reparented grandchild reaped by PID namespace.");
   }
 
+  // =========================================================================
+  // Gate 5: Process Ownership Identity Controls & Fail-Closed Refusal
+  // =========================================================================
+  console.log("\n[Gate 5] Testing ownership refusal and negative controls...");
+  {
+    const originalKill = process.kill;
+    const attemptedSignals: string[] = [];
+    const currentIdentity = recordProcessIdentity(process.pid);
+    assert.ok(currentIdentity.startTime, "The current process identity must be measurable for this control");
+
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+      if (signal === 0) {
+        if (pid === process.pid) return originalKill(pid, 0);
+        const err = new Error("No such process") as NodeJS.ErrnoException;
+        err.code = "ESRCH";
+        throw err;
+      }
+      attemptedSignals.push(`${pid}:${signal}`);
+      return true;
+    }) as typeof process.kill;
+
+    try {
+      // 5A: Refuse signaling when process start identity is unknown/null
+      const unknownResult = await terminateProcessTree(process.pid, { ...currentIdentity, startTime: null });
+      assert.equal(unknownResult.success, false, "Unknown identity must report failure");
+      assert.deepEqual(attemptedSignals, [], "Unknown identity must never receive a signal");
+
+      // 5B: Refuse signaling when process PID was recycled
+      const fakeRecycledIdentity = {
+        pid: process.pid,
+        startTime: "FakeRecycledStartTime_99999",
+        bootId: currentIdentity.bootId
+      };
+      const recycledResult = await terminateProcessTree(process.pid, fakeRecycledIdentity);
+      assert.equal(recycledResult.success, false, "Recycled process must report failure");
+      assert.equal(recycledResult.recycledDetected, true, "Must detect recycled PID");
+      assert.deepEqual(attemptedSignals, [], "Recycled process must never receive a signal");
+    } finally {
+      process.kill = originalKill;
+    }
+
+    console.log("  [PASS] Gate 5: Ownership refusal and negative signal controls verified.");
+  }
+
   passedAllGates = true;
-  console.log("\n=== ALL 4 LINUX PROCESS OWNERSHIP GATES PASSED CLEANLY ===\n");
+  console.log("\n=== ALL 5 LINUX PROCESS OWNERSHIP GATES PASSED CLEANLY ===\n");
 } catch (error) {
   primaryFailure = error;
 } finally {

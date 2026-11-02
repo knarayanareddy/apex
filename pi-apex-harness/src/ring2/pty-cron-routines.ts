@@ -35,7 +35,12 @@ import {
   GuardDeniedError,
   resolveAndValidateWorkspacePath
 } from "../core/monotonic-guard.ts";
-import { recordProcessIdentity, terminateProcessTree, type ProcessIdentity } from "../core/process-tree.ts";
+import {
+  isProcessAliveWithIdentity,
+  recordProcessIdentity,
+  terminateProcessTree,
+  type ProcessIdentity
+} from "../core/process-tree.ts";
 
 // ============================================================================
 // Upstream Constants (`anomalyco/opencode/src/pty.ts` + `hermes-agent/process_registry.py`)
@@ -69,7 +74,7 @@ export interface PtyLeaseInfo {
   watchHitsDelivered: number;
 }
 
-interface ActivePtySession {
+export interface ActivePtySession {
   info: PtyLeaseInfo;
   proc: ChildProcess;
   procIdentity: ProcessIdentity;
@@ -403,33 +408,96 @@ export class PtyLeaseManager {
         if (index !== -1) this.exitOrder.splice(index, 1);
       }
     };
+
+    const pid = session.proc.pid ?? -1;
+    // 1. Do not signal a process whose ownership cannot be established
+    if (pid <= 0 || !session.procIdentity || !session.procIdentity.startTime) {
+      finish(false, `REFUSING_SIGNAL: PID ${pid} has unknown or unestablished ownership`);
+      return;
+    }
+
+    // 2. Probe existence and check for PID recycling before sending signals
+    let isAlive = false;
+    try {
+      process.kill(pid, 0);
+      isAlive = true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") {
+        finish(true, "Process already exited");
+        return;
+      }
+      finish(false, `REFUSING_SIGNAL: Signal probe failed with code ${code ?? String(err)}`);
+      return;
+    }
+
+    if (isAlive && !isProcessAliveWithIdentity(session.procIdentity)) {
+      finish(false, `REFUSING_SIGNAL: PID ${pid} was recycled by an unrelated process`);
+      return;
+    }
+
     if (session.isConfined && process.platform === "linux") {
-      // On qualified Linux bubblewrap boundary, terminating the bwrap leader (PID 1 of container)
-      // causes the Linux kernel to atomically terminate all processes in the PID namespace.
-      try {
-        if (session.proc.pid) process.kill(session.proc.pid, "SIGTERM");
-      } catch {}
       const checkReap = async () => {
-        const deadline = Date.now() + 1500;
-        while (Date.now() < deadline) {
+        // 3. Attempt SIGTERM to bwrap leader
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === "ESRCH") {
+            finish(true, "Process exited before SIGTERM");
+            return;
+          }
+          finish(false, `SIGTERM failed: ${String(err)}`);
+          return;
+        }
+
+        const termDeadline = Date.now() + 1000;
+        while (Date.now() < termDeadline) {
           try {
-            if (session.proc.pid) process.kill(session.proc.pid, 0);
+            process.kill(pid, 0);
             await new Promise((r) => setTimeout(r, 25));
           } catch {
             // bwrap process has exited -> kernel PID namespace reclaimed!
-            finish(true, "Linux PID namespace reclaimed by kernel");
+            finish(true, "Linux PID namespace reclaimed by kernel after SIGTERM");
             return;
           }
         }
-        // If still alive after SIGTERM, SIGKILL bwrap
+
+        // 4. Verify identity again before SIGKILL
+        if (!isProcessAliveWithIdentity(session.procIdentity)) {
+          finish(false, `REFUSING_SIGNAL: PID ${pid} was recycled before SIGKILL`);
+          return;
+        }
+
         try {
-          if (session.proc.pid) process.kill(session.proc.pid, "SIGKILL");
-        } catch {}
-        finish(true, "Linux PID namespace reclaimed by kernel after SIGKILL");
+          process.kill(pid, "SIGKILL");
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === "ESRCH") {
+            finish(true, "Process exited before SIGKILL");
+            return;
+          }
+          finish(false, `SIGKILL failed: ${String(err)}`);
+          return;
+        }
+
+        // 5. Verify the owned process has ACTUALLY exited before reporting successful cleanup
+        const killDeadline = Date.now() + 1000;
+        while (Date.now() < killDeadline) {
+          try {
+            process.kill(pid, 0);
+            await new Promise((r) => setTimeout(r, 25));
+          } catch {
+            finish(true, "Linux PID namespace reclaimed by kernel after SIGKILL");
+            return;
+          }
+        }
+
+        finish(false, `Process ${pid} remained alive after SIGKILL deadline; cleanup unverified`);
       };
       void checkReap();
     } else {
-      void terminateProcessTree(session.proc.pid ?? -1, session.procIdentity)
+      void terminateProcessTree(pid, session.procIdentity)
         .then((result) => finish(result.success, result.diagnostic))
         .catch((error) => finish(false, error instanceof Error ? error.message : String(error)));
     }

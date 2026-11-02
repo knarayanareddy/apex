@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveAndValidateWorkspacePath } from "../core/monotonic-guard.ts";
 import { readWorkspaceFileSafe } from "../core/safe-path.ts";
 import { buildMinimalBwrapCommandArgv, probeBwrapFunctional, SandboxUnavailableError } from "../core/bwrap-sandbox.ts";
+import { isProcessAliveWithIdentity, type ProcessIdentity, recordProcessIdentity } from "../core/process-tree.ts";
 import type { GuardrailsConfig } from "../types.ts";
 
 export type LspOperationName =
@@ -114,6 +115,7 @@ class StdioLspConnection {
   private readonly requestTimeoutMs: number;
   private readonly allowUnsandboxedDev: boolean;
   private proc: ChildProcessWithoutNullStreams | null = null;
+  private procIdentity: ProcessIdentity | null = null;
   private readBuf: Buffer = Buffer.alloc(0);
   private nextId = 1;
   private readonly pending = new Map<number, PendingRpc>();
@@ -180,6 +182,7 @@ class StdioLspConnection {
       stdio: ["pipe", "pipe", "pipe"]
     });
     this.proc = child;
+    this.procIdentity = recordProcessIdentity(child.pid ?? -1);
 
     child.stdout.on("data", (chunk: Buffer) => {
       this.onStdoutChunk(chunk);
@@ -400,7 +403,12 @@ class StdioLspConnection {
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    if (!this.proc) return;
+    const proc = this.proc;
+    const identity = this.procIdentity;
+    this.proc = null;
+    this.procIdentity = null;
+
+    if (!proc) return;
 
     try {
       await Promise.race([
@@ -411,12 +419,45 @@ class StdioLspConnection {
     } catch {
       // Ignore shutdown errors on tear-down
     } finally {
-      try {
-        this.proc.kill("SIGTERM");
-      } catch {
-        // ignore
+      const pid = proc.pid ?? -1;
+      if (pid > 0 && identity && identity.startTime) {
+        let alive = false;
+        try {
+          process.kill(pid, 0);
+          alive = true;
+        } catch {
+          // already exited
+        }
+        if (alive && isProcessAliveWithIdentity(identity)) {
+          try {
+            process.kill(pid, "SIGTERM");
+          } catch {}
+          const termDeadline = Date.now() + 500;
+          while (Date.now() < termDeadline) {
+            try {
+              process.kill(pid, 0);
+              await new Promise((r) => setTimeout(r, 25));
+            } catch {
+              alive = false;
+              break;
+            }
+          }
+          if (alive && isProcessAliveWithIdentity(identity)) {
+            try {
+              process.kill(pid, "SIGKILL");
+            } catch {}
+            const killDeadline = Date.now() + 500;
+            while (Date.now() < killDeadline) {
+              try {
+                process.kill(pid, 0);
+                await new Promise((r) => setTimeout(r, 25));
+              } catch {
+                break;
+              }
+            }
+          }
+        }
       }
-      this.proc = null;
       this.rejectAllPending(new Error("LSP shut down"));
     }
   }

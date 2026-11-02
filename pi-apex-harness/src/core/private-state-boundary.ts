@@ -11,6 +11,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
+import { readProcStartTimeTicks } from "./workspace-lock.ts";
 
 export class PrivateStateBoundaryError extends Error {
   constructor(message: string) {
@@ -216,40 +217,142 @@ function copyFileWithVerification(src: string, dst: string): { bytes: number; ha
   return { bytes: content.length, hash: srcHash };
 }
 
+export interface MigratePrivateStateOptions {
+  sourceDir: string;
+  destinationDir: string;
+  workspaceRoot?: string;
+  stateDbPath?: string;
+  dryRun?: boolean;
+  rollbackOnError?: boolean;
+  allowSameDeviceDev?: boolean;
+}
+
+function checkNoSymlinksInPath(targetPath: string, label: string): void {
+  let cur = path.resolve(targetPath);
+  while (cur !== path.dirname(cur)) {
+    if (fs.existsSync(cur)) {
+      const lst = fs.lstatSync(cur);
+      if (lst.isSymbolicLink()) {
+        throw new PrivateStateBoundaryError(`MIGRATION_UNSAFE_PATH: ${label} path '${targetPath}' contains symbolic link at '${cur}'`);
+      }
+    }
+    cur = path.dirname(cur);
+  }
+}
+
 /**
  * Rehearses and performs offline, non-destructive migration of private state (ADR 0001 / R06).
  * Retains source state intact, uses SQLite backup() API for consistent database checkpoints,
  * verifies destination PRAGMA integrity_check, and cryptographically verifies all copied sessions and spills.
- * Automatically rolls back destination state on any failure.
+ * Automatically rolls back destination state on any failure, removing ONLY resources created by this attempt.
  */
-export async function migratePrivateStateOffline(params: {
-  sourceDir: string;
-  destinationDir: string;
-  stateDbPath?: string;
-  dryRun?: boolean;
-  rollbackOnError?: boolean;
-}): Promise<MigrationSummary> {
+export async function migratePrivateStateOffline(params: MigratePrivateStateOptions): Promise<MigrationSummary> {
   const srcDir = path.resolve(params.sourceDir);
   const dstDir = path.resolve(params.destinationDir);
   const dryRun = Boolean(params.dryRun);
   const rollbackOnError = params.rollbackOnError ?? true;
 
+  // 1. Source existence and symlink verification
   if (!fs.existsSync(srcDir)) {
     throw new Error(`MIGRATION_SOURCE_NOT_FOUND: Source directory '${srcDir}' does not exist`);
   }
+  checkNoSymlinksInPath(srcDir, "Source");
 
+  // 2. Destination symlink verification
+  checkNoSymlinksInPath(dstDir, "Destination");
+
+  // 3. Overlapping path collision checks
+  const realSrc = fs.realpathSync(srcDir);
+  let dstParent = dstDir;
+  while (!fs.existsSync(dstParent) && dstParent !== path.dirname(dstParent)) {
+    dstParent = path.dirname(dstParent);
+  }
+  const realDstParent = fs.realpathSync(dstParent);
+  const relDst = path.relative(dstParent, dstDir);
+  const resolvedDst = path.resolve(realDstParent, relDst);
+
+  if (realSrc === resolvedDst) {
+    throw new PrivateStateBoundaryError(`MIGRATION_PATH_COLLISION: Source and destination are identical ('${realSrc}')`);
+  }
+  if (resolvedDst.startsWith(realSrc + path.sep)) {
+    throw new PrivateStateBoundaryError(`MIGRATION_PATH_OVERLAP: Destination '${resolvedDst}' is inside source directory '${realSrc}'`);
+  }
+  if (realSrc.startsWith(resolvedDst + path.sep)) {
+    throw new PrivateStateBoundaryError(`MIGRATION_PATH_OVERLAP: Source '${realSrc}' is inside destination directory '${resolvedDst}'`);
+  }
+
+  // 4. Pre-existing destination content check (fail before mutation)
   const dstAlreadyExisted = fs.existsSync(dstDir);
-  const createdPaths: string[] = [];
+  if (dstAlreadyExisted) {
+    const existing = fs.readdirSync(dstDir);
+    if (existing.length > 0) {
+      throw new PrivateStateBoundaryError(
+        `MIGRATION_DESTINATION_NOT_EMPTY: Destination directory '${dstDir}' contains ${existing.length} existing entry/entries. Refusing migration to prevent overwriting existing data.`
+      );
+    }
+  }
+
+  // 5. Confirmed filesystem separation (st_dev differs from source and workspace)
+  const srcDev = fs.statSync(srcDir).dev;
+  const dstDev = dstAlreadyExisted ? fs.statSync(dstDir).dev : fs.statSync(dstParent).dev;
+
+  if (srcDev === dstDev && !params.allowSameDeviceDev) {
+    throw new PrivateStateBoundaryError(
+      `PRIVATE_STATE_BOUNDARY_VIOLATION: Destination '${dstDir}' shares filesystem device (${dstDev}) with source '${srcDir}'. Migration requires confirmed filesystem separation (st_dev differs).`
+    );
+  }
+  if (params.workspaceRoot) {
+    const wsDev = fs.statSync(path.resolve(params.workspaceRoot)).dev;
+    if (dstDev === wsDev && !params.allowSameDeviceDev) {
+      throw new PrivateStateBoundaryError(
+        `PRIVATE_STATE_BOUNDARY_VIOLATION: Destination '${dstDir}' shares filesystem device (${dstDev}) with workspace '${params.workspaceRoot}'. Migration requires confirmed filesystem separation (st_dev differs).`
+      );
+    }
+  }
+
+  // 6. Explicitly offline source verification (ensure no active processes hold workspace.lock)
+  const lockPath = path.join(srcDir, "workspace.lock");
+  if (fs.existsSync(lockPath)) {
+    try {
+      const raw = fs.readFileSync(lockPath, "utf8").trim();
+      if (raw) {
+        const payload = JSON.parse(raw);
+        if (typeof payload.pid === "number" && payload.pid > 0) {
+          let isAlive = false;
+          try {
+            process.kill(payload.pid, 0);
+            isAlive = true;
+          } catch {}
+          if (isAlive) {
+            const startTicks = readProcStartTimeTicks(payload.pid);
+            if (startTicks && startTicks === payload.procStartTimeTicks) {
+              throw new PrivateStateBoundaryError(
+                `MIGRATION_SOURCE_ACTIVE: Source control-plane at '${srcDir}' is currently locked by active process PID ${payload.pid}. Migration requires an explicitly offline source.`
+              );
+            }
+          }
+        }
+      }
+    } catch (err) {
+      if (err instanceof PrivateStateBoundaryError) throw err;
+    }
+  }
+
+  const createdDirs: string[] = [];
+  const createdFiles: string[] = [];
   let filesCopied = 0;
   let bytesCopied = 0;
   let integrityVerified = false;
 
   try {
     if (!dryRun) {
-      fs.mkdirSync(dstDir, { recursive: true, mode: 0o700 });
+      if (!dstAlreadyExisted) {
+        fs.mkdirSync(dstDir, { recursive: true, mode: 0o700 });
+        createdDirs.push(dstDir);
+      }
     }
 
-    // 1. Migrate SQLite database using SQLite backup() API if present
+    // 7. Migrate SQLite database using SQLite backup() API if present
     const srcDbPath = params.stateDbPath ?? path.join(srcDir, "state.db");
     const dstDbPath = path.join(dstDir, "state.db");
     if (fs.existsSync(srcDbPath)) {
@@ -257,12 +360,16 @@ export async function migratePrivateStateOffline(params: {
       try {
         const srcIntegrity = srcDb.prepare("PRAGMA integrity_check").get() as { integrity_check?: string };
         if (srcIntegrity?.integrity_check !== "ok") {
-          throw new Error(`MIGRATION_SOURCE_CORRUPT: Source database failed integrity check: ${srcIntegrity?.integrity_check}`);
+          throw new PrivateStateBoundaryError(`MIGRATION_SOURCE_CORRUPT: Source database failed integrity check: ${srcIntegrity?.integrity_check}`);
         }
         if (!dryRun) {
-          fs.mkdirSync(path.dirname(dstDbPath), { recursive: true, mode: 0o700 });
+          const dstDbDir = path.dirname(dstDbPath);
+          if (!fs.existsSync(dstDbDir)) {
+            fs.mkdirSync(dstDbDir, { recursive: true, mode: 0o700 });
+            createdDirs.push(dstDbDir);
+          }
           await backup(srcDb, dstDbPath);
-          createdPaths.push(dstDbPath);
+          createdFiles.push(dstDbPath);
           filesCopied += 1;
           bytesCopied += fs.statSync(dstDbPath).size;
 
@@ -270,7 +377,7 @@ export async function migratePrivateStateOffline(params: {
           try {
             const dstIntegrity = dstDb.prepare("PRAGMA integrity_check").get() as { integrity_check?: string };
             if (dstIntegrity?.integrity_check !== "ok") {
-              throw new Error(`MIGRATION_INTEGRITY_ERROR: Destination SQLite integrity check failed: ${dstIntegrity?.integrity_check}`);
+              throw new PrivateStateBoundaryError(`MIGRATION_INTEGRITY_ERROR: Destination SQLite integrity check failed: ${dstIntegrity?.integrity_check}`);
             }
             integrityVerified = true;
           } finally {
@@ -286,7 +393,7 @@ export async function migratePrivateStateOffline(params: {
       }
     }
 
-    // 2. Recursively copy sessions, spills, and credentials with SHA-256 verification
+    // 8. Recursively copy sessions, spills, and credentials with SHA-256 verification
     const walkAndCopy = (dir: string) => {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const entry of entries) {
@@ -297,7 +404,10 @@ export async function migratePrivateStateOffline(params: {
 
         if (entry.isDirectory()) {
           if (!dryRun) {
-            fs.mkdirSync(dstFull, { recursive: true, mode: 0o700 });
+            if (!fs.existsSync(dstFull)) {
+              fs.mkdirSync(dstFull, { recursive: true, mode: 0o700 });
+              createdDirs.push(dstFull);
+            }
           }
           walkAndCopy(srcFull);
         } else if (entry.isFile()) {
@@ -306,8 +416,13 @@ export async function migratePrivateStateOffline(params: {
             continue;
           }
           if (!dryRun) {
+            const dstParentDir = path.dirname(dstFull);
+            if (!fs.existsSync(dstParentDir)) {
+              fs.mkdirSync(dstParentDir, { recursive: true, mode: 0o700 });
+              createdDirs.push(dstParentDir);
+            }
             const { bytes } = copyFileWithVerification(srcFull, dstFull);
-            createdPaths.push(dstFull);
+            createdFiles.push(dstFull);
             filesCopied += 1;
             bytesCopied += bytes;
           } else {
@@ -320,7 +435,7 @@ export async function migratePrivateStateOffline(params: {
 
     walkAndCopy(srcDir);
 
-    // 3. Verify source files are completely retained
+    // 9. Verify source files are completely retained
     const sourceRetained = fs.existsSync(srcDir);
 
     return {
@@ -334,18 +449,19 @@ export async function migratePrivateStateOffline(params: {
     };
   } catch (error) {
     if (!dryRun && rollbackOnError) {
-      // Non-destructive rollback: clean up destination paths created during failed migration
-      try {
-        if (!dstAlreadyExisted) {
-          fs.rmSync(dstDir, { recursive: true, force: true });
-        } else {
-          for (const p of createdPaths.reverse()) {
-            try {
-              if (fs.existsSync(p)) fs.rmSync(p, { force: true });
-            } catch {}
+      // Surgical rollback: clean up ONLY resources created during this failed attempt
+      for (const f of createdFiles.reverse()) {
+        try {
+          if (fs.existsSync(f)) fs.rmSync(f, { force: true });
+        } catch {}
+      }
+      for (const d of createdDirs.reverse()) {
+        try {
+          if (fs.existsSync(d) && fs.readdirSync(d).length === 0) {
+            fs.rmdirSync(d);
           }
-        }
-      } catch {}
+        } catch {}
+      }
     }
     throw error;
   }

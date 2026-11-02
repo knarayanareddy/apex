@@ -9,7 +9,7 @@ import {
   findWorkspaceGitRoots,
   scanWorkspaceSecretsAndHardlinks
 } from "./safe-path.ts";
-import { recordProcessIdentity, terminateProcessTree } from "./process-tree.ts";
+import { isProcessAliveWithIdentity, recordProcessIdentity, terminateProcessTree } from "./process-tree.ts";
 
 export class SandboxUnavailableError extends Error {
   constructor(message: string) {
@@ -459,22 +459,88 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
         let settleTimeout: NodeJS.Timeout | undefined;
         let settled = false;
 
-        const terminateDescendantsAndStreams = () => {
-          if (child.pid) {
-            void terminateProcessTree(child.pid, procIdentity)
-              .then((result) => {
-                if (!result.success) {
-                  const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${result.diagnostic}`;
-                  console.warn(warning);
-                  if (!settled) options.onData(Buffer.from(`\n${warning}\n`, "utf8"));
-                }
-              })
-              .catch((error) => {
-                const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${error instanceof Error ? error.message : String(error)}`;
-                console.warn(warning);
-                if (!settled) options.onData(Buffer.from(`\n${warning}\n`, "utf8"));
-              });
+        const performCleanup = async (
+          reason: "timeout" | "abort" | "kill_ceiling"
+        ): Promise<{ success: boolean; diagnostic: string }> => {
+          const pid = child.pid ?? -1;
+          if (pid <= 0 || !procIdentity || !procIdentity.startTime) {
+            return { success: false, diagnostic: `REFUSING_SIGNAL: PID ${pid} has unknown or unestablished ownership` };
           }
+
+          // Probe existence and guard against PID recycling before signaling
+          let isAlive = false;
+          try {
+            process.kill(pid, 0);
+            isAlive = true;
+          } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code === "ESRCH") {
+              return { success: true, diagnostic: "Process already exited" };
+            }
+            return { success: false, diagnostic: `REFUSING_SIGNAL: Signal probe failed with code ${code ?? String(err)}` };
+          }
+
+          if (isAlive && !isProcessAliveWithIdentity(procIdentity)) {
+            return { success: false, diagnostic: `REFUSING_SIGNAL: PID ${pid} was recycled by an unrelated process` };
+          }
+
+          if (bin === "bwrap" && process.platform === "linux") {
+            // Linux kernel-backed PID namespace boundary
+            try {
+              process.kill(pid, "SIGTERM");
+            } catch (err) {
+              const code = (err as NodeJS.ErrnoException).code;
+              if (code === "ESRCH") {
+                return { success: true, diagnostic: "Process exited before SIGTERM" };
+              }
+              return { success: false, diagnostic: `SIGTERM failed: ${String(err)}` };
+            }
+
+            // Wait up to 1000ms for bwrap to exit (kernel tears down PID namespace)
+            const termDeadline = Date.now() + 1000;
+            while (Date.now() < termDeadline) {
+              try {
+                process.kill(pid, 0);
+                await new Promise((r) => setTimeout(r, 25));
+              } catch {
+                return { success: true, diagnostic: "Linux PID namespace reclaimed by kernel after SIGTERM" };
+              }
+            }
+
+            // Re-verify identity before SIGKILL
+            if (!isProcessAliveWithIdentity(procIdentity)) {
+              return { success: false, diagnostic: `REFUSING_SIGNAL: PID ${pid} was recycled before SIGKILL` };
+            }
+
+            try {
+              process.kill(pid, "SIGKILL");
+            } catch (err) {
+              const code = (err as NodeJS.ErrnoException).code;
+              if (code === "ESRCH") {
+                return { success: true, diagnostic: "Process exited before SIGKILL" };
+              }
+              return { success: false, diagnostic: `SIGKILL failed: ${String(err)}` };
+            }
+
+            // Wait up to 1000ms to verify that bwrap has actually exited
+            const killDeadline = Date.now() + 1000;
+            while (Date.now() < killDeadline) {
+              try {
+                process.kill(pid, 0);
+                await new Promise((r) => setTimeout(r, 25));
+              } catch {
+                return { success: true, diagnostic: "Linux PID namespace reclaimed by kernel after SIGKILL" };
+              }
+            }
+
+            return { success: false, diagnostic: `Process ${pid} remained alive after SIGKILL deadline; cleanup unverified` };
+          } else {
+            // Unconfined host execution: ADR 0002 applies
+            return await terminateProcessTree(pid, procIdentity);
+          }
+        };
+
+        const closeStreams = () => {
           try {
             child.stdout.destroy();
           } catch {
@@ -496,24 +562,63 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
           resolve(result);
         };
 
+        const settleFail = (err: Error) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (settleTimeout) clearTimeout(settleTimeout);
+          options.signal?.removeEventListener("abort", onAbort);
+          reject(err);
+        };
+
         if (options.timeout && options.timeout > 0) {
           timer = setTimeout(() => {
             timedOut = true;
-            terminateDescendantsAndStreams();
-            settleTimeout = setTimeout(() => {
-              options.onData(Buffer.from("\n[sandbox: command timed out]\n", "utf8"));
-              settleOnce({ exitCode: 124 });
-            }, 250);
-            settleTimeout.unref();
+            void performCleanup("timeout")
+              .then((cleanupResult) => {
+                closeStreams();
+                if (cleanupResult.success) {
+                  options.onData(Buffer.from("\n[sandbox: command timed out]\n", "utf8"));
+                  settleOnce({ exitCode: 124 });
+                } else {
+                  const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${cleanupResult.diagnostic}`;
+                  console.warn(warning);
+                  options.onData(Buffer.from(`\n${warning}\n\n[sandbox: command timed out]\n`, "utf8"));
+                  if (bin !== "bwrap" || process.platform !== "linux") {
+                    settleOnce({ exitCode: 124 });
+                  } else {
+                    settleFail(new SandboxUnavailableError(warning));
+                  }
+                }
+              })
+              .catch((err) => {
+                closeStreams();
+                settleFail(err instanceof Error ? err : new Error(String(err)));
+              });
           }, options.timeout * 1000);
         }
 
         const onAbort = () => {
-          terminateDescendantsAndStreams();
-          settleTimeout = setTimeout(() => {
-            settleOnce({ exitCode: 137 });
-          }, 250);
-          settleTimeout.unref();
+          void performCleanup("abort")
+            .then((cleanupResult) => {
+              closeStreams();
+              if (cleanupResult.success) {
+                settleOnce({ exitCode: 137 });
+              } else {
+                const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${cleanupResult.diagnostic}`;
+                console.warn(warning);
+                options.onData(Buffer.from(`\n${warning}\n`, "utf8"));
+                if (bin !== "bwrap" || process.platform !== "linux") {
+                  settleOnce({ exitCode: 137 });
+                } else {
+                  settleFail(new SandboxUnavailableError(warning));
+                }
+              }
+            })
+            .catch((err) => {
+              closeStreams();
+              settleFail(err instanceof Error ? err : new Error(String(err)));
+            });
         };
         if (options.signal) {
           if (options.signal.aborted) {
@@ -540,17 +645,32 @@ export function createBwrapBashOperations(cfg: BwrapSandboxConfig): BashOperatio
           // Hard kill ceiling: if runaway command exceeds 128MB, kill process immediately
           if (totalBytesSeen > MAX_KILL_BYTES) {
             killTriggered = true;
-            terminateDescendantsAndStreams();
             options.onData(
               Buffer.from(
                 `\n[TRUNCATED: Process killed after exceeding ${Math.round(MAX_KILL_BYTES / (1024 * 1024))}MB output cap. totalBytes=${totalBytesSeen}]\n`,
                 "utf8"
               )
             );
-            settleTimeout = setTimeout(() => {
-              settleOnce({ exitCode: 137 });
-            }, 250);
-            settleTimeout.unref();
+            void performCleanup("kill_ceiling")
+              .then((cleanupResult) => {
+                closeStreams();
+                if (cleanupResult.success) {
+                  settleOnce({ exitCode: 137 });
+                } else {
+                  const warning = `[SANDBOX_CLEANUP_UNVERIFIED] ${cleanupResult.diagnostic}`;
+                  console.warn(warning);
+                  options.onData(Buffer.from(`\n${warning}\n`, "utf8"));
+                  if (bin !== "bwrap" || process.platform !== "linux") {
+                    settleOnce({ exitCode: 137 });
+                  } else {
+                    settleFail(new SandboxUnavailableError(warning));
+                  }
+                }
+              })
+              .catch((err) => {
+                closeStreams();
+                settleFail(err instanceof Error ? err : new Error(String(err)));
+              });
             return;
           }
 

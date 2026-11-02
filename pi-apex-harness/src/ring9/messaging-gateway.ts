@@ -70,9 +70,24 @@ export interface OutboundChannelReceipt {
   timestampMs: number;
 }
 
+export type AdapterDeliveryOutcome =
+  | "confirmed"
+  | "queued"
+  | "failed"
+  | "unknown"
+  | "unavailable";
+
+export interface AdapterSendResult {
+  externalMessageId: string;
+  transportDetail: string;
+  /** Explicit delivery confirmation from the adapter. A successful function return alone is not delivery confirmation. */
+  outcome?: AdapterDeliveryOutcome;
+  delivered?: boolean;
+}
+
 export interface GatewayPlatformAdapter {
   readonly platform: GatewayPlatform;
-  send(req: OutboundChannelRequest): Promise<{ externalMessageId: string; transportDetail: string }>;
+  send(req: OutboundChannelRequest): Promise<AdapterSendResult>;
 }
 
 export interface PairingTokenIssue {
@@ -571,8 +586,28 @@ export class OmniChannelGateway {
         const res = await custom.send({ ...req, text: safeText });
         externalMessageId = res.externalMessageId;
         transportDetail = res.transportDetail;
-        delivered = true;
-        deliveryStatus = "confirmed";
+
+        if (res.outcome === "confirmed" || (res.delivered === true && res.outcome !== "queued")) {
+          delivered = true;
+          deliveryStatus = "confirmed";
+        } else if (res.outcome === "queued" || (!res.outcome && transportDetail.includes("queued"))) {
+          delivered = false;
+          deliveryStatus = "queued";
+        } else if (res.outcome === "failed" || (!res.outcome && transportDetail.includes("failed"))) {
+          delivered = false;
+          deliveryStatus = "failed";
+        } else if (res.outcome === "unavailable" || (!res.outcome && transportDetail.includes("unavailable"))) {
+          delivered = false;
+          deliveryStatus = "unavailable";
+        } else if (res.outcome === "unknown") {
+          delivered = false;
+          deliveryStatus = "unknown";
+        } else {
+          // A successful function return alone is not delivery confirmation.
+          // Unspecified or ambiguous outcomes must not produce delivered: true or confirmed.
+          delivered = false;
+          deliveryStatus = "unknown";
+        }
       } catch (err) {
         externalMessageId = `fail_${crypto.randomBytes(4).toString("hex")}`;
         transportDetail = `custom-adapter-failed: ${err instanceof Error ? err.message : String(err)}`;
