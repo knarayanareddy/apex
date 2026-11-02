@@ -25,6 +25,7 @@ console.log("=== Running Batch K: PTY Ownership & Verified Cleanup Tests ===");
 
 const ws = fs.mkdtempSync(path.join(os.tmpdir(), "apex-batch-k-"));
 const { config: guardrails } = loadVerifiedGuardrails();
+const observedPtySessions: ActivePtySession[] = [];
 
 let passed = false;
 
@@ -310,6 +311,7 @@ try {
       command: "sleep 10",
       leaseMs: 5000
     });
+    observedPtySessions.push(sessionsMap.get(lease.id)!);
     assert.ok(lease.pid > 0);
     const initialPoll = ptyManager.poll(lease.id);
     assert.equal(initialPoll.status, "running");
@@ -359,6 +361,7 @@ try {
       command: "echo test-k6-natural",
       leaseMs: 5000
     });
+    observedPtySessions.push(sessionsMap.get(naturalLease.id)!);
     assert.ok(naturalLease.pid > 0);
     await new Promise((r) => setTimeout(r, 200));
 
@@ -399,7 +402,16 @@ const exitWatchdog = setTimeout(() => {
   }));
   const report = process.report.getReport() as { libuv?: Array<{ type?: string; is_referenced?: boolean; [key: string]: unknown }> };
   const referencedLibuv = report.libuv?.filter((handle) => handle.is_referenced) ?? [];
-  console.error("BATCH_K_EXIT_TIMEOUT", JSON.stringify({ resources: process.getActiveResourcesInfo(), handles, referencedLibuv }));
+  const active = node._getActiveHandles();
+  const sessions = observedPtySessions.map((session) => ({
+    id: session.info.id, status: session.info.status, cleanupStatus: session.info.cleanupStatus,
+    pid: session.proc.pid, exitCode: session.proc.exitCode, signalCode: session.proc.signalCode,
+    streams: ["stdin", "stdout", "stderr"].map((name) => {
+      const stream = (session.proc as any)[name];
+      return { name, fd: stream?._handle?.fd, active: active.includes(stream), destroyed: stream?.destroyed, readable: stream?.readable, writable: stream?.writable };
+    })
+  }));
+  console.error("BATCH_K_EXIT_TIMEOUT", JSON.stringify({ resources: process.getActiveResourcesInfo(), handles, referencedLibuv, sessions }));
   throw new Error("BATCH_K_EXIT_TIMEOUT: test assertions finished but the process did not exit");
 }, 15_000);
 exitWatchdog.unref();
