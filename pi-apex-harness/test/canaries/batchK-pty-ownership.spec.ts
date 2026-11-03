@@ -385,8 +385,8 @@ try {
   console.log("BATCH_K_PTY_SNAPSHOT", JSON.stringify(observedPtySessions.map((session) => ({
     id: session.info.id, status: session.info.status, pid: session.proc.pid,
     exitCode: session.proc.exitCode, signalCode: session.proc.signalCode,
-    streams: ["stdin", "stdout", "stderr"].map((name) => {
-      const stream = (session.proc as any)[name];
+    streams: ["stdin", "stdout", "stderr", "sync"].map((name) => {
+      const stream = name === "sync" ? session.proc.stdio?.[3] : (session.proc as any)[name];
       return { name, fd: stream?._handle?.fd, active: currentHandles.includes(stream), destroyed: stream?.destroyed };
     })
   }))));
@@ -416,15 +416,16 @@ const exitWatchdog = setTimeout(() => {
   const sessions = observedPtySessions.map((session) => ({
     id: session.info.id, status: session.info.status, cleanupStatus: session.info.cleanupStatus,
     pid: session.proc.pid, exitCode: session.proc.exitCode, signalCode: session.proc.signalCode,
-    streams: ["stdin", "stdout", "stderr"].map((name) => {
-      const stream = (session.proc as any)[name];
+    streams: ["stdin", "stdout", "stderr", "sync"].map((name) => {
+      const stream = name === "sync" ? session.proc.stdio?.[3] : (session.proc as any)[name];
       return { name, fd: stream?._handle?.fd, active: active.includes(stream), destroyed: stream?.destroyed, readable: stream?.readable, writable: stream?.writable };
     })
   }));
   const socketInodes = new Set<string>();
   for (const session of observedPtySessions) {
-    for (const name of ["stdin", "stdout", "stderr"]) {
-      const fd = (session.proc as any)[name]?._handle?.fd;
+    for (const name of ["stdin", "stdout", "stderr", "sync"]) {
+      const stream = name === "sync" ? session.proc.stdio?.[3] : (session.proc as any)[name];
+      const fd = (stream as any)?._handle?.fd;
       if (typeof fd !== "number" || fd < 0) continue;
       try {
         const match = /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/self/fd/${fd}`));

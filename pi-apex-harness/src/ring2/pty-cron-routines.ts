@@ -203,12 +203,15 @@ export class PtyLeaseManager {
       }
     }
 
+    if (bin === "bwrap") argv.splice(argv.lastIndexOf("--"), 0, "--sync-fd", "3");
     const proc = spawn(bin, argv, {
       cwd: this.workspaceRoot,
       env: bin === "/bin/bash" ? buildSanitizedPtyEnv() : {},
       detached: true,
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: bin === "bwrap" ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"]
     });
+    const sandboxLifetime = proc.stdio[3];
+    if (sandboxLifetime && "resume" in sandboxLifetime) sandboxLifetime.resume();
 
     const info: PtyLeaseInfo = {
       id,
