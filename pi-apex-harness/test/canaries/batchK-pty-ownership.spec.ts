@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { loadVerifiedGuardrails } from "../../src/core/guardrail-pin.ts";
 import { PtyLeaseManager, type ActivePtySession } from "../../src/ring2/pty-cron-routines.ts";
 import { recordProcessIdentity, type ProcessIdentity } from "../../src/core/process-tree.ts";
@@ -420,7 +421,20 @@ const exitWatchdog = setTimeout(() => {
       return { name, fd: stream?._handle?.fd, active: active.includes(stream), destroyed: stream?.destroyed, readable: stream?.readable, writable: stream?.writable };
     })
   }));
-  console.error("BATCH_K_EXIT_TIMEOUT", JSON.stringify({ resources: process.getActiveResourcesInfo(), handles, referencedLibuv, sessions }));
+  const socketInodes = new Set<string>();
+  for (const session of observedPtySessions) {
+    for (const name of ["stdin", "stdout", "stderr"]) {
+      const fd = (session.proc as any)[name]?._handle?.fd;
+      if (typeof fd !== "number" || fd < 0) continue;
+      try {
+        const match = /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/self/fd/${fd}`));
+        if (match) socketInodes.add(match[1]);
+      } catch { /* unavailable on this platform */ }
+    }
+  }
+  const ss = spawnSync("ss", ["-xapn"], { encoding: "utf8", timeout: 1500 });
+  const socketRows = (ss.stdout ?? "").split("\n").filter((line) => Array.from(socketInodes).some((inode) => new RegExp(`\\b${inode}\\b`).test(line)));
+  console.error("BATCH_K_EXIT_TIMEOUT", JSON.stringify({ resources: process.getActiveResourcesInfo(), handles, referencedLibuv, sessions, socketInodes: Array.from(socketInodes), socketRows, ssError: ss.error?.message }));
   throw new Error("BATCH_K_EXIT_TIMEOUT: test assertions finished but the process did not exit");
 }, 15_000);
 exitWatchdog.unref();
