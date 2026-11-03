@@ -10,6 +10,8 @@ jobs:
   batch-k-diagnostic:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      TMPDIR: ${{ runner.temp }}/apex-batchk-evidence
     defaults:
       run:
         working-directory: pi-apex-harness
@@ -66,10 +68,16 @@ jobs:
           sudo grep -F 'apex-ci-bwrap' /sys/kernel/security/apparmor/profiles
           test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "$userns_before"
           test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined)" = "$unconfined_before"
+      - name: Create isolated diagnostic fixture directory
+        run: |
+          test ! -e "$TMPDIR"
+          mkdir -m 700 "$TMPDIR"
       - name: Compare inherited pipes under actual bubblewrap
         run: node --experimental-strip-types test/diagnostics/pty-retained-pipes.ts
       - name: Compare bubblewrap monitor exit and sandbox-lifetime EOF
         run: node --experimental-strip-types test/diagnostics/bwrap-sync-fd-probe.ts
+      - name: Check synthetic post-cancel effects
+        run: node --experimental-strip-types test/diagnostics/pty-cancel-effect.ts
       - name: Reproduce security canary sequence - diagnostic only
         run: npm run test:canaries
       - name: Stress Batch K only - not release qualification
@@ -80,3 +88,15 @@ jobs:
             npm run test:batchK
           done
           printf 'DIAGNOSTIC_ONLY 20 Batch K processes exited normally; browser and release gates NOT run.\n'
+      - name: Preserve diagnostic fixtures on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: apex-batchk-diagnostic-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/apex-batchk-evidence/apex-pty-cancel-effect-*
+            ${{ runner.temp }}/apex-batchk-evidence/apex-batch-k-*
+            ${{ runner.temp }}/apex-batchk-evidence/apex-bwrap-sync-control-*
+            ${{ runner.temp }}/apex-batchk-evidence/apex-pty-pipe-control-*
+          if-no-files-found: ignore
+          retention-days: 7
