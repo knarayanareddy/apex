@@ -100,6 +100,8 @@ def classify_execution(syscall_text, maps_text):
         name = parts[5] if len(parts) == 6 else ""
         if name.startswith("/usr/local/share/chromium/") and os.path.basename(name) == "chrome":
             kind = "chromium_executable"
+        elif os.environ.get("RUNNER_TEMP") and name == str(Path(os.environ["RUNNER_TEMP"]) / "apex-stage" / "chrome"):
+            kind = "staged_chromium_executable"
         elif name == "/opt/google/chrome/chrome":
             kind = "google_chrome_executable"
         elif name.startswith(("/usr/lib/", "/lib/", "/lib64/")):
@@ -236,6 +238,13 @@ def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--compare" and sys.argv[2] in {"/usr/bin/chromium", "/usr/bin/google-chrome"}:
         print("Running one browser binary comparison with read-only owned-process observation", flush=True)
         return run_observed(["node", "--experimental-strip-types", "test/ring7/compare-browser-binaries.ts", sys.argv[2]], report_always=True)
+    if len(sys.argv) == 2 and sys.argv[1] == "--compare-staged" and os.environ.get("RUNNER_TEMP"):
+        staged = Path(os.environ["RUNNER_TEMP"]) / "apex-stage" / "chrome"
+        if not staged.is_file() or staged.is_symlink():
+            print("BROWSER_TRACE_INVALID_STAGED_EXECUTABLE", file=sys.stderr)
+            return 1
+        print("Running staged executable comparison; diagnostic only", flush=True)
+        return run_observed(["node", "--experimental-strip-types", "test/ring7/compare-browser-binaries.ts", str(staged)], report_always=True)
     if len(sys.argv) != 1:
         print("BROWSER_TRACE_INVALID_ARGUMENTS", file=sys.stderr)
         return 1

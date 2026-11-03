@@ -15,6 +15,18 @@ from trace_browser_ci import classify_fd, descendants, parse_stat, run_observed,
 
 
 class BrowserTraceTests(unittest.TestCase):
+    def test_staged_comparison_only_uses_owned_expected_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            staged = Path(temp) / "apex-stage" / "chrome"
+            staged.parent.mkdir()
+            staged.write_bytes(b"fixture")
+            with mock.patch.dict(os.environ, {"RUNNER_TEMP": temp}), \
+                 mock.patch.object(trace.sys, "platform", "linux"), \
+                 mock.patch.object(trace.sys, "argv", ["trace_browser_ci.py", "--compare-staged"]), \
+                 mock.patch.object(trace, "run_observed", return_value=7) as observed:
+                self.assertEqual(trace.main(), 7)
+                self.assertEqual(observed.call_args.args[0][-1], str(staged))
+
     def test_qualification_retains_early_and_recent_success_samples(self):
         class Child:
             pid = 123

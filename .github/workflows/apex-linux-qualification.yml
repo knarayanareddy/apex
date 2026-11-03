@@ -1,4 +1,4 @@
-name: DIAGNOSTIC ONLY - owned disk versus tmpfs pressure
+name: DIAGNOSTIC ONLY - staged Chromium executable
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04]
-        condition: [control, disk-pressure, tmpfs-pressure]
+        condition: [control, staged]
         replicate: [1, 2, 3]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 8
@@ -40,7 +40,7 @@ jobs:
         run: npm ci
       - name: Build native bridge
         run: npm run build:native
-      - name: Verify diagnostic observers and bounded writer
+      - name: Verify diagnostic observer and staging
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
@@ -48,7 +48,7 @@ jobs:
           test ! -e "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/node_modules"
           ln -s "$GITHUB_WORKSPACE/pi-apex-harness/node_modules" "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/node_modules"
           python3 "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/test/ring7/test_trace_browser_ci.py"
-          python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/test_browser_io_probe.py"
+          python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/test_stage_browser.py"
       - name: Record metadata without launching a browser
         run: |
           set -euo pipefail
@@ -62,7 +62,10 @@ jobs:
           df -T "$resolved" "$RUNNER_TEMP"
           cat /proc/pressure/io
           cat /proc/pressure/cpu
-      - name: One cold-start observation - not qualification
+      - name: Stage and deliberately pre-read executable - diagnostic only
+        if: ${{ matrix.condition == 'staged' }}
+        run: python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/stage_browser.py"
+      - name: One observation - not qualification
         id: observe
         env:
           APEX_COMPARE_REQUIRE_SUCCESS: '1'
@@ -70,12 +73,16 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -o pipefail
-          python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/browser_io_probe.py" --condition '${{ matrix.condition }}' --observer "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/test/ring7/trace_browser_ci.py" 2>&1 | tee "$RUNNER_TEMP/apex-browser-observation.log"
+          if [[ '${{ matrix.condition }}' == 'staged' ]]; then
+            python3 "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/test/ring7/trace_browser_ci.py" --compare-staged 2>&1 | tee "$RUNNER_TEMP/apex-browser-observation.log"
+          else
+            python3 "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/test/ring7/trace_browser_ci.py" --compare /usr/bin/chromium 2>&1 | tee "$RUNNER_TEMP/apex-browser-observation.log"
+          fi
       - name: Preserve diagnostic output
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: browser-pressure-${{ matrix.os }}-${{ matrix.condition }}-${{ matrix.replicate }}-${{ github.run_id }}
+          name: browser-executable-${{ matrix.os }}-${{ matrix.condition }}-${{ matrix.replicate }}-${{ github.run_id }}
           path: ${{ runner.temp }}/apex-browser-observation.log
           if-no-files-found: ignore
           retention-days: 7
