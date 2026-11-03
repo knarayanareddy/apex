@@ -102,6 +102,8 @@ def classify_execution(syscall_text, maps_text):
             kind = "chromium_executable"
         elif os.environ.get("RUNNER_TEMP") and name == str(Path(os.environ["RUNNER_TEMP"]) / "apex-stage" / "chrome"):
             kind = "staged_chromium_executable"
+        elif os.environ.get("RUNNER_TEMP") and name == str(Path(os.environ["RUNNER_TEMP"]) / "apex-cft" / "chrome-linux64" / "chrome"):
+            kind = "cft_executable"
         elif name == "/opt/google/chrome/chrome":
             kind = "google_chrome_executable"
         elif name.startswith(("/usr/lib/", "/lib/", "/lib64/")):

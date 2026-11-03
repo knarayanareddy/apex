@@ -1,4 +1,4 @@
-name: DIAGNOSTIC ONLY - Chromium default apps startup comparison
+name: DIAGNOSTIC ONLY - cold Chrome for Testing comparison
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04]
-        condition: [control, disable-default-apps]
+        condition: [control, chrome-for-testing]
         replicate: [1, 2, 3]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 8
@@ -48,6 +48,7 @@ jobs:
           test ! -e "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/node_modules"
           ln -s "$GITHUB_WORKSPACE/pi-apex-harness/node_modules" "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/node_modules"
           python3 "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/test/ring7/test_trace_browser_ci.py"
+          python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/test_cft_cold.py"
       - name: Record metadata without launching a browser
         run: |
           set -euo pipefail
@@ -61,14 +62,32 @@ jobs:
           df -T "$resolved" "$RUNNER_TEMP"
           cat /proc/pressure/io
           cat /proc/pressure/cpu
-      - name: Create owned diagnostic launcher without reading Chromium
+      - name: Download pinned full Chrome for Testing into owned fixture
+        if: ${{ matrix.condition == 'chrome-for-testing' }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/apex-cft.zip"
+          dir="$RUNNER_TEMP/apex-cft"
+          test ! -e "$archive" && test ! -L "$archive"
+          test ! -e "$dir" && test ! -L "$dir"
+          curl -fLsS --proto '=https' --tlsv1.2 --max-time 180 \
+            'https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.80/linux64/chrome-linux64.zip?generation=1793228525740273' \
+            -o "$archive"
+          test "$(stat -c %s "$archive")" = 201329937
+          printf '%s  %s\n' 6a158ba7e01da016f1988bae0643d9e5 "$archive" | md5sum -c -
+          sha256sum "$archive"
+          python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/cft_cold.py" --check-archive "$archive"
+          mkdir -m 700 "$dir"
+          unzip -qq "$archive" -d "$dir"
+          test -x "$dir/chrome-linux64/chrome"
+      - name: Create owned diagnostic launcher without reading browser
         run: |
           set -euo pipefail
           dir="$RUNNER_TEMP/apex-stage"
           test ! -e "$dir" && test ! -L "$dir"
           mkdir -m 700 "$dir"
-          if [[ '${{ matrix.condition }}' == 'disable-default-apps' ]]; then
-            printf '%s\n' '#!/bin/sh' 'exec /usr/bin/chromium --disable-default-apps "$@"' > "$dir/chrome"
+          if [[ '${{ matrix.condition }}' == 'chrome-for-testing' ]]; then
+            printf '#!/bin/sh\nexec %q "$@"\n' "$RUNNER_TEMP/apex-cft/chrome-linux64/chrome" > "$dir/chrome"
           else
             printf '%s\n' '#!/bin/sh' 'exec /usr/bin/chromium "$@"' > "$dir/chrome"
           fi
@@ -81,13 +100,18 @@ jobs:
           APEX_COMPARE_TIMEOUT_MS: '60000'
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
-          set -o pipefail
+          set -euo pipefail
+          if [[ '${{ matrix.condition }}' == 'chrome-for-testing' ]]; then
+            python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/cft_cold.py" 2>&1 | tee "$RUNNER_TEMP/apex-cft-cold.log"
+          fi
           python3 "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/test/ring7/trace_browser_ci.py" --compare-staged 2>&1 | tee "$RUNNER_TEMP/apex-browser-observation.log"
       - name: Preserve diagnostic output
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: browser-default-apps-${{ matrix.os }}-${{ matrix.condition }}-${{ matrix.replicate }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/apex-browser-observation.log
+          name: browser-cft-${{ matrix.os }}-${{ matrix.condition }}-${{ matrix.replicate }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/apex-browser-observation.log
+            ${{ runner.temp }}/apex-cft-cold.log
           if-no-files-found: ignore
           retention-days: 7
