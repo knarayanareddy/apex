@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
+        os: [ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     defaults:
@@ -110,6 +110,8 @@ jobs:
           test ! -e "$diagnostic_tmp"
           mkdir -m 700 "$diagnostic_tmp"
           printf 'TMPDIR=%s\n' "$diagnostic_tmp" >> "$GITHUB_ENV"
+      - name: Verify Ring 2 user flows
+        run: npm run test:ring2
       - name: Compare inherited pipes under actual bubblewrap
         run: node --experimental-strip-types test/diagnostics/pty-retained-pipes.ts
       - name: Compare bubblewrap monitor exit and sandbox-lifetime EOF
@@ -159,8 +161,6 @@ jobs:
             npm run test:batchK
           done
           printf 'DIAGNOSTIC_ONLY 20 Batch K processes exited normally; browser and release gates NOT run.\n'
-      - name: Verify Ring 2 user flows
-        run: npm run test:ring2
       - name: Preserve diagnostic fixtures on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

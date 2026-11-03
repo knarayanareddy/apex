@@ -652,6 +652,7 @@ async function runRing2Suite(): Promise<void> {
       const tickReceipts = r2.cronScheduler.tick(baseTime + 60_001);
       assert.equal(tickReceipts.length, 3);
       const byJob = new Map(tickReceipts.map((r) => [r.jobId, r]));
+      if (byJob.get(safeCron.jobId)?.status !== "SUCCEEDED") console.error("RING2_CRON_FAILURE", JSON.stringify(byJob.get(safeCron.jobId)));
       assert.equal(byJob.get(safeCron.jobId)?.status, "SUCCEEDED");
       assert.equal(
         byJob.get(exfilCron.jobId)?.status,
