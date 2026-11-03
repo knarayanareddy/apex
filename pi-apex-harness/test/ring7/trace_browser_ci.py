@@ -243,7 +243,7 @@ def main():
         if not staged.is_file() or staged.is_symlink():
             print("BROWSER_TRACE_INVALID_STAGED_EXECUTABLE", file=sys.stderr)
             return 1
-        print("Running staged executable comparison; diagnostic only", flush=True)
+        print("Running owned diagnostic launcher comparison; diagnostic only", flush=True)
         return run_observed(["node", "--experimental-strip-types", "test/ring7/compare-browser-binaries.ts", str(staged)], report_always=True)
     if len(sys.argv) != 1:
         print("BROWSER_TRACE_INVALID_ARGUMENTS", file=sys.stderr)
