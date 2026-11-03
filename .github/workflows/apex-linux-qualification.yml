@@ -84,6 +84,8 @@ jobs:
         run: PID1_CANDIDATE="$TMPDIR/pid1-candidate" node --experimental-strip-types test/diagnostics/pty-pid1-parent-test.ts
       - name: Observe detached and reparented child teardown
         run: PID1_CANDIDATE="$TMPDIR/pid1-candidate" node --experimental-strip-types test/diagnostics/pty-pid1-detached-test.ts
+      - name: Exercise production-path PTY regression
+        run: node --experimental-strip-types test/canaries/linux-pty-owned-regression.spec.ts
       - name: Check synthetic post-cancel effects
         run: node --experimental-strip-types test/diagnostics/pty-cancel-effect.ts
       - name: Reproduce security canary sequence - diagnostic only
@@ -109,5 +111,6 @@ jobs:
             ${{ runner.temp }}/apex-batchk-evidence/apex-pid1-candidate-*
             ${{ runner.temp }}/apex-batchk-evidence/apex-pid1-parent-*
             ${{ runner.temp }}/apex-batchk-evidence/apex-pid1-detached-*
+            ${{ runner.temp }}/apex-batchk-evidence/apex-pty-owned-regression-*
           if-no-files-found: ignore
           retention-days: 7
