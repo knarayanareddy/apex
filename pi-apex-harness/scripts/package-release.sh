@@ -10,7 +10,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUT_DIR="${1:-/home/user}"
 
 for item in package.json package-lock.json tsconfig.json SPEC_BIBLE.md ARCHITECTURE.md PERSONAL_QUICKSTART.md \
-  bin/pi-apex scripts/bootstrap-host.sh scripts/install-personal.sh scripts/package-release.sh surfaces-immutable/GUARDRAILS.yaml; do
+  bin/pi-apex scripts/bootstrap-host.sh scripts/install-personal.sh scripts/package-release.sh scripts/build-native.mjs src/native/pty_pid1_supervisor.c surfaces-immutable/GUARDRAILS.yaml; do
   if [[ ! -f "${REPO_ROOT}/${item}" ]]; then
     echo "[package-release] PACKAGE_INPUT_MISSING: ${item}" >&2
     exit 1
@@ -59,6 +59,7 @@ done
 
 # Strip compiled native .node binary from portable source archive (rebuilt cleanly by install-personal.sh / npm test)
 rm -f "${STAGE_PKG}/src/native/linux_fs_bridge.node"
+rm -f "${STAGE_PKG}/src/native/apex_pty_pid1"
 rm -rf "${STAGE_PKG}/surfaces/skills"
 chmod 0444 "${STAGE_PKG}/surfaces-immutable/GUARDRAILS.yaml"
 chmod 0755 "${STAGE_PKG}/bin/pi-apex" "${STAGE_PKG}/scripts/bootstrap-host.sh" "${STAGE_PKG}/scripts/install-personal.sh" "${STAGE_PKG}/scripts/package-release.sh"

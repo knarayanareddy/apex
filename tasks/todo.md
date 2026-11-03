@@ -65,7 +65,9 @@
 
 ## Detailed completion-roadmap index
 
-**Follow-up qualification correction:** Run `41497118583` failed browser endpoint discovery on both Ubuntu lanes at the unchanged 12-second deadline. Its earlier Linux security steps passed, but the full workflow did not. The subsequent fixes in the working tree have not been qualified on Linux or committed. The prior "closed" and macOS proxy-causality claims above are historical and do not establish completion. Migration requires an operator-approved separate filesystem and cutover; an advisory source lock protects only cooperating processes. No physical power-loss or live-provider qualification is implied.
+**Follow-up qualification correction:** Run `41497118583` failed browser endpoint discovery on both Ubuntu lanes at the unchanged 12-second deadline. Its earlier Linux security steps passed, but the full workflow did not. Later fixes require evidence bound to their exact commit. The prior "closed" and macOS proxy-causality claims above are historical and do not establish completion. Migration requires an operator-approved separate filesystem and cutover; an advisory source lock protects only cooperating processes. No physical power-loss or live-provider qualification is implied.
+
+**PTY startup-cancellation follow-up:** Run `41604807802` reproduced a synthetic write after PTY stop and a false `snapshot_cleared` result; the retained peer was sandbox PID 1, not merely a Node stream. A PID 1 control-channel implementation was exercised on both Ubuntu lanes in diagnostic run `41629402231`, including rapid and started cancellation, detached descendants, parent death, Ring 2, and an installed artifact. This is scoped PTY evidence, not browser or full-project qualification. Shell, cron, MCP and LSP ownership paths require separate verification; do not merge or release while required gates remain open.
 
 The scope, dependencies, owners, acceptance criteria and verification for each
 item are in [`plan.md`](plan.md#detailed-completion-roadmap). These unchecked

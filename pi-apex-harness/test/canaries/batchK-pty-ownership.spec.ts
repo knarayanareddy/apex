@@ -4,8 +4,8 @@
  * Verifies:
  *  K1: Refusal to signal when ownership cannot be established (unknown identity).
  *  K2: Refusal to signal when PID recycling is detected.
- *  K3: Signal error handling (e.g. EPERM / failed signaling marks cleanup_unverified).
- *  K4: Process that remains alive after SIGKILL deadline (timeout marks cleanup_unverified).
+ *  K3: Missing controlled supervisor refuses cleanup without sending host signals.
+ *  K4: A supervisor that never closes before the deadline reports cleanup_unverified.
  *  K5: Successful termination of real active process:
  *      - On Linux (confined with bwrap): process reaped, exits with snapshot_cleared.
  *      - On macOS Darwin (unconfined): reports cleanup_unverified.
@@ -17,6 +17,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { loadVerifiedGuardrails } from "../../src/core/guardrail-pin.ts";
 import { PtyLeaseManager, type ActivePtySession } from "../../src/ring2/pty-cron-routines.ts";
 import { recordProcessIdentity, type ProcessIdentity } from "../../src/core/process-tree.ts";
@@ -135,9 +137,9 @@ try {
   }
 
   // -------------------------------------------------------------------------
-  // K3: Failed signaling error handling
+  // K3: Missing supervisor control must fail closed without signaling
   // -------------------------------------------------------------------------
-  console.log("--- K3: Failed signaling error handling ---");
+  console.log("--- K3: Missing supervisor control fails closed ---");
   {
     const currentPid = process.pid;
     const validIdentity = recordProcessIdentity(currentPid);
@@ -171,8 +173,10 @@ try {
     sessionsMap.set(signalFailSession.info.id, signalFailSession);
 
     const origKill = process.kill;
+    let attemptedSignals = 0;
     (process as any).kill = (pid: number, signal?: string | number) => {
       if (pid === currentPid && (signal === "SIGTERM" || signal === "SIGKILL")) {
+        attemptedSignals++;
         const err = new Error("EPERM: operation not permitted") as NodeJS.ErrnoException;
         err.code = "EPERM";
         throw err;
@@ -193,14 +197,15 @@ try {
         "Failed signal must result in cleanup_unverified"
       );
       assert.equal(signalFailSession.info.cleanupStatus, "unverified");
-      console.log("  [PASS] K3: Signal failure handled cleanly as cleanup_unverified.");
+      assert.equal(attemptedSignals, 0, "Missing control must not signal a host PID");
+      console.log("  [PASS] K3: Missing control reported as cleanup_unverified without signals.");
     } finally {
       process.kill = origKill;
     }
   }
 
   // -------------------------------------------------------------------------
-  // K4: Process that remains alive after SIGKILL deadline (timeout)
+  // K4: A supervisor that never closes before the deadline is unverified
   // -------------------------------------------------------------------------
   console.log("--- K4: Process remaining alive reports unverified ---");
   {
@@ -222,9 +227,11 @@ try {
         watchDisabled: false,
         watchHitsDelivered: 0
       },
-      proc: { pid: currentPid } as any,
+      proc: Object.assign(new EventEmitter(), { pid: currentPid }) as any,
       procIdentity: validIdentity,
-      isConfined: true, // triggers checkReap loop
+      isConfined: true,
+      supervisorControl: new PassThrough(),
+      supervisorReady: true,
       buffer: "",
       leaseTimer: setTimeout(() => {}, 10_000),
       watchPatterns: [],
@@ -236,9 +243,11 @@ try {
     sessionsMap.set(aliveSession.info.id, aliveSession);
 
     const origKill = process.kill;
+    const sentSignals: string[] = [];
     (process as any).kill = (pid: number, signal?: string | number) => {
       if (pid === currentPid) {
         if (signal === "SIGTERM" || signal === "SIGKILL") {
+          sentSignals.push(signal);
           return true; // pretend signal delivered
         }
         if (signal === 0) {
@@ -251,7 +260,7 @@ try {
     try {
       requestCleanupFn(aliveSession, "lease_expired", false);
       assert.equal(aliveSession.info.status, "cleanup_pending", "Lease expiry is not verified until cleanup finishes");
-      // Wait for 2x 1000ms deadlines in checkReap
+      // Wait for the bounded supervisor cleanup deadline.
       const deadline = Date.now() + 2500;
       while (Date.now() < deadline && aliveSession.info.cleanupStatus === "pending") {
         await new Promise((r) => setTimeout(r, 50));
@@ -259,9 +268,10 @@ try {
       assert.equal(
         aliveSession.info.status,
         "cleanup_unverified",
-        "Process remaining alive past SIGKILL deadline must report cleanup_unverified"
+        "Supervisor remaining open past deadline must report cleanup_unverified"
       );
       assert.equal(aliveSession.info.cleanupStatus, "unverified");
+      assert.deepEqual(sentSignals, [], "owned control cleanup must not signal a host PID");
       console.log("  [PASS] K4: Stuck/unverified process reported as cleanup_unverified.");
     } finally {
       process.kill = origKill;
@@ -269,13 +279,16 @@ try {
   }
 
   // -------------------------------------------------------------------------
-  // A permission error during the post-signal probe is not evidence of exit.
+  // A failed control-channel close cannot be reported as verified cleanup.
   {
     const identity = recordProcessIdentity(process.pid);
     assert.ok(identity.startTime);
+    const control = new PassThrough();
+    control.end = (() => { throw new Error("synthetic control close failure"); }) as typeof control.end;
     const session = {
       info: { id: "pty_probe_eperm", status: "running" },
-      proc: { pid: process.pid }, procIdentity: identity, isConfined: true
+      proc: Object.assign(new EventEmitter(), { pid: process.pid }), procIdentity: identity, isConfined: true,
+      supervisorControl: control, supervisorReady: true
     } as unknown as ActivePtySession;
     const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
     const originalKill = process.kill;
@@ -296,6 +309,7 @@ try {
       requestCleanupFn(session, "exited", false);
       assert.equal(session.info.status, "cleanup_unverified");
       assert.equal(session.info.cleanupStatus, "unverified");
+      assert.equal(signalled, false, "controlled cleanup must not signal a host PID");
     } finally {
       process.kill = originalKill;
       Object.defineProperty(process, "platform", platformDescriptor);

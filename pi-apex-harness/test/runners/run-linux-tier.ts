@@ -50,6 +50,16 @@ try {
     stdio: "inherit"
   });
 
+  console.log("\nRunning production PTY cancellation, parent-death, and detached-child regressions...");
+  for (const test of [
+    "test/canaries/linux-pty-owned-regression.spec.ts",
+    "test/diagnostics/pty-manager-parent-test.ts",
+    "test/canaries/linux-pty-detached.spec.ts",
+    "test/canaries/linux-pty-package.spec.ts"
+  ]) {
+    execFileSync("node", ["--experimental-strip-types", test], { stdio: "inherit" });
+  }
+
   console.log("\n=== ALL REQUIRED LINUX CONFINEMENT CHECKS PASSED ===\n");
 } catch (err: any) {
   console.error(`\n[TIER: LINUX CONFINEMENT] FAILED: Canaries failed under Linux confinement: ${err.message}`);

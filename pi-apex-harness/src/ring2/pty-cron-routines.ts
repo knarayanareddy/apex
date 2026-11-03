@@ -22,7 +22,10 @@
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
+import { Duplex } from "node:stream";
+import { fileURLToPath } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
 import type { GuardrailsConfig, SandboxMode } from "../types.ts";
 import {
@@ -41,6 +44,7 @@ import {
   terminateProcessTree,
   type ProcessIdentity
 } from "../core/process-tree.ts";
+import { checkAddonBinaryCompatibility } from "../core/linux-fs-bridge.ts";
 
 // ============================================================================
 // Upstream Constants (`anomalyco/opencode/src/pty.ts` + `hermes-agent/process_registry.py`)
@@ -79,12 +83,36 @@ export interface ActivePtySession {
   proc: ChildProcess;
   procIdentity: ProcessIdentity;
   isConfined: boolean;
+  supervisorControl?: Duplex;
+  supervisorReady?: boolean;
+  supervisorError?: string;
+  closeObserved?: boolean;
+  closeCode?: number | null;
   buffer: string;
   leaseTimer: ReturnType<typeof setTimeout>;
   watchPatterns: RegExp[];
   lastWatchDeliveryMs: number;
   watchStrikes: number;
   watchMatchesLog: string[];
+}
+
+/** Do not execute a supervisor the sandbox can modify through its workspace. */
+function trustedPtySupervisor(workspaceRoot: string): string {
+  const candidate = fileURLToPath(new URL("../native/apex_pty_pid1", import.meta.url));
+  try {
+    if (!fs.lstatSync(candidate).isFile()) throw new Error("not a regular executable");
+    fs.accessSync(candidate, fs.constants.X_OK);
+    const compatibility = checkAddonBinaryCompatibility(candidate);
+    if (!compatibility.compatible) throw new Error(compatibility.reason ?? "incompatible executable");
+    const realBinary = fs.realpathSync(candidate);
+    const relative = path.relative(fs.realpathSync(workspaceRoot), realBinary);
+    if (!relative || (!relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))) {
+      throw new Error("supervisor is reachable through the writable workspace");
+    }
+    return realBinary;
+  } catch (error) {
+    throw new SandboxUnavailableError(`SANDBOX_UNAVAILABLE: qualified PTY supervisor unavailable: ${String(error)}`);
+  }
 }
 
 function buildSanitizedPtyEnv(): NodeJS.ProcessEnv {
@@ -150,6 +178,7 @@ export class PtyLeaseManager {
       argv = ["-c", input.command];
     } else if (probe.ok) {
       bin = "bwrap";
+      const supervisor = trustedPtySupervisor(this.workspaceRoot);
       argv = buildMinimalBwrapArgv(input.command, this.workspaceRoot, {
         workspaceRoot: this.workspaceRoot,
         mode: this.sandboxMode,
@@ -157,6 +186,15 @@ export class PtyLeaseManager {
         allowUnsandboxedDev: this.allowUnsandboxedDev,
         unmaskedSecretExceptions: this.guardrails.sandbox.unmasked_exceptions
       });
+      const parentDeath = argv.indexOf("--die-with-parent");
+      const separator = argv.lastIndexOf("--");
+      if (parentDeath < 0 || separator < 0) throw new SandboxUnavailableError("SANDBOX_UNAVAILABLE: invalid bubblewrap ownership arguments");
+      // Do not kill the outer monitor on parent death: it must finish startup so
+      // PID 1 can observe control EOF, including during the clone/setup window.
+      argv.splice(parentDeath, 1);
+      argv.splice(argv.lastIndexOf("--"), 0, "--as-pid-1", "--sync-fd", "3", "--ro-bind", supervisor, "/apex-pty-pid1");
+      const commandIndex = argv.lastIndexOf("--") + 1;
+      argv.splice(commandIndex, argv.length - commandIndex, "/apex-pty-pid1", "/bin/bash", "-c", input.command);
     } else {
       if (!this.allowUnsandboxedDev) {
         throw new SandboxUnavailableError(
@@ -207,8 +245,12 @@ export class PtyLeaseManager {
       cwd: this.workspaceRoot,
       env: bin === "/bin/bash" ? buildSanitizedPtyEnv() : {},
       detached: true,
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: bin === "bwrap" ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"]
     });
+    const supervisorControl = bin === "bwrap" ? proc.stdio[3] : undefined;
+    if (bin === "bwrap" && !(supervisorControl instanceof Duplex)) {
+      throw new SandboxUnavailableError("SANDBOX_UNAVAILABLE: PTY supervisor control pipe missing");
+    }
 
     const info: PtyLeaseInfo = {
       id,
@@ -240,6 +282,8 @@ export class PtyLeaseManager {
       proc,
       procIdentity,
       isConfined: bin === "bwrap",
+      supervisorControl: supervisorControl instanceof Duplex ? supervisorControl : undefined,
+      supervisorReady: false,
       buffer: "",
       leaseTimer,
       watchPatterns: compiledWatches,
@@ -247,6 +291,28 @@ export class PtyLeaseManager {
       watchStrikes: 0,
       watchMatchesLog: []
     };
+
+    const failSupervisor = (reason: string) => {
+      session.supervisorError = reason;
+      if (session.info.status === "running") {
+        clearTimeout(session.leaseTimer);
+        session.info.status = "cleanup_unverified";
+        session.info.cleanupStatus = "unverified";
+      }
+      if (session.supervisorControl && !session.supervisorControl.destroyed) session.supervisorControl.end();
+      console.warn(`[PTY_CLEANUP_UNVERIFIED] ${reason}`);
+    };
+    session.supervisorControl?.on("data", (chunk: Buffer) => {
+      if (session.supervisorReady || chunk.length !== 1 || chunk[0] !== 0x52) {
+        failSupervisor("invalid PTY supervisor readiness protocol");
+        return;
+      }
+      session.supervisorReady = true;
+      // A stop requested before readiness closes the write half and never sends S.
+      if (session.info.status === "running") session.supervisorControl!.write("S");
+    });
+    session.supervisorControl?.on("error", (error) => failSupervisor(`PTY supervisor control error: ${error.message}`));
+    proc.on("error", (error) => failSupervisor(`PTY process error: ${error.message}`));
 
     const onChunk = (raw: Buffer | string) => {
       const chunk = typeof raw === "string" ? raw : raw.toString("utf8");
@@ -299,6 +365,8 @@ export class PtyLeaseManager {
     // `close` can be delayed by inherited pipes after the leader itself exits.
     proc.on("exit", markLeaderExited);
     proc.on("close", (code) => {
+      session.closeObserved = true;
+      session.closeCode = code;
       clearTimeout(session.leaseTimer);
       markLeaderExited(code);
       if (this.sessions.has(id) && (session.info.status === "leader_exited" || !session.info.cleanupStatus || session.info.cleanupStatus === "snapshot_cleared")) {
@@ -409,99 +477,51 @@ export class PtyLeaseManager {
       }
     };
 
+    if (session.isConfined) {
+      const control = session.supervisorControl;
+      if (!control) {
+        finish(false, "qualified PTY supervisor control channel unavailable");
+        return;
+      }
+      const verifyClose = (code: number | null) => {
+        const verified = session.supervisorReady === true && !session.supervisorError && code === 0;
+        finish(Boolean(verified), verified ? "PID 1 exited and namespace was reclaimed" : "PTY supervisor exit could not be verified");
+      };
+      if (session.closeObserved) {
+        verifyClose(session.closeCode ?? null);
+        return;
+      }
+      const deadline = setTimeout(() => {
+        session.proc.removeListener("close", onClose);
+        finish(false, "PTY supervisor did not close before the cleanup deadline");
+      }, 2000);
+      deadline.unref();
+      const onClose = (code: number | null) => {
+        clearTimeout(deadline);
+        verifyClose(code);
+      };
+      session.proc.once("close", onClose);
+      try {
+        control.end(); // EOF instructs namespace PID 1 to exit; no host PID signals.
+      } catch (error) {
+        clearTimeout(deadline);
+        session.proc.removeListener("close", onClose);
+        finish(false, `PTY control close failed: ${String(error)}`);
+      }
+      return;
+    }
     const pid = session.proc.pid ?? -1;
-    // 1. Do not signal a process whose ownership cannot be established
-    if (pid <= 0 || !session.procIdentity || !session.procIdentity.startTime) {
+    if (pid <= 0 || !session.procIdentity?.startTime) {
       finish(false, `REFUSING_SIGNAL: PID ${pid} has unknown or unestablished ownership`);
       return;
     }
-
-    // 2. Probe existence and check for PID recycling before sending signals
-    let isAlive = false;
-    try {
-      process.kill(pid, 0);
-      isAlive = true;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "ESRCH") {
-        finish(session.isConfined && process.platform === "linux", session.isConfined && process.platform === "linux" ? "Process already exited in confined namespace" : "Process already exited; unconfined descendants unverified");
-        return;
-      }
-      finish(false, `REFUSING_SIGNAL: Signal probe failed with code ${code ?? String(err)}`);
+    if (!isProcessAliveWithIdentity(session.procIdentity)) {
+      finish(false, `REFUSING_SIGNAL: PID ${pid} is gone, recycled, or inaccessible`);
       return;
     }
-
-    if (isAlive && !isProcessAliveWithIdentity(session.procIdentity)) {
-      finish(false, `REFUSING_SIGNAL: PID ${pid} was recycled by an unrelated process`);
-      return;
-    }
-
-    if (session.isConfined && process.platform === "linux") {
-      const checkReap = async () => {
-        // 3. Attempt SIGTERM to bwrap leader
-        try {
-          process.kill(pid, "SIGTERM");
-        } catch (err) {
-          const code = (err as NodeJS.ErrnoException).code;
-          if (code === "ESRCH") {
-            finish(true, "Process exited before SIGTERM");
-            return;
-          }
-          finish(false, `SIGTERM failed: ${String(err)}`);
-          return;
-        }
-
-        const termDeadline = Date.now() + 1000;
-        while (Date.now() < termDeadline) {
-          try {
-            process.kill(pid, 0);
-            await new Promise((r) => setTimeout(r, 25));
-          } catch (err) {
-            const exited = (err as NodeJS.ErrnoException).code === "ESRCH";
-            finish(exited, exited ? "Linux PID namespace reclaimed by kernel after SIGTERM" : `Exit verification failed: ${String(err)}`);
-            return;
-          }
-        }
-
-        // 4. Verify identity again before SIGKILL
-        if (!isProcessAliveWithIdentity(session.procIdentity)) {
-          finish(false, `REFUSING_SIGNAL: PID ${pid} was recycled before SIGKILL`);
-          return;
-        }
-
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch (err) {
-          const code = (err as NodeJS.ErrnoException).code;
-          if (code === "ESRCH") {
-            finish(true, "Process exited before SIGKILL");
-            return;
-          }
-          finish(false, `SIGKILL failed: ${String(err)}`);
-          return;
-        }
-
-        // 5. Verify the owned process has ACTUALLY exited before reporting successful cleanup
-        const killDeadline = Date.now() + 1000;
-        while (Date.now() < killDeadline) {
-          try {
-            process.kill(pid, 0);
-            await new Promise((r) => setTimeout(r, 25));
-          } catch (err) {
-            const exited = (err as NodeJS.ErrnoException).code === "ESRCH";
-            finish(exited, exited ? "Linux PID namespace reclaimed by kernel after SIGKILL" : `Exit verification failed: ${String(err)}`);
-            return;
-          }
-        }
-
-        finish(false, `Process ${pid} remained alive after SIGKILL deadline; cleanup unverified`);
-      };
-      void checkReap();
-    } else {
-      void terminateProcessTree(pid, session.procIdentity)
-        .then((result) => finish(result.success, result.diagnostic))
-        .catch((error) => finish(false, error instanceof Error ? error.message : String(error)));
-    }
+    void terminateProcessTree(pid, session.procIdentity)
+      .then((result) => finish(result.success, result.diagnostic))
+      .catch((error) => finish(false, error instanceof Error ? error.message : String(error)));
   }
 
   private recordExitOrder(id: string): void {

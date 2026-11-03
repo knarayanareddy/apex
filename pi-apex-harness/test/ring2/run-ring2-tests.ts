@@ -461,9 +461,22 @@ async function runRing2Suite(): Promise<void> {
         "utf8"
       );
 
-      const tscBin = path.join(REPO_ROOT, "node_modules", ".bin", "tsc");
+      // The isolated Linux sandbox cannot access the harness checkout outside ws.
+      // Copy the real pinned compiler and Node into this synthetic workspace.
+      let nodeBin = process.execPath;
+      let tscBin = path.join(REPO_ROOT, "node_modules", "typescript", "bin", "tsc");
+      if (process.platform === "linux") {
+        const toolchain = path.join(ws, ".apex-test-toolchain");
+        fs.mkdirSync(toolchain, { recursive: true });
+        nodeBin = path.join(toolchain, "node");
+        fs.copyFileSync(process.execPath, nodeBin);
+        fs.chmodSync(nodeBin, 0o755);
+        const compilerDir = path.join(toolchain, "typescript");
+        fs.cpSync(path.join(REPO_ROOT, "node_modules", "typescript"), compilerDir, { recursive: true });
+        tscBin = path.join(compilerDir, "bin", "tsc");
+      }
       const ciRes = await r2.bugBotCi.runCiVerificationLoop({
-        command: `${tscBin} --noEmit --pretty false --strict "${brokenPath}"`,
+        command: `"${nodeBin}" "${tscBin}" --noEmit --pretty false --strict "${brokenPath}"`,
         maxAttempts: 2,
         onFailureAutofix: async (failedAttempt) => {
           assert.ok(failedAttempt.diagnostics.length >= 1, "Must parse structured file(line,col) diagnostic!");
@@ -591,7 +604,12 @@ async function runRing2Suite(): Promise<void> {
           leaseMs: 300
         });
         await new Promise((r) => setTimeout(r, 450));
-        const expiredPoll = r2.ptyManager.poll(shortLease.id);
+        let expiredPoll = r2.ptyManager.poll(shortLease.id);
+        const cleanupDeadline = Date.now() + 2500;
+        while (expiredPoll.status === "cleanup_pending" && Date.now() < cleanupDeadline) {
+          await new Promise((r) => setTimeout(r, 25));
+          expiredPoll = r2.ptyManager.poll(shortLease.id);
+        }
         if (process.platform === "linux") {
           assert.equal(
             expiredPoll.status,
@@ -614,10 +632,16 @@ async function runRing2Suite(): Promise<void> {
 
       // 6c. Hermes Cron Scheduler + Ring 0 `DENY_UNATTENDED` gate!
       const baseTime = 1_700_000_000_000;
+      // Git objects are intentionally hidden inside the Linux sandbox. An
+      // unborn synthetic repository allows a real `git status` without exposing
+      // the committed workspace's object store.
+      const unbornRepo = path.join(ws, "synthetic-unborn-repo");
+      fs.mkdirSync(unbornRepo);
+      runGitOrThrow(unbornRepo, ["init", "-q"]);
       const safeCron = r2.cronScheduler.createRoutine({
         name: "Safe Git Status Check",
         intervalMs: 60_000,
-        command: "git status --short",
+        command: "git -C synthetic-unborn-repo status --short",
         targetPaths: ["src/billing/invoice.ts"],
         nowMs: baseTime
       });
