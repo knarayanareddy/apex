@@ -461,9 +461,22 @@ async function runRing2Suite(): Promise<void> {
         "utf8"
       );
 
-      const tscBin = path.join(REPO_ROOT, "node_modules", ".bin", "tsc");
+      // The isolated Linux sandbox cannot access the harness checkout outside ws.
+      // Copy the real pinned compiler and Node into this synthetic workspace.
+      let nodeBin = process.execPath;
+      let tscBin = path.join(REPO_ROOT, "node_modules", "typescript", "bin", "tsc");
+      if (process.platform === "linux") {
+        const toolchain = path.join(ws, ".apex-test-toolchain");
+        fs.mkdirSync(toolchain, { recursive: true });
+        nodeBin = path.join(toolchain, "node");
+        fs.copyFileSync(process.execPath, nodeBin);
+        fs.chmodSync(nodeBin, 0o755);
+        const compilerDir = path.join(toolchain, "typescript");
+        fs.cpSync(path.join(REPO_ROOT, "node_modules", "typescript"), compilerDir, { recursive: true });
+        tscBin = path.join(compilerDir, "bin", "tsc");
+      }
       const ciRes = await r2.bugBotCi.runCiVerificationLoop({
-        command: `${tscBin} --noEmit --pretty false --strict "${brokenPath}"`,
+        command: `"${nodeBin}" "${tscBin}" --noEmit --pretty false --strict "${brokenPath}"`,
         maxAttempts: 2,
         onFailureAutofix: async (failedAttempt) => {
           if (failedAttempt.diagnostics.length === 0) console.error("RING2_DIAGNOSTIC_MISSING", JSON.stringify({ exitCode: failedAttempt.exitCode, stdout: failedAttempt.stdout, stderr: failedAttempt.stderr }));
