@@ -55,3 +55,10 @@ const flags = isDarwin
 
 execFileSync(compiler, flags, { stdio: "inherit" });
 console.log(`[build:native] Built ${ADDON_PATH} successfully using ${compiler}`);
+
+if (process.platform === "linux") {
+  const supervisorSource = path.join(REPO_ROOT, "src/native/pty_pid1_supervisor.c");
+  const supervisorOutput = path.join(REPO_ROOT, "src/native/apex_pty_pid1");
+  execFileSync(compiler, ["-std=c99", "-O2", "-Wall", "-Wextra", "-Werror", supervisorSource, "-o", supervisorOutput], { stdio: "inherit" });
+  console.log(`[build:native] Built ${supervisorOutput} successfully using ${compiler}`);
+}

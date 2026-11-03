@@ -14,7 +14,7 @@ try {
   for (const item of ["package.json", "package-lock.json", "tsconfig.json", "SPEC_BIBLE.md", "ARCHITECTURE.md", "PERSONAL_QUICKSTART.md", "bin", "extensions", "scripts", "src", "surfaces", "surfaces-immutable", "test"]) {
     fs.cpSync(path.join(root, item), path.join(source, item), { recursive: true });
   }
-  for (const [index, item] of ["SPEC_BIBLE.md", "src", "scripts/install-personal.sh", "package.json"].entries()) {
+  for (const [index, item] of ["SPEC_BIBLE.md", "src", "scripts/install-personal.sh", "scripts/build-native.mjs", "src/native/pty_pid1_supervisor.c", "package.json"].entries()) {
     const input = path.join(source, item);
     const saved = path.join(temporary, `saved-${index}`);
     const out = path.join(temporary, `out-${index}`);

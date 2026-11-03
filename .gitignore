@@ -21,6 +21,7 @@ node_modules/
 **/.pi/
 
 # Logs & Temporary Files
+pi-apex-harness/src/native/apex_pty_pid1
 *.log
 **/*.log
 *.tmp

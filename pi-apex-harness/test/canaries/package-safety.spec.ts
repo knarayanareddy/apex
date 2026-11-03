@@ -20,6 +20,7 @@ try {
   fs.writeFileSync(path.join(fixture, ".env"), "SYNTHETIC_PACKAGE_SECRET=not-real\n");
   fs.writeFileSync(path.join(fixture, "session.jsonl"), '{"synthetic":true}\n');
   fs.writeFileSync(path.join(fixture, "regular.ts"), "export const safe = true;\n");
+  fs.writeFileSync(path.join(source, "src/native/apex_pty_pid1"), "synthetic-host-binary");
   execFileSync("bash", [path.join(source, "scripts", "package-release.sh"), out]);
   const archive = path.join(out, `pi-apex-v${JSON.parse(fs.readFileSync(path.join(source, "package.json"), "utf8")).version}-personal.tar.gz`);
   const listing = execFileSync("tar", ["-tzf", archive], { encoding: "utf8" });
@@ -27,6 +28,8 @@ try {
   assert.ok(!listing.includes("synthetic-package-fixture/.env"), "Archive must exclude credential fixture");
   assert.ok(!listing.includes("synthetic-package-fixture/session.jsonl"), "Archive must exclude session fixture");
   assert.ok(!listing.includes("src/native/linux_fs_bridge.node"), "Archive must exclude host native binary");
+  assert.ok(listing.includes("src/native/pty_pid1_supervisor.c"), "Archive must include the supervisor source");
+  assert.ok(!listing.includes("src/native/apex_pty_pid1"), "Archive must exclude host supervisor binary");
   const before = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
   const repeat = spawnSync("bash", [path.join(source, "scripts", "package-release.sh"), out]);
   assert.notEqual(repeat.status, 0, "Packaging must refuse to replace an existing version");

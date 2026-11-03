@@ -18,6 +18,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { loadVerifiedGuardrails } from "../../src/core/guardrail-pin.ts";
 import { PtyLeaseManager, type ActivePtySession } from "../../src/ring2/pty-cron-routines.ts";
 import { recordProcessIdentity, type ProcessIdentity } from "../../src/core/process-tree.ts";
@@ -224,9 +226,11 @@ try {
         watchDisabled: false,
         watchHitsDelivered: 0
       },
-      proc: { pid: currentPid } as any,
+      proc: Object.assign(new EventEmitter(), { pid: currentPid }) as any,
       procIdentity: validIdentity,
       isConfined: true, // triggers checkReap loop
+      supervisorControl: new PassThrough(),
+      supervisorReady: true,
       buffer: "",
       leaseTimer: setTimeout(() => {}, 10_000),
       watchPatterns: [],
@@ -238,9 +242,11 @@ try {
     sessionsMap.set(aliveSession.info.id, aliveSession);
 
     const origKill = process.kill;
+    const sentSignals: string[] = [];
     (process as any).kill = (pid: number, signal?: string | number) => {
       if (pid === currentPid) {
         if (signal === "SIGTERM" || signal === "SIGKILL") {
+          sentSignals.push(signal);
           return true; // pretend signal delivered
         }
         if (signal === 0) {
@@ -264,6 +270,7 @@ try {
         "Process remaining alive past SIGKILL deadline must report cleanup_unverified"
       );
       assert.equal(aliveSession.info.cleanupStatus, "unverified");
+      assert.deepEqual(sentSignals, [], "owned control cleanup must not signal a host PID");
       console.log("  [PASS] K4: Stuck/unverified process reported as cleanup_unverified.");
     } finally {
       process.kill = origKill;
@@ -271,13 +278,16 @@ try {
   }
 
   // -------------------------------------------------------------------------
-  // A permission error during the post-signal probe is not evidence of exit.
+  // A failed control-channel close cannot be reported as verified cleanup.
   {
     const identity = recordProcessIdentity(process.pid);
     assert.ok(identity.startTime);
+    const control = new PassThrough();
+    control.end = (() => { throw new Error("synthetic control close failure"); }) as typeof control.end;
     const session = {
       info: { id: "pty_probe_eperm", status: "running" },
-      proc: { pid: process.pid }, procIdentity: identity, isConfined: true
+      proc: Object.assign(new EventEmitter(), { pid: process.pid }), procIdentity: identity, isConfined: true,
+      supervisorControl: control, supervisorReady: true
     } as unknown as ActivePtySession;
     const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
     const originalKill = process.kill;
@@ -298,6 +308,7 @@ try {
       requestCleanupFn(session, "exited", false);
       assert.equal(session.info.status, "cleanup_unverified");
       assert.equal(session.info.cleanupStatus, "unverified");
+      assert.equal(signalled, false, "controlled cleanup must not signal a host PID");
     } finally {
       process.kill = originalKill;
       Object.defineProperty(process, "platform", platformDescriptor);
