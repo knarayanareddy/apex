@@ -10,8 +10,6 @@ jobs:
   batch-k-diagnostic:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    env:
-      TMPDIR: ${{ runner.temp }}/apex-batchk-evidence
     defaults:
       run:
         working-directory: pi-apex-harness
@@ -70,8 +68,10 @@ jobs:
           test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined)" = "$unconfined_before"
       - name: Create isolated diagnostic fixture directory
         run: |
-          test ! -e "$TMPDIR"
-          mkdir -m 700 "$TMPDIR"
+          diagnostic_tmp="$RUNNER_TEMP/apex-batchk-evidence"
+          test ! -e "$diagnostic_tmp"
+          mkdir -m 700 "$diagnostic_tmp"
+          printf 'TMPDIR=%s\n' "$diagnostic_tmp" >> "$GITHUB_ENV"
       - name: Compare inherited pipes under actual bubblewrap
         run: node --experimental-strip-types test/diagnostics/pty-retained-pipes.ts
       - name: Compare bubblewrap monitor exit and sandbox-lifetime EOF
