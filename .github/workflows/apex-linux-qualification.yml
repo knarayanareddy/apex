@@ -1,4 +1,4 @@
-name: DIAGNOSTIC ONLY - cold Chrome for Testing comparison
+name: DIAGNOSTIC ONLY - Chrome for Testing browser suite
 
 on:
   workflow_dispatch:
@@ -12,8 +12,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
-        condition: [control, chrome-for-testing]
-        replicate: [1, 2, 3]
+        condition: [chrome-for-testing]
+        replicate: [1]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 8
     defaults:
@@ -80,31 +80,16 @@ jobs:
           mkdir -m 700 "$dir"
           unzip -qq "$archive" -d "$dir"
           test -x "$dir/chrome-linux64/chrome"
-      - name: Create owned diagnostic launcher without reading browser
-        run: |
-          set -euo pipefail
-          dir="$RUNNER_TEMP/apex-stage"
-          test ! -e "$dir" && test ! -L "$dir"
-          mkdir -m 700 "$dir"
-          if [[ '${{ matrix.condition }}' == 'chrome-for-testing' ]]; then
-            printf '#!/bin/sh\nexec %q "$@"\n' "$RUNNER_TEMP/apex-cft/chrome-linux64/chrome" > "$dir/chrome"
-          else
-            printf '%s\n' '#!/bin/sh' 'exec /usr/bin/chromium "$@"' > "$dir/chrome"
-          fi
-          chmod 700 "$dir/chrome"
-          bash -n "$dir/chrome"
-      - name: One observation - not qualification
+      - name: Full browser suite once - diagnostic only
         id: observe
         env:
-          APEX_COMPARE_REQUIRE_SUCCESS: '1'
-          APEX_COMPARE_TIMEOUT_MS: '60000'
+          PI_APEX_REQUIRE_BROWSER: '1'
+          PI_APEX_CHROMIUM_BIN: ${{ runner.temp }}/apex-cft/chrome-linux64/chrome
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -euo pipefail
-          if [[ '${{ matrix.condition }}' == 'chrome-for-testing' ]]; then
-            python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/cft_cold.py" 2>&1 | tee "$RUNNER_TEMP/apex-cft-cold.log"
-          fi
-          python3 "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/test/ring7/trace_browser_ci.py" --compare-staged 2>&1 | tee "$RUNNER_TEMP/apex-browser-observation.log"
+          python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/cft_cold.py" 2>&1 | tee "$RUNNER_TEMP/apex-cft-cold.log"
+          python3 "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/test/ring7/trace_browser_ci.py" 2>&1 | tee "$RUNNER_TEMP/apex-browser-observation.log"
       - name: Preserve diagnostic output
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
