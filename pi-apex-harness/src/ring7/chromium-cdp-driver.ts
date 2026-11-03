@@ -45,8 +45,14 @@ const CANDIDATE_CHROMIUM_BINS = [
 
 export function findLocalChromiumBinary(): string | null {
   const override = process.env["PI_APEX_CHROMIUM_BIN"]?.trim();
-  if (override && fs.existsSync(override)) {
-    return override;
+  if (override) {
+    try {
+      fs.accessSync(override, fs.constants.X_OK);
+      return fs.statSync(override).isFile() ? override : null;
+    } catch {
+      // An explicitly selected browser must never fall back to a different binary.
+      return null;
+    }
   }
   for (const candidate of CANDIDATE_CHROMIUM_BINS) {
     if (candidate.startsWith("/") && fs.existsSync(candidate)) {

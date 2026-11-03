@@ -207,12 +207,39 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 test/ring7/test_trace_browser_ci.py
+      - name: Provision pinned full Chrome for Testing on disposable runner
+        id: cft
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' }}
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/.github/diagnostics/test_cft_cold.py"
+          archive="$RUNNER_TEMP/apex-cft.zip"
+          dir="$RUNNER_TEMP/apex-cft"
+          test ! -e "$archive" && test ! -L "$archive"
+          test ! -e "$dir" && test ! -L "$dir"
+          curl -fLsS --proto '=https' --tlsv1.2 --max-time 180 \
+            'https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.80/linux64/chrome-linux64.zip?generation=1793228525740273' \
+            -o "$archive"
+          test "$(stat -c %s "$archive")" = 201329937
+          printf '%s  %s\n' b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7 "$archive" | sha256sum -c -
+          python3 "$GITHUB_WORKSPACE/.github/diagnostics/cft_cold.py" --check-archive "$archive"
+          mkdir -m 700 "$dir"
+          unzip -qq "$archive" -d "$dir"
+          test -x "$dir/chrome-linux64/chrome"
       - name: Browser qualification after Linux gates
         id: browser_qualification
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' && steps.native.outcome == 'success' && steps.cft.outcome == 'success' }}
         env:
           PI_APEX_REQUIRE_BROWSER: '1'
+          PI_APEX_CHROMIUM_BIN: ${{ runner.temp }}/apex-cft/chrome-linux64/chrome
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python3 test/ring7/trace_browser_ci.py
+        run: |
+          set -euo pipefail
+          # Confirm the downloaded, owned browser is cold; do not launch or prewarm it.
+          python3 "$GITHUB_WORKSPACE/.github/diagnostics/cft_cold.py"
+          python3 test/ring7/trace_browser_ci.py
       - name: Compare installed browser binaries (diagnostic only)
         if: ${{ !cancelled() && steps.browser_qualification.outcome == 'failure' }}
         run: node --experimental-strip-types test/ring7/compare-browser-binaries.ts

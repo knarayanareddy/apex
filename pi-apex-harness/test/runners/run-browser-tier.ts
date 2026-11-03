@@ -18,10 +18,10 @@ console.log("=== Browser Qualification Tier (Programme E3) ===");
 
 const executable = findLocalChromiumBinary();
 if (!executable) {
-  const isStrict = process.env["PI_APEX_REQUIRE_BROWSER"] === "1";
+  const isStrict = process.env["PI_APEX_REQUIRE_BROWSER"] === "1" || Boolean(process.env["PI_APEX_CHROMIUM_BIN"]?.trim());
   if (isStrict) {
     console.error(`[TIER: BROWSER] FAILED: Chromium executable not found in standard paths.`);
-    console.error("Install chromium or google-chrome, or set CHROME_BIN / CHROMIUM_PATH.");
+    console.error("Install chromium or google-chrome, or set PI_APEX_CHROMIUM_BIN to an executable browser path.");
     process.exit(1);
   } else {
     console.log(`[TIER: BROWSER] Status: SKIPPED (CHROMIUM_NOT_FOUND)`);

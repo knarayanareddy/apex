@@ -10,6 +10,18 @@ Welcome to **Pi-Apex (`v4.1.0`, Rings 0–11 Streaming Studio with speech, multi
 - **Node.js `>= 22.19.0`** (uses built-in `node:sqlite` WAL + FTS5, built-in `WebSocket` for Chromium CDP, and native `.ts` type-stripping)
 - **`gcc`** + standard C headers (`build-essential`), **`git >= 2.38`**, **`bubblewrap` (`bwrap >= 0.8`)**, and **`chromium` + `xvfb`** (for live Headless Chromium CDP `@e1` ARIA snapshots & screenshots)
 
+### Optional full Chrome for Testing browser
+
+For browser automation or qualification, `PI_APEX_CHROMIUM_BIN` may point to an independently installed full [Chrome for Testing](https://github.com/GoogleChromeLabs/chrome-for-testing) executable. For example:
+
+```bash
+PI_APEX_CHROMIUM_BIN=/absolute/path/to/chrome-linux64/chrome PI_APEX_REQUIRE_BROWSER=1 npm run test:browser
+```
+
+An invalid explicit path fails closed rather than silently selecting another browser. Without the variable, existing Chromium/Chrome discovery is unchanged. This does not repair startup timeouts in system Chromium; its 12-second endpoint deadline still applies.
+
+The Ubuntu CI browser lane uses full Chrome for Testing `156.0.8078.80`, pins the download and verifies the test-owned browser files are cold before the unchanged browser tests. Chrome for Testing does not auto-update: update the pinned version and digest and rerun both Linux gates when security updates are needed. Treat the digest as a repository pin, not a publisher signature. The browser driver currently launches with `--no-sandbox`; use only trusted test content and do not treat this option as browser confinement.
+
 ```bash
 # Debian / Ubuntu / Pop!_OS:
 sudo apt-get update && sudo apt-get install -y build-essential git bubblewrap chromium xvfb
