@@ -17,6 +17,7 @@ const ws = fs.mkdtempSync(path.join(os.tmpdir(), "apex-pty-owned-regression-"));
 const guardrails = loadVerifiedGuardrails().config;
 let passed = false;
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 try {
   for (const mode of ["immediate", "started"] as const) {
     for (let i = 0; i < 8; i++) {
@@ -42,6 +43,35 @@ try {
       manager.dispose();
       console.log("PTY_OWNED_REGRESSION", JSON.stringify({ mode, iteration: i + 1, marker: false, status: poll.status }));
     }
+  }
+  // The untrusted payload must not inherit or reopen the supervisor control fd.
+  {
+    const manager = new PtyLeaseManager({ workspaceRoot: ws, guardrails });
+    const script = [
+      "import os",
+      "try:",
+      " os.fstat(3); print('PAYLOAD_CONTROL_EXPOSED')",
+      "except OSError:",
+      " print('PAYLOAD_CONTROL_CLOSED')",
+      "try:",
+      " fd=os.open('/proc/1/fd/3',os.O_RDONLY); os.close(fd); print('SUPERVISOR_CONTROL_EXPOSED')",
+      "except OSError:",
+      " print('SUPERVISOR_CONTROL_DENIED')"
+    ].join("\n");
+    const lease = manager.start({ command: `python3 -c ${quote(script)}`, leaseMs: 10_000 });
+    const session = (manager as any).sessions.get(lease.id);
+    const closed = once(session.proc, "close");
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([closed, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("PTY_CONTROL_ISOLATION_TIMEOUT")), 5000); })]);
+    } finally { if (timer) clearTimeout(timer); }
+    const poll = manager.poll(lease.id);
+    assert.equal(poll.exitCode, 0);
+    assert.ok(poll.replay.includes("PAYLOAD_CONTROL_CLOSED"));
+    assert.ok(poll.replay.includes("SUPERVISOR_CONTROL_DENIED"));
+    assert.ok(!poll.replay.includes("CONTROL_EXPOSED"));
+    manager.dispose();
+    console.log("PTY_SUPERVISOR_CONTROL_ISOLATION: PASS");
   }
   passed = true;
   console.log("Linux PTY production-path cancellation regression: PASS");

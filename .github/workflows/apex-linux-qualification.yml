@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04]
+        os: [ubuntu-22.04, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     defaults:
@@ -148,6 +148,12 @@ jobs:
           bash "$package/scripts/install-personal.sh" --prefix "$prefix"
           test -x "$package/src/native/apex_pty_pid1"
           cd "$package"
+          node --experimental-strip-types --input-type=module -e 'import assert from "node:assert/strict";import {PtyLeaseManager} from "./src/ring2/pty-cron-routines.ts";import {loadVerifiedGuardrails} from "./src/core/guardrail-pin.ts";const m=new PtyLeaseManager({workspaceRoot:process.cwd(),guardrails:loadVerifiedGuardrails().config});assert.throws(()=>m.start({command:"echo MUST_NOT_RUN"}),/supervisor is reachable through the writable workspace/);console.log("PTY supervisor within workspace: DENIED");'
+          mv "$package/src/native/apex_pty_pid1" "$package/src/native/apex_pty_pid1.saved"
+          trap 'mv "$package/src/native/apex_pty_pid1.saved" "$package/src/native/apex_pty_pid1"' EXIT
+          node --experimental-strip-types --input-type=module -e 'import assert from "node:assert/strict";import fs from "node:fs";import path from "node:path";import {PtyLeaseManager} from "./src/ring2/pty-cron-routines.ts";import {loadVerifiedGuardrails} from "./src/core/guardrail-pin.ts";const ws=fs.mkdtempSync(path.join(process.env.TMPDIR,"pty-missing-supervisor-"));const m=new PtyLeaseManager({workspaceRoot:ws,guardrails:loadVerifiedGuardrails().config});assert.throws(()=>m.start({command:"echo MUST_NOT_RUN"}),/SANDBOX_UNAVAILABLE/);console.log("Missing PTY supervisor: DENIED");'
+          mv "$package/src/native/apex_pty_pid1.saved" "$package/src/native/apex_pty_pid1"
+          trap - EXIT
           node --experimental-strip-types test/canaries/linux-pty-owned-regression.spec.ts
       - name: Check synthetic post-cancel effects
         run: node --experimental-strip-types test/diagnostics/pty-cancel-effect.ts
