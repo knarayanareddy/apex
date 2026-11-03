@@ -1,4 +1,4 @@
-name: DIAGNOSTIC ONLY - fresh runner browser comparison
+name: DIAGNOSTIC ONLY - owned disk versus tmpfs pressure
 
 on:
   workflow_dispatch:
@@ -11,8 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
-        binary: [chromium, google-chrome]
+        os: [ubuntu-22.04]
+        condition: [control, disk-pressure, tmpfs-pressure]
         replicate: [1, 2, 3]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 8
@@ -23,6 +23,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: c25d416a5af1b02571f68b4ede02277a1199bdc6
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: diagnostic-source
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -35,10 +40,19 @@ jobs:
         run: npm ci
       - name: Build native bridge
         run: npm run build:native
+      - name: Verify diagnostic observers and bounded writer
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          test ! -e "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/node_modules"
+          ln -s "$GITHUB_WORKSPACE/pi-apex-harness/node_modules" "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/node_modules"
+          python3 "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/test/ring7/test_trace_browser_ci.py"
+          python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/test_browser_io_probe.py"
       - name: Record metadata without launching a browser
         run: |
           set -euo pipefail
-          binary="/usr/bin/${{ matrix.binary }}"
+          binary="/usr/bin/chromium"
           test -x "$binary"
           resolved="$(readlink -f "$binary")"
           printf 'DIAGNOSTIC_METADATA binary=%s resolved=%s\n' "$binary" "$resolved"
@@ -56,15 +70,12 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -o pipefail
-          python3 test/ring7/trace_browser_ci.py --compare "/usr/bin/${{ matrix.binary }}" 2>&1 | tee "$RUNNER_TEMP/apex-browser-observation.log"
-      - name: Record version after observation
-        if: ${{ !cancelled() && steps.observe.outcome != 'skipped' }}
-        run: timeout 8s "/usr/bin/${{ matrix.binary }}" --version || echo 'DIAGNOSTIC_VERSION_UNAVAILABLE'
+          python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/browser_io_probe.py" --condition '${{ matrix.condition }}' --observer "$GITHUB_WORKSPACE/diagnostic-source/pi-apex-harness/test/ring7/trace_browser_ci.py" 2>&1 | tee "$RUNNER_TEMP/apex-browser-observation.log"
       - name: Preserve diagnostic output
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: browser-compare-${{ matrix.os }}-${{ matrix.binary }}-${{ matrix.replicate }}-${{ github.run_id }}
+          name: browser-pressure-${{ matrix.os }}-${{ matrix.condition }}-${{ matrix.replicate }}-${{ github.run_id }}
           path: ${{ runner.temp }}/apex-browser-observation.log
           if-no-files-found: ignore
           retention-days: 7

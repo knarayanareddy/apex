@@ -74,6 +74,45 @@ def classify_fd(target):
     return "file"
 
 
+def classify_execution(syscall_text, maps_text):
+    """Return only a numeric syscall and sanitized mapped-file category/offset."""
+    if not syscall_text or not maps_text:
+        return {"status": "unavailable"}
+    fields = syscall_text.strip().split()
+    if not fields or fields[0] == "running":
+        return {"status": "running"}
+    try:
+        syscall_number = int(fields[0])
+        pc = int(fields[-1], 16)
+    except (ValueError, IndexError):
+        return {"status": "unavailable"}
+    for line in maps_text.splitlines():
+        parts = line.split(None, 5)
+        if len(parts) < 5:
+            continue
+        try:
+            low, high = (int(x, 16) for x in parts[0].split("-", 1))
+            mapped_offset = int(parts[2], 16)
+        except (ValueError, IndexError):
+            continue
+        if not low <= pc < high:
+            continue
+        name = parts[5] if len(parts) == 6 else ""
+        if name.startswith("/usr/local/share/chromium/") and os.path.basename(name) == "chrome":
+            kind = "chromium_executable"
+        elif name == "/opt/google/chrome/chrome":
+            kind = "google_chrome_executable"
+        elif name.startswith(("/usr/lib/", "/lib/", "/lib64/")):
+            kind = "system_library"
+        elif not name or name.startswith("["):
+            kind = "anonymous"
+        else:
+            kind = "other_file"
+        return {"status": "mapped", "syscall": syscall_number, "kind": kind,
+                "file_offset": mapped_offset + pc - low}
+    return {"status": "unmapped", "syscall": syscall_number}
+
+
 def read_text(path):
     try:
         return path.read_text(encoding="utf8", errors="replace")
@@ -139,6 +178,7 @@ def sample_owned_tree(root_pid, proc=Path("/proc")):
         wait = re.sub(r"[^a-zA-Z0-9_.-]", "_", wait.strip())[:64] if wait else "unavailable"
         io_text = read_text(root / "io")
         io = parse_io_counters(io_text) if io_text is not None else None
+        execution = classify_execution(read_text(root / "syscall"), read_text(root / "maps"))
         fds = {}
         for number in (1, 2):
             try:
@@ -153,7 +193,7 @@ def sample_owned_tree(root_pid, proc=Path("/proc")):
             "pid": pid, "ppid": initial[pid][0], "state": initial[pid][1],
             "start_ticks": initial[pid][2], "cpu_ticks": initial[pid][3],
             "major_faults": initial[pid][4], "io": io, "wait_channel": wait, "fds": fds,
-            "active_port_file": active
+            "active_port_file": active, "execution": execution
         })
     return {"available": True, "owned_process_count": len(owned), "browsers": browsers[:40]}
 

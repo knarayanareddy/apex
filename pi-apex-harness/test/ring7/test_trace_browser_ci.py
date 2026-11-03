@@ -76,6 +76,17 @@ class BrowserTraceTests(unittest.TestCase):
         self.assertEqual(classify_fd("socket:[456]"), "socket")
         self.assertEqual(classify_fd("/home/private/.ssh/id_ed25519"), "file")
 
+    def test_execution_classification_never_exposes_private_paths_or_addresses(self):
+        maps = "1000-2000 r-xp 00003000 00:01 7 /usr/local/share/chromium/chrome-linux/chrome\n"
+        self.assertEqual(trace.classify_execution("-1 0x9000 0x1002", maps),
+                         {"status": "mapped", "syscall": -1, "kind": "chromium_executable", "file_offset": 0x3002})
+        private = "1000-2000 r-xp 00000000 00:01 7 /home/private/secret-file\n"
+        encoded = json.dumps(trace.classify_execution("0 0x9000 0x1002", private))
+        self.assertNotIn("secret-file", encoded)
+        self.assertNotIn("0x1002", encoded)
+        self.assertEqual(trace.classify_execution("running", maps), {"status": "running"})
+        self.assertEqual(trace.classify_execution("bad", maps), {"status": "unavailable"})
+
     def test_snapshot_is_owned_and_does_not_emit_arguments(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
