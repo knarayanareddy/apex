@@ -1,4 +1,4 @@
-name: DIAGNOSTIC ONLY - fresh runner browser binaries
+name: DIAGNOSTIC ONLY - Chromium profile filesystem study
 
 on:
   workflow_dispatch:
@@ -11,9 +11,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
-        binary: [chromium, google-chrome]
-        replicate: [1, 2]
+        os: [ubuntu-22.04]
+        condition: [disk, tmpfs]
+        replicate: [1, 2, 3]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 8
     defaults:
@@ -38,14 +38,31 @@ jobs:
       - name: Record metadata without launching a browser
         run: |
           set -euo pipefail
-          binary="/usr/bin/${{ matrix.binary }}"
+          binary="/usr/bin/chromium"
           test -x "$binary"
           resolved="$(readlink -f "$binary")"
           printf 'DIAGNOSTIC_METADATA binary=%s resolved=%s\n' "$binary" "$resolved"
           stat -Lc 'size=%s dev=%d inode=%i' "$resolved"
+          if test -f /opt/google/chrome/chrome; then stat -Lc 'chrome_elf_size=%s dev=%d inode=%i' /opt/google/chrome/chrome; fi
+          readelf -W -S "$resolved" | grep -E '\.debug_|\.symtab|\.dynsym' || true
           uname -sr
           df -T "$resolved" "$RUNNER_TEMP"
           cat /proc/pressure/io
+          cat /proc/pressure/cpu
+      - name: Select owned profile filesystem
+        run: |
+          set -euo pipefail
+          if [[ '${{ matrix.condition }}' == 'tmpfs' ]]; then
+            base=/dev/shm
+            test "$(stat -f -c %T "$base")" = tmpfs
+          else
+            base="$RUNNER_TEMP"
+            test "$(stat -f -c %T "$base")" != tmpfs
+          fi
+          profile_tmp="$(mktemp -d "$base/apex-profile-study-XXXXXX")"
+          chmod 700 "$profile_tmp"
+          printf 'DIAGNOSTIC_PROFILE condition=%s fs=%s\n' '${{ matrix.condition }}' "$(stat -f -c %T "$profile_tmp")"
+          printf 'TMPDIR=%s\n' "$profile_tmp" >> "$GITHUB_ENV"
       - name: One cold-start observation - not qualification
         id: observe
         env:
@@ -54,12 +71,12 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -o pipefail
-          python3 test/ring7/trace_browser_ci.py --compare "/usr/bin/${{ matrix.binary }}" 2>&1 | tee "$RUNNER_TEMP/apex-browser-observation.log"
+          python3 test/ring7/trace_browser_ci.py --compare /usr/bin/chromium 2>&1 | tee "$RUNNER_TEMP/apex-browser-observation.log"
       - name: Preserve diagnostic output
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: browser-cold-${{ matrix.os }}-${{ matrix.binary }}-${{ matrix.replicate }}-${{ github.run_id }}
+          name: browser-profile-${{ matrix.os }}-${{ matrix.condition }}-${{ matrix.replicate }}-${{ github.run_id }}
           path: ${{ runner.temp }}/apex-browser-observation.log
           if-no-files-found: ignore
           retention-days: 7
