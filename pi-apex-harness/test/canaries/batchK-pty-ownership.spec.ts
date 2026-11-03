@@ -434,7 +434,19 @@ const exitWatchdog = setTimeout(() => {
   }
   const ss = spawnSync("ss", ["-xapn"], { encoding: "utf8", timeout: 1500 });
   const socketRows = (ss.stdout ?? "").split("\n").filter((line) => Array.from(socketInodes).some((inode) => new RegExp(`\\b${inode}\\b`).test(line)));
-  console.error("BATCH_K_EXIT_TIMEOUT", JSON.stringify({ resources: process.getActiveResourcesInfo(), handles, referencedLibuv, sessions, socketInodes: Array.from(socketInodes), socketRows, ssError: ss.error?.message }));
+  const peerPids = new Set<number>();
+  for (const row of socketRows) for (const match of row.matchAll(/pid=(\d+)/g)) {
+    const pid = Number(match[1]);
+    if (pid !== process.pid) peerPids.add(pid);
+  }
+  const peers = Array.from(peerPids, (pid) => {
+    try {
+      const status = fs.readFileSync(`/proc/${pid}/status`, "utf8").split("\n").filter((line) => /^(Name|State|PPid|NSpid|Uid):/.test(line));
+      const wchan = fs.readFileSync(`/proc/${pid}/wchan`, "utf8").trim();
+      return { pid, status, wchan };
+    } catch (error) { return { pid, error: String(error) }; }
+  });
+  console.error("BATCH_K_EXIT_TIMEOUT", JSON.stringify({ resources: process.getActiveResourcesInfo(), handles, referencedLibuv, sessions, socketInodes: Array.from(socketInodes), socketRows, peers, ssError: ss.error?.message }));
   throw new Error("BATCH_K_EXIT_TIMEOUT: test assertions finished but the process did not exit");
 }, 15_000);
 exitWatchdog.unref();
