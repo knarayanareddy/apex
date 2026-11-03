@@ -84,8 +84,33 @@ jobs:
         run: PID1_CANDIDATE="$TMPDIR/pid1-candidate" node --experimental-strip-types test/diagnostics/pty-pid1-parent-test.ts
       - name: Observe detached and reparented child teardown
         run: PID1_CANDIDATE="$TMPDIR/pid1-candidate" node --experimental-strip-types test/diagnostics/pty-pid1-detached-test.ts
+      - name: Observe detached children through production PTY manager
+        run: APEX_DIAG_PTY_PRODUCTION=1 PID1_CANDIDATE="$TMPDIR/pid1-candidate" node --experimental-strip-types test/diagnostics/pty-pid1-detached-test.ts
       - name: Exercise production-path PTY regression
         run: node --experimental-strip-types test/canaries/linux-pty-owned-regression.spec.ts
+      - name: Observe parent death through production PTY manager
+        run: node --experimental-strip-types test/diagnostics/pty-manager-parent-test.ts
+      - name: Verify Ring 2 user flows
+        run: npm run test:ring2
+      - name: Verify installed artifact executes supervised PTY
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/apex-pty-release-output"
+          extracted="$RUNNER_TEMP/apex-pty-release-extracted"
+          prefix="$RUNNER_TEMP/apex-pty-release-prefix"
+          test ! -e "$out" && test ! -e "$extracted" && test ! -e "$prefix"
+          bash scripts/package-release.sh "$out"
+          archive="$(find "$out" -maxdepth 1 -name '*.tar.gz' -type f -print)"
+          test -n "$archive"
+          mkdir -m 700 "$extracted"
+          tar -xzf "$archive" -C "$extracted"
+          package="$extracted/pi-apex-harness"
+          test -f "$package/src/native/pty_pid1_supervisor.c"
+          test ! -e "$package/src/native/apex_pty_pid1"
+          bash "$package/scripts/install-personal.sh" --prefix "$prefix"
+          test -x "$package/src/native/apex_pty_pid1"
+          cd "$package"
+          node --experimental-strip-types test/canaries/linux-pty-owned-regression.spec.ts
       - name: Check synthetic post-cancel effects
         run: node --experimental-strip-types test/diagnostics/pty-cancel-effect.ts
       - name: Reproduce security canary sequence - diagnostic only
@@ -112,5 +137,6 @@ jobs:
             ${{ runner.temp }}/apex-batchk-evidence/apex-pid1-parent-*
             ${{ runner.temp }}/apex-batchk-evidence/apex-pid1-detached-*
             ${{ runner.temp }}/apex-batchk-evidence/apex-pty-owned-regression-*
+            ${{ runner.temp }}/apex-batchk-evidence/apex-pty-manager-parent-*
           if-no-files-found: ignore
           retention-days: 7

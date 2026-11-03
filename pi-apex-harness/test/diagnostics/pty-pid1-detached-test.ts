@@ -1,15 +1,18 @@
 /** Diagnostic only: verify detached and reparented children by SO_PEERCRED. */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Duplex } from "node:stream";
 import { buildMinimalBwrapArgv } from "../../src/core/bwrap-sandbox.ts";
+import { loadVerifiedGuardrails } from "../../src/core/guardrail-pin.ts";
+import { PtyLeaseManager } from "../../src/ring2/pty-cron-routines.ts";
 
 const binary = process.env.PID1_CANDIDATE;
 if (!binary || !fs.existsSync(binary)) throw new Error("PID1_CANDIDATE binary missing");
+const production = process.env.APEX_DIAG_PTY_PRODUCTION === "1";
 const base = fs.mkdtempSync(path.join(os.tmpdir(), "apex-pid1-detached-"));
 const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -63,14 +66,24 @@ try {
     }
     const script = path.join(ws, "child.py");
     fs.writeFileSync(script, lines.join("\n") + "\n");
-    const args = buildMinimalBwrapArgv(`exec python3 ${quote(script)}`, ws, { workspaceRoot: ws, mode: "workspace-write" });
-    const deathOption = args.indexOf("--die-with-parent");
-    assert.ok(deathOption >= 0);
-    args.splice(deathOption, 1);
-    args.splice(args.lastIndexOf("--"), 0, "--as-pid-1", "--sync-fd", "3", "--ro-bind", binary, "/apex-pid1-candidate");
-    const commandIndex = args.lastIndexOf("--") + 1;
-    args.splice(commandIndex, args.length - commandIndex, "/apex-pid1-candidate", "/bin/bash", "-c", `exec python3 ${quote(script)}`);
-    const child = spawn("bwrap", args, { cwd: ws, env: {}, stdio: ["ignore", "pipe", "pipe", "pipe"] });
+    let child: ChildProcess;
+    let leaseId: string | undefined;
+    let manager: PtyLeaseManager | undefined;
+    if (production) {
+      manager = new PtyLeaseManager({ workspaceRoot: ws, guardrails: loadVerifiedGuardrails().config });
+      const lease = manager.start({ command: `exec python3 ${quote(script)}`, leaseMs: 10_000 });
+      leaseId = lease.id;
+      child = (manager as any).sessions.get(lease.id).proc as ChildProcess;
+    } else {
+      const args = buildMinimalBwrapArgv(`exec python3 ${quote(script)}`, ws, { workspaceRoot: ws, mode: "workspace-write" });
+      const deathOption = args.indexOf("--die-with-parent");
+      assert.ok(deathOption >= 0);
+      args.splice(deathOption, 1);
+      args.splice(args.lastIndexOf("--"), 0, "--as-pid-1", "--sync-fd", "3", "--ro-bind", binary, "/apex-pid1-candidate");
+      const commandIndex = args.lastIndexOf("--") + 1;
+      args.splice(commandIndex, args.length - commandIndex, "/apex-pid1-candidate", "/bin/bash", "-c", `exec python3 ${quote(script)}`);
+      child = spawn("bwrap", args, { cwd: ws, env: {}, stdio: ["ignore", "pipe", "pipe", "pipe"] });
+    }
     const ctl = child.stdio[3];
     assert.ok(ctl instanceof Duplex);
     let controlData = "";
@@ -79,8 +92,10 @@ try {
     child.stdout!.resume();
     child.stderr!.on("data", (chunk: Buffer) => { errors += chunk.toString(); });
     const closed = once(child, "close");
-    assert.ok(await until(() => controlData.includes("R"), 5000), `candidate not ready: ${errors}`);
-    ctl.write("S");
+    if (!production) {
+      assert.ok(await until(() => controlData.includes("R"), 5000), `candidate not ready: ${errors}`);
+      ctl.write("S");
+    }
     assert.ok(await until(() => fs.existsSync(identityFile) && fs.existsSync(childReady), 5000), `detached child not ready: ${errors} ${serverError}`);
     const identity = JSON.parse(fs.readFileSync(identityFile, "utf8")) as { pid: number; start: string; session: number; nspid: number[]; namespace: string };
     assert.ok(identity.nspid.length >= 2 && identity.nspid.at(-1)! > 1);
@@ -98,16 +113,22 @@ try {
     };
     if (mode === "cancel-detached") {
       assert.ok(alive(), "detached child must be alive before control EOF");
-      ctl.end();
+      if (manager && leaseId) manager.stop(leaseId);
+      else ctl.end();
     }
     let timer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([closed, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`candidate did not close: ${mode}`)), 5000); })]);
     } finally { if (timer) clearTimeout(timer); }
     assert.ok(await until(() => !alive(), 2000), `detached child survived ${mode}`);
+    if (manager && leaseId && mode === "cancel-detached") {
+      assert.equal(manager.poll(leaseId).status, "exited");
+      assert.equal(manager.poll(leaseId).cleanupStatus, "snapshot_cleared");
+    }
     assert.equal(fs.existsSync(marker), false);
     assert.equal((await serverClosed)[0], 0);
-    console.log("PID1_DETACHED_CONTROL", JSON.stringify({ mode, killed: !alive(), marker: false }));
+    manager?.dispose();
+    console.log(production ? "PTY_MANAGER_DETACHED_CONTROL" : "PID1_DETACHED_CONTROL", JSON.stringify({ mode, killed: !alive(), marker: false }));
   }
   passed = true;
 } finally {
