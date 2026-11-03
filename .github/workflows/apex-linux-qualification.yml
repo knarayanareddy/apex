@@ -80,6 +80,8 @@ jobs:
         run: |
           cc -std=c99 -O2 -Wall -Wextra -Werror test/diagnostics/pty-pid1-candidate.c -o "$TMPDIR/pid1-candidate"
           PID1_CANDIDATE="$TMPDIR/pid1-candidate" node --experimental-strip-types test/diagnostics/pty-pid1-candidate.ts
+      - name: Observe candidate parent-death handling
+        run: PID1_CANDIDATE="$TMPDIR/pid1-candidate" node --experimental-strip-types test/diagnostics/pty-pid1-parent-test.ts
       - name: Check synthetic post-cancel effects
         run: node --experimental-strip-types test/diagnostics/pty-cancel-effect.ts
       - name: Reproduce security canary sequence - diagnostic only
@@ -103,5 +105,6 @@ jobs:
             ${{ runner.temp }}/apex-batchk-evidence/apex-bwrap-sync-control-*
             ${{ runner.temp }}/apex-batchk-evidence/apex-pty-pipe-control-*
             ${{ runner.temp }}/apex-batchk-evidence/apex-pid1-candidate-*
+            ${{ runner.temp }}/apex-batchk-evidence/apex-pid1-parent-*
           if-no-files-found: ignore
           retention-days: 7

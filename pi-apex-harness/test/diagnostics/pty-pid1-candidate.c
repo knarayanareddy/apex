@@ -20,6 +20,12 @@ static int read_control(char *value) {
 
 int main(int argc, char **argv) {
   if (argc < 2 || getpid() != 1) return 90;
+  const char *witness = getenv("APEX_DIAG_READY_PATH");
+  if (witness) {
+    FILE *file = fopen(witness, "w");
+    if (!file) return 99;
+    if (fputs("pid1-ready\n", file) < 0 || fclose(file) != 0) return 99;
+  }
   signal(SIGPIPE, SIG_IGN);
   if (write(3, "R", 1) != 1) return 91;
   char command;
