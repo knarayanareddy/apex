@@ -1,4 +1,4 @@
-name: DIAGNOSTIC ONLY - Apex Batch K hang
+name: DIAGNOSTIC ONLY - exact Apex PTY commit
 
 on:
   workflow_dispatch:
@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          ref: c25d416a5af1b02571f68b4ede02277a1199bdc6
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 26.10.0
@@ -28,8 +29,14 @@ jobs:
           cache-dependency-path: pi-apex-harness/package-lock.json
       - name: Install locked dependencies
         run: npm ci
+      - name: Verify exact checked-out commit
+        run: test "$(git rev-parse HEAD)" = c25d416a5af1b02571f68b4ede02277a1199bdc6
       - name: Build native bridge
         run: npm run build:native
+      - name: Typecheck and JavaScript inventory
+        run: |
+          npm run typecheck
+          npm run check:js
       - name: Provision Ubuntu bubblewrap on disposable runner
         run: |
           set -euo pipefail
@@ -110,55 +117,12 @@ jobs:
           test ! -e "$diagnostic_tmp"
           mkdir -m 700 "$diagnostic_tmp"
           printf 'TMPDIR=%s\n' "$diagnostic_tmp" >> "$GITHUB_ENV"
-      - name: Verify Ring 2 user flows
-        run: npm run test:ring2
-      - name: Compare inherited pipes under actual bubblewrap
-        run: node --experimental-strip-types test/diagnostics/pty-retained-pipes.ts
-      - name: Compare bubblewrap monitor exit and sandbox-lifetime EOF
-        run: node --experimental-strip-types test/diagnostics/bwrap-sync-fd-probe.ts
-      - name: Exercise diagnostic PID1 control candidate
-        run: |
-          cc -std=c99 -O2 -Wall -Wextra -Werror test/diagnostics/pty-pid1-candidate.c -o "$TMPDIR/pid1-candidate"
-          PID1_CANDIDATE="$TMPDIR/pid1-candidate" node --experimental-strip-types test/diagnostics/pty-pid1-candidate.ts
-      - name: Observe candidate parent-death handling
-        run: PID1_CANDIDATE="$TMPDIR/pid1-candidate" node --experimental-strip-types test/diagnostics/pty-pid1-parent-test.ts
-      - name: Observe detached and reparented child teardown
-        run: PID1_CANDIDATE="$TMPDIR/pid1-candidate" node --experimental-strip-types test/diagnostics/pty-pid1-detached-test.ts
-      - name: Observe detached children through production PTY manager
-        run: APEX_DIAG_PTY_PRODUCTION=1 PID1_CANDIDATE="$TMPDIR/pid1-candidate" node --experimental-strip-types test/diagnostics/pty-pid1-detached-test.ts
-      - name: Exercise production-path PTY regression
-        run: node --experimental-strip-types test/canaries/linux-pty-owned-regression.spec.ts
-      - name: Observe parent death through production PTY manager
-        run: node --experimental-strip-types test/diagnostics/pty-manager-parent-test.ts
-      - name: Verify installed artifact executes supervised PTY
-        run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/apex-pty-release-output"
-          extracted="$RUNNER_TEMP/apex-pty-release-extracted"
-          prefix="$RUNNER_TEMP/apex-pty-release-prefix"
-          test ! -e "$out" && test ! -e "$extracted" && test ! -e "$prefix"
-          bash scripts/package-release.sh "$out"
-          archive="$(find "$out" -maxdepth 1 -name '*.tar.gz' -type f -print)"
-          test -n "$archive"
-          mkdir -m 700 "$extracted"
-          tar -xzf "$archive" -C "$extracted"
-          package="$extracted/pi-apex-harness"
-          test -f "$package/src/native/pty_pid1_supervisor.c"
-          test ! -e "$package/src/native/apex_pty_pid1"
-          bash "$package/scripts/install-personal.sh" --prefix "$prefix"
-          test -x "$package/src/native/apex_pty_pid1"
-          cd "$package"
-          node --experimental-strip-types --input-type=module -e 'import assert from "node:assert/strict";import {PtyLeaseManager} from "./src/ring2/pty-cron-routines.ts";import {loadVerifiedGuardrails} from "./src/core/guardrail-pin.ts";const m=new PtyLeaseManager({workspaceRoot:process.cwd(),guardrails:loadVerifiedGuardrails().config});assert.throws(()=>m.start({command:"echo MUST_NOT_RUN"}),/supervisor is reachable through the writable workspace/);console.log("PTY supervisor within workspace: DENIED");'
-          mv "$package/src/native/apex_pty_pid1" "$package/src/native/apex_pty_pid1.saved"
-          trap 'mv "$package/src/native/apex_pty_pid1.saved" "$package/src/native/apex_pty_pid1"' EXIT
-          node --experimental-strip-types --input-type=module -e 'import assert from "node:assert/strict";import fs from "node:fs";import path from "node:path";import {PtyLeaseManager} from "./src/ring2/pty-cron-routines.ts";import {loadVerifiedGuardrails} from "./src/core/guardrail-pin.ts";const ws=fs.mkdtempSync(path.join(process.env.TMPDIR,"pty-missing-supervisor-"));const m=new PtyLeaseManager({workspaceRoot:ws,guardrails:loadVerifiedGuardrails().config});assert.throws(()=>m.start({command:"echo MUST_NOT_RUN"}),/SANDBOX_UNAVAILABLE/);console.log("Missing PTY supervisor: DENIED");'
-          mv "$package/src/native/apex_pty_pid1.saved" "$package/src/native/apex_pty_pid1"
-          trap - EXIT
-          node --experimental-strip-types test/canaries/linux-pty-owned-regression.spec.ts
-      - name: Check synthetic post-cancel effects
-        run: node --experimental-strip-types test/diagnostics/pty-cancel-effect.ts
-      - name: Reproduce security canary sequence - diagnostic only
+      - name: Run exact-commit security canaries
         run: npm run test:canaries
+      - name: Run exact-commit Linux ownership and installed-artifact gates
+        run: npm run test:linux
+      - name: Verify exact-commit Ring 2 user flows
+        run: npm run test:ring2
       - name: Stress Batch K only - not release qualification
         run: |
           set -euo pipefail
@@ -182,5 +146,7 @@ jobs:
             ${{ runner.temp }}/apex-batchk-evidence/apex-pid1-detached-*
             ${{ runner.temp }}/apex-batchk-evidence/apex-pty-owned-regression-*
             ${{ runner.temp }}/apex-batchk-evidence/apex-pty-manager-parent-*
+            ${{ runner.temp }}/apex-batchk-evidence/apex-pty-detached-*
+            ${{ runner.temp }}/apex-batchk-evidence/apex-pty-package-*
           if-no-files-found: ignore
           retention-days: 7
