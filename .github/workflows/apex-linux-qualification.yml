@@ -90,8 +90,6 @@ jobs:
         run: node --experimental-strip-types test/canaries/linux-pty-owned-regression.spec.ts
       - name: Observe parent death through production PTY manager
         run: node --experimental-strip-types test/diagnostics/pty-manager-parent-test.ts
-      - name: Verify Ring 2 user flows
-        run: npm run test:ring2
       - name: Verify installed artifact executes supervised PTY
         run: |
           set -euo pipefail
@@ -123,6 +121,8 @@ jobs:
             npm run test:batchK
           done
           printf 'DIAGNOSTIC_ONLY 20 Batch K processes exited normally; browser and release gates NOT run.\n'
+      - name: Verify Ring 2 user flows
+        run: npm run test:ring2
       - name: Preserve diagnostic fixtures on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

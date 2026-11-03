@@ -466,6 +466,7 @@ async function runRing2Suite(): Promise<void> {
         command: `${tscBin} --noEmit --pretty false --strict "${brokenPath}"`,
         maxAttempts: 2,
         onFailureAutofix: async (failedAttempt) => {
+          if (failedAttempt.diagnostics.length === 0) console.error("RING2_DIAGNOSTIC_MISSING", JSON.stringify({ exitCode: failedAttempt.exitCode, stdout: failedAttempt.stdout, stderr: failedAttempt.stderr }));
           assert.ok(failedAttempt.diagnostics.length >= 1, "Must parse structured file(line,col) diagnostic!");
           assert.equal(failedAttempt.diagnostics[0].line, 1);
           fs.writeFileSync(
