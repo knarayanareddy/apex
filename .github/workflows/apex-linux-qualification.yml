@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04]
+        os: [ubuntu-22.04, ubuntu-24.04]
         condition: [control, chrome-for-testing]
         replicate: [1, 2, 3]
     runs-on: ${{ matrix.os }}
@@ -75,7 +75,7 @@ jobs:
             -o "$archive"
           test "$(stat -c %s "$archive")" = 201329937
           printf '%s  %s\n' 6a158ba7e01da016f1988bae0643d9e5 "$archive" | md5sum -c -
-          sha256sum "$archive"
+          printf '%s  %s\n' b711c720f774be355197f32edf37e0651418ba036d92446ee2da19ac017540a7 "$archive" | sha256sum -c -
           python3 "$GITHUB_WORKSPACE/diagnostic-source/.github/diagnostics/cft_cold.py" --check-archive "$archive"
           mkdir -m 700 "$dir"
           unzip -qq "$archive" -d "$dir"
